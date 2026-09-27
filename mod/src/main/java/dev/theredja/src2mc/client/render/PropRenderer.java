@@ -428,6 +428,12 @@ public final class PropRenderer {
         int baseX = sectionX << 4, baseY = sectionY << 4, baseZ = sectionZ << 4;
         int capacity = (int) Math.min(Integer.MAX_VALUE, Math.max(4096L, (long) triangles.size() * 3 * 36));
         Map<Long, Integer> lightCache = new HashMap<>();
+        // A prop stands among the map's own walls and floors, and now at its exact position its
+        // lower vertices sit inside the block under a floor that lies part-way up that block.
+        // The surfaces' visibility test and open-cell fallback keep it from reading daylight
+        // through that block the way the brightest-neighbour fallback did.
+        SurfaceOcclusion occlusion = MapSurfaceRenderer.occlusionFor(placement,
+            Src2mc.bundles().active().findMap(placement.campaignId(), placement.mapId()).orElse(null));
         try (var bytes = new ByteBufferBuilder(capacity)) {
             // See IrisCompat.setCapturedIds: with a pack in use Iris stamps whatever entity was
             // rendering into every vertex of what is static world geometry.
@@ -435,9 +441,9 @@ public final class PropRenderer {
             try {
                 var builder = new BufferBuilder(bytes, VertexFormat.Mode.TRIANGLES, DefaultVertexFormat.NEW_ENTITY);
                 for (PropTessellator.Triangle triangle : triangles) {
-                    vertex(builder, triangle.a(), baseX, baseY, baseZ, sampleVertexLight(placement, triangle.a(), lightCache));
-                    vertex(builder, triangle.b(), baseX, baseY, baseZ, sampleVertexLight(placement, triangle.b(), lightCache));
-                    vertex(builder, triangle.c(), baseX, baseY, baseZ, sampleVertexLight(placement, triangle.c(), lightCache));
+                    vertex(builder, triangle.a(), baseX, baseY, baseZ, sampleVertexLight(placement, triangle.a(), lightCache, occlusion));
+                    vertex(builder, triangle.b(), baseX, baseY, baseZ, sampleVertexLight(placement, triangle.b(), lightCache, occlusion));
+                    vertex(builder, triangle.c(), baseX, baseY, baseZ, sampleVertexLight(placement, triangle.c(), lightCache, occlusion));
                 }
                 try (var data = builder.buildOrThrow()) {
                     var buffer = new VertexBuffer(VertexBuffer.Usage.STATIC);
@@ -467,7 +473,8 @@ public final class PropRenderer {
      * lighting-independent, so only this upload step changes on a relight. One value for the
      * whole triangle is vanilla's flat lighting, and on a prop-sized mesh it showed every
      * block boundary the prop crossed. */
-    private static int sampleVertexLight(MapPlacement placement, PropTessellator.Vertex vertex, Map<Long, Integer> cache) {
+    private static int sampleVertexLight(MapPlacement placement, PropTessellator.Vertex vertex, Map<Long, Integer> cache,
+                                         SurfaceOcclusion occlusion) {
         float nx = (float) vertex.nx(), ny = (float) vertex.ny(), nz = (float) vertex.nz();
         float length = (float) Math.sqrt(nx * nx + ny * ny + nz * nz);
         if (length > 1.0e-6f) { nx /= length; ny /= length; nz /= length; } else { nx = 0; ny = 1; nz = 0; }
@@ -475,7 +482,7 @@ public final class PropRenderer {
         double worldY = placement.translation().getY() + vertex.y();
         double worldZ = placement.translation().getZ() + vertex.z();
         return MapSurfaceRenderer.smoothLighting()
-            ? LightSampler.smooth(level, worldX, worldY, worldZ, nx, ny, nz, cache)
+            ? LightSampler.smooth(level, worldX, worldY, worldZ, nx, ny, nz, cache, occlusion)
             : LightSampler.sample(level, worldX, worldY, worldZ, nx, ny, nz, cache);
     }
 

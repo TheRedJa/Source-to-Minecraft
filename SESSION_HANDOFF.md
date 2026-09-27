@@ -544,6 +544,22 @@ collision is whole blocks. See `docs/decisions.md` D17 and `docs/format.md` §5.
   corrections are gone from mod export: they fitted props to the snapped grid
   and pushed them off the exact floors (user-reported floating props). The
   `props.snap*` config keys were removed; `settle` still applies to `convert`.
+- Light bleed at wall/floor edges (DEV-0.7.0, awaiting in-game check): smooth
+  light sampled cells behind off-grid and thin walls. `SurfaceOcclusion` drops
+  any neighbour cell the vertex cannot see past the exact surfaces. Toggle:
+  `/src2mc_light_occlusion on|off`; counters are in `/src2mc_render_status`.
+  The first attempt changed nothing. `/src2mc_light_probe` (writes
+  `config/src2mc/light-probe.txt`) showed the real cause: a floor 1/8 block
+  into its block leaves every weighted corner solid, and the brightest-neighbour
+  fallback read sky 14 through the block in a room at sky 0. Surfaces now fall
+  back to visible open corners, then the nearest visible open cell. Props use
+  the same sampler and visibility test.
+- Second bleed case (probe at a wall foot below a displacement floor): the
+  vertex saw sealed air pockets that hollowing leaves inside thick floors, and
+  they held sky 12. The bake only treated fragment-owning blocks as opaque, so
+  daylight seeped through the hidden map mass. The occlusion mask now holds
+  every schematic block plus the thin-brush cells (format §13 semantics
+  widened; binary unchanged).
 - Collision is unchanged (full blocks from the voxel grid). Next step: sub-block
   collision from the same geometry.
 

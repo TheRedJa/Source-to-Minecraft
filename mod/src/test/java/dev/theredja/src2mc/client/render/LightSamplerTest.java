@@ -59,4 +59,20 @@ final class LightSamplerTest {
 
         assertEquals(LightSampler.SOLID, LightSampler.blend(0.5, 0.5, 0.5, cells));
     }
+
+    /**
+     * Probed at the foot of an INFRA wall: a floor an eighth of a block into its block puts every
+     * weighted corner inside solid blocks, and the only open corner -- the dark room -- has weight
+     * zero. The weighted blend has nothing; the open corners still say dark, where the old
+     * brightest-neighbour fallback read daylight from beyond the wall.
+     */
+    @Test
+    void openCornersWithoutWeightStillDecideWhenEveryWeightedOneIsSolid() {
+        int s = LightSampler.SOLID;
+        int[] cells = corners(s, s, s, 0, s, s, s, s);
+
+        assertEquals(LightSampler.SOLID, LightSampler.blend(0.5, 0.5, 0, cells), "corner 3 has no weight at fz = 0");
+        assertEquals(0, LightTexture.sky(LightSampler.averageOpen(cells)));
+        assertEquals(LightSampler.SOLID, LightSampler.averageOpen(corners(s, s, s, s, s, s, s, s)));
+    }
 }
