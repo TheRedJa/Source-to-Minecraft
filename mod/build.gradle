@@ -7,6 +7,16 @@ plugins {
 // VERSION file; the jar name and neoforge.mods.toml are stamped from it.
 ext.mod_version = rootProject.file('../VERSION').text.trim()
 
+// FML refuses to load a mod whose version does not start with a digit
+// (ModInfo.VALID_VERSION, `^\d+.*`), so `DEV-0.6.0` is written into
+// neoforge.mods.toml as `0.6.0-DEV`: the same version, stage moved to the end.
+ext.mod_loader_version = { String version ->
+    def staged = version =~ /^([A-Z]+)-(\d.*)$/
+    def result = staged.matches() ? "${staged.group(2)}-${staged.group(1)}" : version
+    if (!(result ==~ /^\d+.*/)) throw new GradleException("VERSION `${version}` has no form NeoForge will load")
+    result
+}(mod_version)
+
 group = mod_group_id
 version = mod_version
 
@@ -57,7 +67,7 @@ tasks.withType(ProcessResources).configureEach {
         mod_id                 : mod_id,
         mod_name               : mod_name,
         mod_license            : mod_license,
-        mod_version            : mod_version,
+        mod_version            : mod_loader_version,
     ]
 
     inputs.properties(properties)
