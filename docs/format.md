@@ -371,24 +371,24 @@ missing tree, or any other unresolved lookup renders without rejection.
 ## 13. Light-occlusion mask
 
 `maps/<map-id>/occlusion.s2occl` optionally records the map-local cells that
-block light while holding no block. Map metadata references it through the
-optional `occlusion` field, which sits between `pvs` and `diagnostics`; a map
-that draws no brush as geometry omits both, and readers must then take the
-world's light exactly as vanilla computes it.
+stop daylight. Map metadata references it through the optional `occlusion`
+field, which sits between `pvs` and `diagnostics`; a map that omits it leaves
+readers to take the world's light exactly as vanilla computes it.
 
-A brush thinner than the export cut-off is drawn as its real geometry instead
-of being voxelized, so its cells stay air. Minecraft derives light opacity from
-the block state alone, so without this mask a ceiling built from thin plates
-lets the daylight straight through. Filling the cells with invisible blocks
-would fix the light and break everything else — they would be solid to walk
-into. The mask is the alternative: the mod bakes the map's sky light itself,
-treating these cells as opaque, and hands the finished light to the engine. No
-block exists, and vanilla's own opacity rules are never consulted for them.
+The mask holds every block of the map's schematic, and every cell a brush drawn
+as geometry instead of voxelized covers. The mod bakes the map's sky light from
+the bundle alone, before the world's chunks are there to ask, so it cannot see
+the schematic's blocks: listing only the blocks that own a visible surface left
+the map's hidden mass open, and daylight seeped through it into the air pockets
+hollowing leaves inside thick floors and walls. The drawn-brush cells are the
+other half. Minecraft derives light opacity from the block state alone, so a
+ceiling of thin plates would let daylight straight through; filling their cells
+with invisible blocks would make them solid to walk into, so they are listed
+here and the bake treats them as opaque.
 
 Props are deliberately left out. A cell is the smallest shadow the mask can
 express, and a prop that fills one — a tree, a conveyor, a pile of scrap — casts
-a block of shade the thing itself never would. The mask covers converted brush
-geometry only, which is where the map's own roofs and floors live.
+a block of shade the thing itself never would.
 
 The payload begins with this fixed little-endian header:
 
@@ -406,5 +406,5 @@ byte. Every listed section has at least one bit set, and coordinates are unique
 and ascending, so the payload is canonical for a given cell set.
 
 The mask is advisory for rendering and authoritative for nothing else: it never
-adds collision, never appears in the schematic, and a reader that ignores it
-produces a correct but over-lit world.
+adds collision or blocks, and a reader that ignores it produces a correct but
+over-lit world.

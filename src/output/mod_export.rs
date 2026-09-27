@@ -255,13 +255,26 @@ pub fn from_conversion(
             context,
         });
     }
-    if !conversion.occluders.is_empty() {
+    // Every cell that stops daylight: the drawn thin brushes, which hold no
+    // block, and every block of the map. The mod's sky bake cannot see the
+    // world's blocks, only this bundle, and the only blocks the surface table
+    // names are those that own a visible fragment. Without the rest, daylight
+    // seeped through the map's hidden mass into the air hollowing leaves
+    // inside thick floors and walls, and anything lit from such a pocket --
+    // the foot of a wall below a terrain floor -- glowed in a dark room.
+    let mut light_blockers = conversion.occluders.clone();
+    light_blockers.extend(conversion.grid.iter().map(|(cell, _)| cell));
+    if !light_blockers.is_empty() {
         let mut context = BTreeMap::new();
-        context.insert("cells".into(), conversion.occluders.len().to_string());
+        context.insert("cells".into(), light_blockers.len().to_string());
+        context.insert(
+            "without_block".into(),
+            conversion.occluders.len().to_string(),
+        );
         diagnostics.push(metadata::Diagnostic {
             severity: metadata::Severity::Info,
             code: "LIGHT_OCCLUSION_SUMMARY".into(),
-            message: "cells recorded as blocking light for geometry that holds no block".into(),
+            message: "cells recorded as blocking daylight: every block of the map, and drawn geometry that holds none".into(),
             context,
         });
     }
@@ -292,11 +305,8 @@ pub fn from_conversion(
     } else {
         None
     };
-    // Cells a drawn brush covers. No block is written for them; the mask is
-    // what lets the mod's light engine treat the geometry as opaque, so a
-    // ceiling of thin plates keeps the daylight out without becoming solid.
-    let occlusion = (!conversion.occluders.is_empty())
-        .then(|| crate::output::occlusion::encode(&conversion.occluders))
+    let occlusion = (!light_blockers.is_empty())
+        .then(|| crate::output::occlusion::encode(&light_blockers))
         .transpose()
         .context("encoding the light-occlusion mask")?;
     Ok(MapExport {

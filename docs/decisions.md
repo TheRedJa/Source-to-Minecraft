@@ -294,6 +294,19 @@ surfaces were snapped to it; against exact surfaces the same corrections moved
 props off the geometry they really stand on, so mod export no longer applies
 them.
 
+Smooth vertex light takes a cell only if the line from just in front of the
+vertex to the cell's centre crosses no surface front to back. Solid blocks were
+the only thing stopping the old sampler; with exact surfaces a vertex where a
+floor meets an off-grid or thin wall reached into the air behind the wall, and
+the other side's light bled along every such edge. When every weighted cell is
+dropped — an exact floor can lie most of a block below the top of its own
+block, so the point sampled half a block out is still inside it — the vertex
+takes the visible open cells around it regardless of weight, then the nearest
+visible open cell, never the old brightest-neighbour fallback: that one read
+daylight through the block and was the actual glow along the foot of the walls
+(measured with `/src2mc_light_probe`). `/src2mc_light_occlusion off` restores
+the old sampler for comparison.
+
 Brushes thinner than the brush-mesh cut-off are no longer exported as props of
 their own: their faces arrive as unowned fragments like any other, and their
 cells remain in the light-occlusion mask.

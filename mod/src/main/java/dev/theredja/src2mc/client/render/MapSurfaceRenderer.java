@@ -92,6 +92,10 @@ public final class MapSurfaceRenderer {
     // lighting is judged by looking at it, and the flat build is the only
     // honest comparison.
     private static boolean smoothLighting = true;
+    /** Whether smooth light is kept from sampling cells behind the map's own surfaces. */
+    private static boolean lightOcclusion = true;
+    /** Neighbour cells tested and dropped for being out of sight, by the last finished build. */
+    private static long occlusionTestedLast, occlusionBlockedLast;
     private static boolean pvsCulling = true;
     private static boolean frustumCulling = true;
     /** Shadow-caster cutoff in blocks. The shaderpack's own shadow-distance setting only culls
@@ -118,6 +122,8 @@ public final class MapSurfaceRenderer {
         final RegionGroup group;
         final Map<PageClass, List<LitTriangle>> triangles = new HashMap<>();
         final Map<Long, Integer> lightCache = new HashMap<>();
+        /** Keeps smooth light from reaching through the map's own surfaces; null when switched off. */
+        final SurfaceOcclusion occlusion;
         int nextSection;
         /** Owned fragments left out because their cell's surface block is gone. */
         int hiddenFragments;
@@ -130,6 +136,7 @@ public final class MapSurfaceRenderer {
 
         PendingBuild(BundleManifest bundle, BundleMap map, MapPlacement placement, RegionGroup group) {
             this.bundle = bundle; this.map = map; this.placement = placement; this.group = group;
+            this.occlusion = occlusionFor(placement, map);
         }
     }
 
@@ -165,6 +172,10 @@ public final class MapSurfaceRenderer {
             .then(net.minecraft.commands.Commands.argument("blocks", com.mojang.brigadier.arguments.DoubleArgumentType.doubleArg(0))
                 .executes(context -> setShadowDistance(context.getSource(),
                     com.mojang.brigadier.arguments.DoubleArgumentType.getDouble(context, "blocks")))));
+        event.getDispatcher().register(literal("src2mc_light_probe").executes(context -> probeLight(context.getSource())));
+        event.getDispatcher().register(literal("src2mc_light_occlusion")
+            .then(literal("on").executes(context -> setLightOcclusion(context.getSource(), true)))
+            .then(literal("off").executes(context -> setLightOcclusion(context.getSource(), false))));
         event.getDispatcher().register(literal("src2mc_smooth_light")
             .then(literal("on").executes(context -> setSmoothLighting(context.getSource(), true)))
             .then(literal("off").executes(context -> setSmoothLighting(context.getSource(), false))));
@@ -179,6 +190,19 @@ public final class MapSurfaceRenderer {
         shadowDistance = blocks;
         source.sendSuccess(() -> Component.literal("src2mc shadow caster distance = "
             + (blocks <= 0 ? "unlimited" : blocks + " blocks")), false);
+        return 1;
+    }
+
+    /** Drops every built mesh, since the light is baked into them at build time. */
+    private static int setLightOcclusion(net.minecraft.commands.CommandSourceStack source, boolean value) {
+        lightOcclusion = value;
+        MESHES.values().forEach(Mesh::close);
+        MESHES.clear();
+        BUILT_REGIONS.clear();
+        PENDING_BUILDS.clear();
+        PropRenderer.invalidateAllLight();
+        source.sendSuccess(() -> Component.literal("src2mc light occlusion " + (value ? "on" : "off")
+            + ": smooth light " + (value ? "ignores" : "reads") + " cells behind the map's own surfaces"), false);
         return 1;
     }
 
@@ -286,6 +310,8 @@ public final class MapSurfaceRenderer {
     private static int renderStatus(net.minecraft.commands.CommandSourceStack source) {
         AtlasPageResidency.Stats stats = PAGES.stats();
         source.sendSuccess(() -> Component.literal("src2mc render: smooth-light " + (smoothLighting ? "on" : "off")
+            + ", light-occlusion " + (lightOcclusion ? "on (last build: " + occlusionBlockedLast + "/" + occlusionTestedLast
+                + " neighbour cells out of sight)" : "off")
             + ", regions=" + BUILT_REGIONS.size()
             + ", meshes=" + MESHES.size() + ", atlas resident=" + stats.residentPages() + "/" + stats.trackedPages()
             + ", vram=" + formatBytes(stats.residentVramBytes()) + ", decode-pending=" + formatBytes(stats.pendingRamBytes())
@@ -306,6 +332,92 @@ public final class MapSurfaceRenderer {
             + ", in-flight=" + PENDING_BUILDS.size()
             + ", surface-block rebuilds=" + surfaceRebuildsQueued + ", hidden fragments in last build=" + lastHiddenFragments
             + ", build slice last=" + formatMillis(lastBuildNanos) + " worst=" + formatMillis(worstBuildNanos)), false);
+        return 1;
+    }
+
+    /**
+     * Finds the surface fragment under the crosshair by casting the view ray through the map's own
+     * geometry, and writes how every one of its vertices was lit to config/src2mc/light-probe.txt:
+     * each smooth-light corner cell, why it was used or dropped, and what it held.
+     */
+    private static int probeLight(net.minecraft.commands.CommandSourceStack source) {
+        Minecraft minecraft = Minecraft.getInstance();
+        if (minecraft.level == null) { source.sendFailure(Component.literal("No client level")); return 0; }
+        var camera = minecraft.gameRenderer.getMainCamera();
+        net.minecraft.world.phys.Vec3 eye = camera.getPosition();
+        org.joml.Vector3f look = camera.getLookVector();
+        double lx = look.x(), ly = look.y(), lz = look.z();
+        BundleGeneration generation = Src2mc.bundles().active();
+        double best = 32;
+        MapPlacement bestPlacement = null; BundleMap bestMap = null; SurfaceTable.Face bestFace = null;
+        int[] bestCell = null;
+        for (MapPlacement placement : PlacementNetwork.clientIndex(minecraft.level.dimension().location()).view()) {
+            BundleMap map = generation.findMap(placement.campaignId(), placement.mapId()).orElse(null);
+            if (map == null) continue;
+            BlockPos t = placement.translation();
+            double ox = eye.x - t.getX(), oy = eye.y - t.getY(), oz = eye.z - t.getZ();
+            // Every cell within reach of the ray; a probe runs once, so brute force is fine.
+            for (double step = 0; step < best; step += 0.25) {
+                int cx = net.minecraft.util.Mth.floor(ox + lx * step), cy = net.minecraft.util.Mth.floor(oy + ly * step), cz = net.minecraft.util.Mth.floor(oz + lz * step);
+                for (int dx = -1; dx <= 1; dx++) for (int dy = -1; dy <= 1; dy++) for (int dz = -1; dz <= 1; dz++) {
+                    int x = cx + dx, y = cy + dy, z = cz + dz;
+                    for (SurfaceTable.Face face : map.surfaces().facesAt(x, y, z)) {
+                        if (face.owned() && !surfacePresent(placement, x + face.ownerDx(), y + face.ownerDy(), z + face.ownerDz())) continue;
+                        double[] n = face.normal();
+                        double facing = n[0] * lx + n[1] * ly + n[2] * lz;
+                        if (facing >= 0) continue;
+                        double d = n[0] * (x + face.coordinate(0, 0)) + n[1] * (y + face.coordinate(0, 1)) + n[2] * (z + face.coordinate(0, 2));
+                        double distance = (d - (n[0] * ox + n[1] * oy + n[2] * oz)) / facing;
+                        if (distance <= 0 || distance >= best) continue;
+                        double hx = ox + lx * distance, hy = oy + ly * distance, hz = oz + lz * distance;
+                        int count = face.vertexCount();
+                        boolean inside = true;
+                        for (int i = 0; i < count && inside; i++) {
+                            int j = (i + 1) % count;
+                            double ax = x + face.coordinate(i, 0), ay = y + face.coordinate(i, 1), az = z + face.coordinate(i, 2);
+                            double ex = x + face.coordinate(j, 0) - ax, ey = y + face.coordinate(j, 1) - ay, ez = z + face.coordinate(j, 2) - az;
+                            double wx = hx - ax, wy = hy - ay, wz = hz - az;
+                            inside = (ey * wz - ez * wy) * n[0] + (ez * wx - ex * wz) * n[1] + (ex * wy - ey * wx) * n[2] >= -1e-9;
+                        }
+                        if (!inside) continue;
+                        best = distance; bestPlacement = placement; bestMap = map; bestFace = face; bestCell = new int[]{x, y, z};
+                    }
+                }
+            }
+        }
+        if (bestFace == null) { source.sendFailure(Component.literal("No src2mc surface under the crosshair within 32 blocks")); return 0; }
+        MapPlacement placement = bestPlacement; SurfaceTable.Face face = bestFace; int[] cell = bestCell;
+        BlockPos t = placement.translation();
+        ClientLevel probeLevel = minecraft.level;
+        SurfaceOcclusion occlusion = lightOcclusion
+            ? new SurfaceOcclusion(bestMap.surfaces(), t.getX(), t.getY(), t.getZ(), (x, y, z) -> surfacePresent(placement, x, y, z))
+            : null;
+        double[] n = face.normal();
+        StringBuilder out = new StringBuilder();
+        out.append(String.format(java.util.Locale.ROOT, "=== %s  map %s  cell (%d,%d,%d)  world cell (%d,%d,%d)  distance %.2f%n",
+            java.time.LocalDateTime.now(), placement.mapId(), cell[0], cell[1], cell[2],
+            cell[0] + t.getX(), cell[1] + t.getY(), cell[2] + t.getZ(), best));
+        out.append(String.format(java.util.Locale.ROOT, "fragment %s owner=(%d,%d,%d) kind=%d source=%d/%d normal=(%.3f,%.3f,%.3f) smooth=%s occlusion=%s%n",
+            face.owned() ? "owned" : "unowned", face.ownerDx(), face.ownerDy(), face.ownerDz(), face.provenance(),
+            face.sourcePrimary(), face.sourceSecondary(), n[0], n[1], n[2], smoothLighting, lightOcclusion));
+        Map<Long, Integer> cache = new HashMap<>();
+        for (int i = 0; i < face.vertexCount(); i++) {
+            double wx = t.getX() + cell[0] + face.coordinate(i, 0);
+            double wy = t.getY() + cell[1] + face.coordinate(i, 1);
+            double wz = t.getZ() + cell[2] + face.coordinate(i, 2);
+            out.append(String.format(java.util.Locale.ROOT, "  vertex %d world (%.4f,%.4f,%.4f)%n", i, wx, wy, wz));
+            out.append(LightSampler.describe(probeLevel, wx, wy, wz, (float) n[0], (float) n[1], (float) n[2], cache, occlusion));
+        }
+        java.nio.file.Path file = minecraft.gameDirectory.toPath().resolve("config/src2mc/light-probe.txt");
+        try {
+            java.nio.file.Files.createDirectories(file.getParent());
+            java.nio.file.Files.writeString(file, out.toString(), java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
+        } catch (java.io.IOException exception) {
+            source.sendFailure(Component.literal("Could not write " + file + ": " + exception.getMessage()));
+            return 0;
+        }
+        source.sendSuccess(() -> Component.literal("src2mc light probe: " + face.vertexCount() + " vertices of a "
+            + (face.owned() ? "owned" : "unowned") + " fragment written to config/src2mc/light-probe.txt"), false);
         return 1;
     }
 
@@ -634,6 +746,14 @@ public final class MapSurfaceRenderer {
         return face.localCell() * 27 + (face.ownerDx() + 1) * 9 + (face.ownerDy() + 1) * 3 + face.ownerDz() + 1;
     }
 
+    /** The visibility test smooth light uses around {@code placement}'s own surfaces, or null when
+     * {@code /src2mc_light_occlusion} is off. Shared with props, which stand among the same walls. */
+    static SurfaceOcclusion occlusionFor(MapPlacement placement, BundleMap map) {
+        if (!lightOcclusion || map == null) return null;
+        BlockPos t = placement.translation();
+        return new SurfaceOcclusion(map.surfaces(), t.getX(), t.getY(), t.getZ(), (x, y, z) -> surfacePresent(placement, x, y, z));
+    }
+
     private static boolean surfacePresent(MapPlacement placement, int x, int y, int z) {
         int worldX = placement.translation().getX() + x, worldZ = placement.translation().getZ() + z;
         if (!level.hasChunk(SectionPos.blockToSectionCoord(worldX), SectionPos.blockToSectionCoord(worldZ))) return true;
@@ -647,6 +767,10 @@ public final class MapSurfaceRenderer {
         AABB bounds = regionBounds(build.placement, group);
         BUILT_REGIONS.put(regionKey, frame);
         lastHiddenFragments = build.hiddenFragments;
+        if (build.occlusion != null) {
+            occlusionTestedLast = build.occlusion.tested;
+            occlusionBlockedLast = build.occlusion.blocked;
+        }
         // A rebuild after a surface block was broken can leave a page class with nothing in it;
         // its old mesh would otherwise go on drawing the fragments that were just removed.
         MESHES.entrySet().removeIf(item -> {
@@ -697,7 +821,7 @@ public final class MapSurfaceRenderer {
         double worldY = placement.translation().getY() + vertex.y();
         double worldZ = placement.translation().getZ() + vertex.z();
         int light = smoothLighting
-            ? LightSampler.smooth(level, worldX, worldY, worldZ, nx, ny, nz, cache)
+            ? LightSampler.smooth(level, worldX, worldY, worldZ, nx, ny, nz, cache, build.occlusion)
             : LightSampler.sample(level, worldX, worldY, worldZ, nx, ny, nz, cache);
         int sky = light >> 20 & 0xF;
         build.skyMin = Math.min(build.skyMin, sky);
