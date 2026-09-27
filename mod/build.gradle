@@ -3,6 +3,10 @@ plugins {
     id 'net.neoforged.gradle.userdev' version '7.1.38'
 }
 
+// One version for the converter and the mod, written only in the repository's
+// VERSION file; the jar name and neoforge.mods.toml are stamped from it.
+ext.mod_version = rootProject.file('../VERSION').text.trim()
+
 group = mod_group_id
 version = mod_version
 
