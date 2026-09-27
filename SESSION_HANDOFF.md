@@ -1,6 +1,6 @@
 # src2mc implementation handoff
 
-Updated: 2026-09-06 (Europe/Berlin)
+Updated: 2026-09-27 (Europe/Berlin)
 
 This document records the active implementation state and the empirical context
 needed to continue the work in a new session. `AGENTS.md` contains mandatory
@@ -68,7 +68,8 @@ for editing, moving, or transforming src2mc content.
 - HL2 BSP used for the main integration test:
   `/mnt/games/SteamLibrary/steamapps/common/Half-Life 2/hl2/maps/d1_trainstation_02.bsp`
 - Generated HL2 output: `target/phase3-ingame/`
-- Development jar: `mod/build/libs/src2mc-0.0.0-dev.jar`
+- Development jar: `mod/build/libs/src2mc-<VERSION>.jar` (currently
+  `src2mc-DEV-0.5.0.jar`)
 - WorldEdit schematic directory in this instance:
   `mod/runs/client/config/worldedit/schematics`
 
@@ -76,6 +77,17 @@ Do not add proprietary game assets to Git. The working tree contains extensive
 intentional tracked and untracked implementation work. Preserve it; do not reset
 or discard unrelated changes. Nothing from the latest work has been committed or
 pushed unless a later session explicitly does so.
+
+## Versioning
+
+The converter and the mod share one version, written only in the root `VERSION`
+file (currently `DEV-0.5.0`). `build.rs` passes it to the CLI's `--version`;
+`mod/build.gradle` stamps it into the jar name and `neoforge.mods.toml`.
+`Cargo.toml` deliberately has no `version`: Cargo requires plain semver and
+cannot hold the `DEV-` stage prefix. The minor number tracks the implementation
+plan's phase in progress (Phase 5). The release workflow refuses a tag that
+does not match `VERSION`. The `DEV` stage is only promoted with the user's
+approval.
 
 ## Implemented architecture and phase status
 
@@ -459,7 +471,7 @@ owns VBO batches per individual prop/section/page/render-class. It therefore has
 12,716 resident batches and may perform a very large number of independent draw
 submissions after frustum culling. This must be measured rather than assumed.
 
-## Agreed next performance plan (not implemented)
+## Agreed next performance plan (steps 1, 2 and 4 implemented)
 
 The user explicitly requested only a proposal in the last performance turn. No
 performance work beyond the scheduler changes above has been implemented yet.
@@ -505,6 +517,27 @@ Besides performance, Phase 5 still requires:
 
 Do not start Phase 6 collision until the Phase 5 rendering/lifecycle and large-map
 performance gates are complete.
+
+## Shaderpack shadow bug (fixed, user-verified)
+
+Symptom: with Complementary Reimagined, map geometry cast shadows only within a
+few blocks of the player and was lit flat past that, for the rest of the
+session. It survived shader toggles; only a mesh rebuild with shaders off
+cleared it.
+
+Cause: Iris swaps `DefaultVertexFormat.NEW_ENTITY` for its extended entity
+format and writes the currently captured entity/block-entity/item id into every
+vertex. Our meshes are static VBOs, so the stray id became permanent, and
+Complementary (`ENTITY_SHADOW=-1`) drops entity-labelled geometry from the
+shadow map. Fixed in `aa534b3`: both upload paths zero the captured ids while
+building. `/src2mc_iris_entity_id captured` restores the old behaviour for an
+A/B test. The Iris opt-out that does not work (`ImmediateState.skipExtension`) is
+recorded in `mod/docs/iris-compat.md`.
+
+Diagnostics kept from the investigation: `/src2mc_client_light` (the client's
+own sky-light bake), `/src2mc_rebuild_meshes` (rebuild every mesh without
+touching the generation or the bake), and the shadow-pass, light-provenance and
+vertex-stride lines in `/src2mc_render_status`.
 
 ## Validation commands
 

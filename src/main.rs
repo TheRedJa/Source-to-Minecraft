@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 /// whoever ends up with a copy of the binary and nothing else can still see
 /// who wrote it and what they may do with it.
 const NOTICE: &str = concat!(
-    env!("CARGO_PKG_VERSION"),
+    env!("SRC2MC_VERSION"),
     "\n",
     "Copyright 2026 TheRedJa <https://github.com/TheRedJa/source_to_mc>\n",
     "PolyForm Noncommercial License 1.0.0 \
@@ -27,7 +27,7 @@ const NOTICE: &str = concat!(
 #[derive(Parser)]
 #[command(
     name = "src2mc",
-    version,
+    version = env!("SRC2MC_VERSION"),
     long_version = NOTICE,
     about = "Convert Source Engine maps to Minecraft schematics"
 )]

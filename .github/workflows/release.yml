@@ -1,6 +1,6 @@
 name: Release
 
-# Push a tag to publish: `git tag v0.1.0 && git push origin v0.1.0`.
+# Push a tag to publish: `git tag v$(cat VERSION) && git push origin v$(cat VERSION)`.
 on:
   push:
     tags: ["v*"]
@@ -43,7 +43,13 @@ jobs:
       - name: Package
         id: package
         run: |
-          version="${GITHUB_REF_NAME#v}"
+          version="$(tr -d '[:space:]' < VERSION)"
+          # A tag names the version it publishes; refuse one that disagrees
+          # with VERSION rather than ship a binary reporting another number.
+          if [[ "$GITHUB_REF" == refs/tags/* && "${GITHUB_REF_NAME#v}" != "$version" ]]; then
+            echo "tag $GITHUB_REF_NAME does not match VERSION $version" >&2
+            exit 1
+          fi
           name="src2mc-${version}-x86_64-linux"
           mkdir "$name"
           cp target/release/src2mc "$name/"
