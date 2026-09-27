@@ -381,6 +381,7 @@ fn mod_export(maps: &[PathBuf], common: &Common, campaign: &str, out: &Path) -> 
         // do not let the legacy converter voxelize props into the surface grid.
         let mut surface_config = config.clone();
         surface_config.props.enabled = false;
+        surface_config.output.exact_surfaces = true;
         let conversion = src2mc::convert::convert(&map, &surface_config)?;
         exports.push(src2mc::output::mod_export::from_conversion(
             &map,

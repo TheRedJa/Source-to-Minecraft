@@ -17,6 +17,7 @@ import dev.theredja.src2mc.bundle.SurfaceTable;
 import dev.theredja.src2mc.network.PlacementNetwork;
 import dev.theredja.src2mc.world.LightOcclusion;
 import dev.theredja.src2mc.world.MapPlacement;
+import dev.theredja.src2mc.world.Src2mcWorldContent;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashSet;
@@ -30,7 +31,6 @@ import net.minecraft.client.renderer.GameRenderer;
 import net.minecraft.client.renderer.RenderType;
 import net.minecraft.client.renderer.texture.OverlayTexture;
 import net.minecraft.core.BlockPos;
-import net.minecraft.core.Direction;
 import net.minecraft.core.SectionPos;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.network.chat.Component;
@@ -69,6 +69,10 @@ public final class MapSurfaceRenderer {
      * a later relight (which always skips something at least once) never re-triggers it. */
     private static boolean firstPassComplete;
     private static long relightsQueued;
+    /** Region rebuilds caused by surface blocks appearing or vanishing, and the hidden-fragment
+     * count of the most recent build; read back through {@code /src2mc_render_status}. */
+    private static long surfaceRebuildsQueued;
+    private static int lastHiddenFragments;
     private static long lastBuildNanos;
     private static long worstBuildNanos;
     private static long shadowPassCallsSinceMainPass;
@@ -115,6 +119,8 @@ public final class MapSurfaceRenderer {
         final Map<PageClass, List<LitTriangle>> triangles = new HashMap<>();
         final Map<Long, Integer> lightCache = new HashMap<>();
         int nextSection;
+        /** Owned fragments left out because their cell's surface block is gone. */
+        int hiddenFragments;
         // Light provenance: what sky values this build captured, and which client bake they came
         // from. A mesh holds its light until it is rebuilt, so a build that ran before the bake
         // reached its sections stays wrong for the session.
@@ -298,6 +304,7 @@ public final class MapSurfaceRenderer {
             + ": watched=" + LightWatcher.watchedSections() + ", checks/tick=" + LightWatcher.checksLastTick()
             + ", invalidated/tick=" + LightWatcher.invalidatedLastTick() + ", queued=" + relightsQueued
             + ", in-flight=" + PENDING_BUILDS.size()
+            + ", surface-block rebuilds=" + surfaceRebuildsQueued + ", hidden fragments in last build=" + lastHiddenFragments
             + ", build slice last=" + formatMillis(lastBuildNanos) + " worst=" + formatMillis(worstBuildNanos)), false);
         return 1;
     }
@@ -322,7 +329,14 @@ public final class MapSurfaceRenderer {
             return 0;
         }
         BlockPos local = placement.toLocal(world);
-        List<SurfaceTable.Face> faces = map.surfaces().facesAt(local.getX(), local.getY(), local.getZ());
+        // The fragments lying in this cell, and those in neighbouring cells that this block owns.
+        List<SurfaceTable.Face> faces = new ArrayList<>(map.surfaces().facesAt(local.getX(), local.getY(), local.getZ()));
+        for (int dx = -1; dx <= 1; dx++) for (int dy = -1; dy <= 1; dy++) for (int dz = -1; dz <= 1; dz++) {
+            if ((dx | dy | dz) == 0) continue;
+            for (SurfaceTable.Face face : map.surfaces().facesAt(local.getX() + dx, local.getY() + dy, local.getZ() + dz)) {
+                if (face.owned() && face.ownerDx() == -dx && face.ownerDy() == -dy && face.ownerDz() == -dz) faces.add(face);
+            }
+        }
         source.sendSuccess(() -> Component.literal("src2mc face debug: world=" + world.toShortString()
             + ", local=" + local.toShortString() + ", hit=" + hit.getDirection() + ", records=" + faces.size()), false);
         for (SurfaceTable.Face face : faces) {
@@ -336,8 +350,12 @@ public final class MapSurfaceRenderer {
                 Math.sqrt(uv[4] * uv[4] + uv[5] * uv[5] + uv[6] * uv[6]),
                 material.texture() == null ? "none" : material.texture().originalWidth() + "x" + material.texture().originalHeight()
                     + "->" + material.texture().outputWidth() + "x" + material.texture().outputHeight());
-            source.sendSuccess(() -> Component.literal("  patch=" + face.patch() + " dir=" + patchDirection(face.patch())
-                + " plane=" + patchPlane(face.patch())
+            double[] normal = face.normal();
+            String geometry = String.format(java.util.Locale.ROOT, "vertices=%d normal=(%.3f,%.3f,%.3f)",
+                face.vertexCount(), normal[0], normal[1], normal[2]);
+            source.sendSuccess(() -> Component.literal("  " + (face.owned()
+                    ? "owned offset=(" + face.ownerDx() + "," + face.ownerDy() + "," + face.ownerDz() + ")" : "unowned")
+                + " kind=" + provenanceName(face.provenance()) + " " + geometry
                 + " material=" + face.materialId() + " " + material.sourceMaterial()
                 + " class=" + material.renderClass() + " texture=" + texture
                 + " source=" + face.provenance() + ":" + Long.toUnsignedString(face.sourcePrimary())
@@ -346,15 +364,10 @@ public final class MapSurfaceRenderer {
         return 1;
     }
 
-    private static String patchDirection(int patch) {
-        return switch (patch & 7) {
-            case 0 -> "down"; case 1 -> "up"; case 2 -> "north";
-            case 3 -> "south"; case 4 -> "west"; case 5 -> "east"; default -> "invalid";
+    private static String provenanceName(int kind) {
+        return switch (kind) {
+            case 0 -> "brush-side"; case 1 -> "displacement"; case 2 -> "draw-face"; default -> "invalid";
         };
-    }
-
-    private static String patchPlane(int patch) {
-        return String.format(java.util.Locale.ROOT, "%.1f", ((patch >>> 3) & 3) * 0.5);
     }
 
     @SubscribeEvent(priority = EventPriority.HIGHEST)
@@ -574,6 +587,10 @@ public final class MapSurfaceRenderer {
             List<SurfaceTable.Face> faces = sections.get(section);
             if (faces == null) continue;
             int baseX = section.x() << 4, baseY = section.y() << 4, baseZ = section.z() << 4;
+            // Fragments are sorted by cell and a cell's fragments usually share one owner, so one
+            // lookup serves a run of them.
+            int checkedOwner = -1;
+            boolean cellPresent = true;
             for (SurfaceTable.Face face : faces) {
                 if (face.materialId() < 0 || face.materialId() >= map.materials().size()
                     || face.uvRegionId() < 0 || face.uvRegionId() >= map.surfaces().uvRegions().size()) continue;
@@ -583,17 +600,45 @@ public final class MapSurfaceRenderer {
                 if (texture == null) continue;
                 int local = face.localCell();
                 int x = baseX + (local & 15), y = baseY + (local >> 8 & 15), z = baseZ + (local >> 4 & 15);
+                if (face.owned()) {
+                    int owner = ownerKey(face);
+                    if (owner != checkedOwner) {
+                        checkedOwner = owner;
+                        cellPresent = surfacePresent(build.placement, x + face.ownerDx(), y + face.ownerDy(), z + face.ownerDz());
+                    }
+                    if (!cellPresent) { build.hiddenFragments++; continue; }
+                }
+                double[] normal = face.normal();
+                float nx = (float) normal[0], ny = (float) normal[1], nz = (float) normal[2];
                 for (var triangle : SurfaceTessellator.tessellate(x, y, z, face,
                     map.surfaces().uvRegions().get(face.uvRegionId()), material.texture(), texture, map.atlas().pageSize())) {
                     build.triangles.computeIfAbsent(new PageClass(triangle.page(), material.renderClass()), ignored -> new ArrayList<>())
                         .add(new LitTriangle(triangle,
-                            sampleVertexLight(build, triangle.a(), face.patch()),
-                            sampleVertexLight(build, triangle.b(), face.patch()),
-                            sampleVertexLight(build, triangle.c(), face.patch())));
+                            sampleVertexLight(build, triangle.a(), nx, ny, nz),
+                            sampleVertexLight(build, triangle.b(), nx, ny, nz),
+                            sampleVertexLight(build, triangle.c(), nx, ny, nz)));
                 }
             }
         }
         return true;
+    }
+
+    /**
+     * Whether the world cell behind map-local cell (x, y, z) still holds the {@code src2mc:surface}
+     * block its owned fragments hang on. A chunk the client does not have yet counts as present:
+     * {@link #checkOwnedCells} re-examines it on arrival, and guessing absent would blank every
+     * region the moment it came into range ahead of its chunks.
+     */
+    /** Identifies a fragment's owner cell within its section: its own cell plus the offset. */
+    private static int ownerKey(SurfaceTable.Face face) {
+        return face.localCell() * 27 + (face.ownerDx() + 1) * 9 + (face.ownerDy() + 1) * 3 + face.ownerDz() + 1;
+    }
+
+    private static boolean surfacePresent(MapPlacement placement, int x, int y, int z) {
+        int worldX = placement.translation().getX() + x, worldZ = placement.translation().getZ() + z;
+        if (!level.hasChunk(SectionPos.blockToSectionCoord(worldX), SectionPos.blockToSectionCoord(worldZ))) return true;
+        return level.getBlockState(new BlockPos(worldX, placement.translation().getY() + y, worldZ))
+            .is(Src2mcWorldContent.SURFACE.get());
     }
 
     private static void finishRegionBuild(RegionKey regionKey, PendingBuild build) {
@@ -601,6 +646,15 @@ public final class MapSurfaceRenderer {
         BlockPos origin = build.placement.translation().offset(group.minX(), group.minY(), group.minZ());
         AABB bounds = regionBounds(build.placement, group);
         BUILT_REGIONS.put(regionKey, frame);
+        lastHiddenFragments = build.hiddenFragments;
+        // A rebuild after a surface block was broken can leave a page class with nothing in it;
+        // its old mesh would otherwise go on drawing the fragments that were just removed.
+        MESHES.entrySet().removeIf(item -> {
+            MeshKey key = item.getKey();
+            if (!key.region.equals(regionKey) || build.triangles.containsKey(new PageClass(key.page, key.renderClass))) return false;
+            item.getValue().close();
+            return true;
+        });
         build.triangles.forEach((pageClass, values) -> {
             MeshKey key = new MeshKey(regionKey, pageClass.page, pageClass.renderClass);
             Mesh old = MESHES.put(key, upload(build, build.map.atlas(), origin, bounds, values,
@@ -628,7 +682,7 @@ public final class MapSurfaceRenderer {
 
     /**
      * One sample per vertex, at the vertex's own world position and along its
-     * face's patch direction.
+     * fragment's unit normal (nx, ny, nz), which need not be axis-aligned.
      *
      * One sample per face is what vanilla calls flat lighting, and it steps in
      * whole blocks -- a wall lit by one torch went from cell to cell rather
@@ -636,14 +690,9 @@ public final class MapSurfaceRenderer {
      * build's own cache, so the extra cost is lookups in a hash map, not light
      * computations, and nothing changes per frame.
      */
-    private static int sampleVertexLight(PendingBuild build, SurfaceTessellator.Vertex vertex, int patch) {
+    private static int sampleVertexLight(PendingBuild build, SurfaceTessellator.Vertex vertex, float nx, float ny, float nz) {
         MapPlacement placement = build.placement;
         Map<Long, Integer> cache = build.lightCache;
-        int dirIndex = patch & 7;
-        Direction direction = dirIndex < 6 ? Direction.values()[dirIndex] : null;
-        float nx = direction == null ? 0 : direction.getStepX();
-        float ny = direction == null ? 0 : direction.getStepY();
-        float nz = direction == null ? 0 : direction.getStepZ();
         double worldX = placement.translation().getX() + vertex.x();
         double worldY = placement.translation().getY() + vertex.y();
         double worldZ = placement.translation().getZ() + vertex.z();
@@ -712,12 +761,93 @@ public final class MapSurfaceRenderer {
     }
 
     private static void invalidateRegionAt(MapPlacement placement, int sectionX, int sectionY, int sectionZ) {
-        RegionCoord coord = new RegionCoord(Math.floorDiv(sectionX, REGION_SECTIONS),
-            Math.floorDiv(sectionY, REGION_SECTIONS), Math.floorDiv(sectionZ, REGION_SECTIONS));
-        RegionKey key = new RegionKey(placement, coord);
-        // A build already in flight sampled the pre-change light, so it has to restart.
+        if (invalidateRegion(placement, sectionX, sectionY, sectionZ)) relightsQueued++;
+    }
+
+    /** Drops the built region holding map-local section (x, y, z); true if one was built. */
+    private static boolean invalidateRegion(MapPlacement placement, int sectionX, int sectionY, int sectionZ) {
+        RegionKey key = new RegionKey(placement, regionCoord(sectionX, sectionY, sectionZ));
+        // A build already in flight sampled the pre-change world, so it has to restart.
         PENDING_BUILDS.remove(key);
-        if (BUILT_REGIONS.remove(key) != null) relightsQueued++;
+        return BUILT_REGIONS.remove(key) != null;
+    }
+
+    private static RegionCoord regionCoord(int sectionX, int sectionY, int sectionZ) {
+        return new RegionCoord(Math.floorDiv(sectionX, REGION_SECTIONS),
+            Math.floorDiv(sectionY, REGION_SECTIONS), Math.floorDiv(sectionZ, REGION_SECTIONS));
+    }
+
+    /**
+     * Rebuilds the regions whose owned fragments may hang on blocks in {@code worldSection},
+     * after its {@code src2mc:surface} blocks changed. Narrower than {@link #invalidateLight}: an
+     * owner is at most one cell from its fragment, so only map sections overlapping the world
+     * section grown by one block can hold one -- a few per axis, since the placement need not be
+     * section-aligned, and most of them fall in the same region.
+     */
+    public static void invalidateSurfaceSection(MapPlacement placement, SectionPos worldSection) {
+        BlockPos local = placement.toLocal(new BlockPos(worldSection.minBlockX(), worldSection.minBlockY(), worldSection.minBlockZ()));
+        for (int sx = Math.floorDiv(local.getX() - 1, 16); sx <= Math.floorDiv(local.getX() + 16, 16); sx++) {
+            for (int sy = Math.floorDiv(local.getY() - 1, 16); sy <= Math.floorDiv(local.getY() + 16, 16); sy++) {
+                for (int sz = Math.floorDiv(local.getZ() - 1, 16); sz <= Math.floorDiv(local.getZ() + 16, 16); sz++) {
+                    if (invalidateRegion(placement, sx, sy, sz)) surfaceRebuildsQueued++;
+                }
+            }
+        }
+    }
+
+    /**
+     * A chunk just arrived: a region built or building before it assumed every owner cell in it
+     * present ({@link #surfacePresent}). Rebuilds such a region only when some owner cell in the
+     * chunk turns out to have lost its block, and only looks at sections whose region is built or
+     * in flight, so an ordinary chunk load costs a few map lookups. The column is grown by one
+     * block: a fragment bucketed in the neighbouring chunk can be owned by a block in this one.
+     */
+    public static void checkOwnedCells(ClientLevel chunkLevel, net.minecraft.world.level.chunk.LevelChunk chunk) {
+        if (chunkLevel != level || (BUILT_REGIONS.isEmpty() && PENDING_BUILDS.isEmpty())) return;
+        int chunkMinX = chunk.getPos().getMinBlockX(), chunkMinZ = chunk.getPos().getMinBlockZ();
+        BundleGeneration generation = Src2mc.bundles().active();
+        BlockPos.MutableBlockPos cursor = new BlockPos.MutableBlockPos();
+        for (MapPlacement placement : placementSnapshot) {
+            if (placement.worldMax().getX() < chunkMinX || placement.worldMin().getX() > chunkMinX + 15
+                || placement.worldMax().getZ() < chunkMinZ || placement.worldMin().getZ() > chunkMinZ + 15) continue;
+            BundleMap map = generation.findMap(placement.campaignId(), placement.mapId()).orElse(null);
+            if (map == null) continue;
+            var sections = map.surfaces().sections();
+            int[] cellMin = map.cellMin(), cellMax = map.cellMax();
+            BlockPos translation = placement.translation();
+            int localMinX = chunkMinX - translation.getX(), localMinZ = chunkMinZ - translation.getZ();
+            for (int sx = Math.floorDiv(localMinX - 1, 16); sx <= Math.floorDiv(localMinX + 16, 16); sx++) {
+                for (int sz = Math.floorDiv(localMinZ - 1, 16); sz <= Math.floorDiv(localMinZ + 16, 16); sz++) {
+                    for (int sy = Math.floorDiv(cellMin[1] - 1, 16); sy <= Math.floorDiv(cellMax[1] + 1, 16); sy++) {
+                        List<SurfaceTable.Face> faces = sections.get(new SurfaceTable.SectionPos(sx, sy, sz));
+                        if (faces == null) continue;
+                        RegionKey key = new RegionKey(placement, regionCoord(sx, sy, sz));
+                        if (!BUILT_REGIONS.containsKey(key) && !PENDING_BUILDS.containsKey(key)) continue;
+                        if (ownedCellMissing(chunk, faces, translation, sx, sy, sz, chunkMinX, chunkMinZ, cursor)
+                            && invalidateRegion(placement, sx, sy, sz)) surfaceRebuildsQueued++;
+                    }
+                }
+            }
+        }
+    }
+
+    private static boolean ownedCellMissing(net.minecraft.world.level.chunk.LevelChunk chunk, List<SurfaceTable.Face> faces,
+                                            BlockPos translation, int sx, int sy, int sz, int chunkMinX, int chunkMinZ,
+                                            BlockPos.MutableBlockPos cursor) {
+        int checkedOwner = -1;
+        for (SurfaceTable.Face face : faces) {
+            if (!face.owned()) continue;
+            int owner = ownerKey(face);
+            if (owner == checkedOwner) continue;
+            checkedOwner = owner;
+            int local = face.localCell();
+            int worldX = translation.getX() + (sx << 4) + (local & 15) + face.ownerDx();
+            int worldZ = translation.getZ() + (sz << 4) + (local >> 4 & 15) + face.ownerDz();
+            if (worldX < chunkMinX || worldX > chunkMinX + 15 || worldZ < chunkMinZ || worldZ > chunkMinZ + 15) continue;
+            cursor.set(worldX, translation.getY() + (sy << 4) + (local >> 8 & 15) + face.ownerDy(), worldZ);
+            if (!chunk.getBlockState(cursor).is(Src2mcWorldContent.SURFACE.get())) return true;
+        }
+        return false;
     }
 
     /** Groups a map's static sections into {@link #REGION_SECTIONS}-wide cubes, once per map

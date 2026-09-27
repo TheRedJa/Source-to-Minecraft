@@ -6,7 +6,7 @@ import dev.theredja.src2mc.bundle.SurfaceTable;
 import java.util.ArrayList;
 import java.util.List;
 
-/** Converts one canonical micro-face into page-contained atlas triangles. */
+/** Converts one exact surface fragment into page-contained atlas triangles. */
 final class SurfaceTessellator {
     private static final double EPSILON = 1.0e-9;
     private static final int MAX_POLYGONS_PER_FACE = 4096;
@@ -19,7 +19,7 @@ final class SurfaceTessellator {
                                      SurfaceTable.UvRegion transform,
                                      BundleMaterial.TextureReference material,
                                      AtlasIndex.Texture texture, int pageSize) {
-        Vertex[] corners = corners(cellX, cellY, cellZ, face.patch());
+        Vertex[] corners = corners(cellX, cellY, cellZ, face);
         double[] uv = transform.values();
         double scaleU = (double) material.outputWidth() / material.originalWidth();
         double scaleV = (double) material.outputHeight() / material.originalHeight();
@@ -90,23 +90,12 @@ final class SurfaceTessellator {
         return keepGreater ? value >= boundary - EPSILON : value <= boundary + EPSILON;
     }
 
-    private static Vertex[] corners(int x, int y, int z, int patch) {
-        int direction = patch & 7, plane = patch >> 3 & 3, a = patch >> 5 & 1, b = patch >> 6 & 1;
-        double p = plane * 0.5, loA = a * 0.5, hiA = loA + 0.5, loB = b * 0.5, hiB = loB + 0.5;
-        return switch (direction) {
-            case 0 -> vertices(x + loA, y + p, z + loB, x + hiA, y + p, z + loB, x + hiA, y + p, z + hiB, x + loA, y + p, z + hiB);
-            case 1 -> vertices(x + loA, y + p, z + hiB, x + hiA, y + p, z + hiB, x + hiA, y + p, z + loB, x + loA, y + p, z + loB);
-            case 2 -> vertices(x + hiA, y + loB, z + p, x + loA, y + loB, z + p, x + loA, y + hiB, z + p, x + hiA, y + hiB, z + p);
-            case 3 -> vertices(x + loA, y + loB, z + p, x + hiA, y + loB, z + p, x + hiA, y + hiB, z + p, x + loA, y + hiB, z + p);
-            case 4 -> vertices(x + p, y + loB, z + loA, x + p, y + loB, z + hiA, x + p, y + hiB, z + hiA, x + p, y + hiB, z + loA);
-            case 5 -> vertices(x + p, y + loB, z + hiA, x + p, y + loB, z + loA, x + p, y + hiB, z + loA, x + p, y + hiB, z + hiA);
-            default -> throw new IllegalArgumentException("invalid face direction " + direction);
-        };
-    }
-
-    private static Vertex[] vertices(double... values) {
-        Vertex[] result = new Vertex[4];
-        for (int i = 0; i < 4; i++) result[i] = new Vertex(values[i * 3], values[i * 3 + 1], values[i * 3 + 2], 0, 0);
+    /** Absolute map-local vertices: owner cell plus the fragment's 1/4096-block offsets. */
+    private static Vertex[] corners(int x, int y, int z, SurfaceTable.Face face) {
+        Vertex[] result = new Vertex[face.vertexCount()];
+        for (int i = 0; i < result.length; i++) {
+            result[i] = new Vertex(x + face.coordinate(i, 0), y + face.coordinate(i, 1), z + face.coordinate(i, 2), 0, 0);
+        }
         return result;
     }
 

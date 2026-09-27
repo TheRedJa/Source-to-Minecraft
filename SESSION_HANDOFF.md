@@ -82,7 +82,9 @@ pushed unless a later session explicitly does so.
 
 The converter and the mod share one version, written only in the root `VERSION`
 file (currently `DEV-0.5.0`). `build.rs` passes it to the CLI's `--version`;
-`mod/build.gradle` stamps it into the jar name and `neoforge.mods.toml`.
+`mod/build.gradle` stamps it into the jar name and `neoforge.mods.toml`. FML
+21.1 only loads a mod version starting with a digit (`^\d+.*`), so the
+mods.toml gets `0.6.0-DEV`, the same version with the stage moved to the end.
 `Cargo.toml` deliberately has no `version`: Cargo requires plain semver and
 cannot hold the `DEV-` stage prefix. The minor number tracks the implementation
 plan's phase in progress (Phase 5). The release workflow refuses a tag that
@@ -517,6 +519,33 @@ Besides performance, Phase 5 still requires:
 
 Do not start Phase 6 collision until the Phase 5 rendering/lifecycle and large-map
 performance gates are complete.
+
+## Exact per-cell surfaces (DEV-0.6.0, implemented 2026-09-27, awaiting in-game test)
+
+Motivation: open areas looked right, tight spaces (hallways, low ceilings, doors,
+windows) fell apart because surfaces were snapped to 0.5-block micro-patches and
+collision is whole blocks. See `docs/decisions.md` D17 and `docs/format.md` §5.
+
+- Converter: `src/voxel/fragments.rs` cuts exact polygons per cell and picks the
+  owner block. `convert.rs` `exact_polygons` reads the BSP face lump and
+  displacement triangles, and traces each face to its brush (`SolidLookup`) so
+  per-brush skip rules and the 3D-skybox cut still apply. The face lump's
+  `plane_num` already faces outward; flipping by `side` is wrong (verified on
+  INFRA: 8573 of 9604 side=1 faces only matched unflipped).
+- Surface table is now v2 (fragments with an owner-offset flag byte). Thin
+  brushes are no longer exported as `*brush/N` props.
+- Mod: fragments render at exact positions. An owned fragment is hidden once its
+  owner `src2mc:surface` block is gone. `SurfaceChangeTracker` sends dirty
+  sections to clients per tick. Clients recheck owner cells on chunk load. The
+  sky bake marks owner cells opaque.
+- INFRA furnace: 254,657 fragments, 180,930 owned, 73,727 unowned (64k of those
+  are thin-brush cells), 2 faces with no brush.
+- Props are placed at their exact Source origin. The settle and sub-block snap
+  corrections are gone from mod export: they fitted props to the snapped grid
+  and pushed them off the exact floors (user-reported floating props). The
+  `props.snap*` config keys were removed; `settle` still applies to `convert`.
+- Collision is unchanged (full blocks from the voxel grid). Next step: sub-block
+  collision from the same geometry.
 
 ## Shaderpack shadow bug (fixed, user-verified)
 

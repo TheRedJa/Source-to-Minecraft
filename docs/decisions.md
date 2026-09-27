@@ -269,3 +269,36 @@ is the sole visual surface. This prevents a normal converted map from drawing a
 coplanar vanilla face beneath the Source-derived face. Deliberately placing an
 ordinary block face exactly coplanar with an src2mc face is outside the no-edit
 paste workflow and may z-fight; Source geometry is not shifted to hide it.
+
+## D17 — Surfaces are exact geometry owned by cells
+
+The map's visible surfaces are the polygons the Source compiler wrote — the BSP
+face lump for brushes and the displacement triangles for terrain — cut along
+block planes into one convex fragment per cell, and never snapped to the grid.
+Snapping to half-block micro-patches looked right in large rooms and fell apart
+in tight ones: a hallway 96 units high lost a quarter of its height to rounding,
+and a face drawn in one place with collision in another put ceilings a block
+below where the player collided with them.
+
+Blocks stay the editable substrate. Every fragment belongs to the block behind
+it — its own cell, or one cell further behind when the face sits just off the
+grid in front of a block — and is drawn only while that `src2mc:surface` block
+stands. Breaking the block removes exactly the geometry it owned; placing it
+back restores it. The server reports surface-block changes per section to
+clients, which rebuild only the affected regions. A fragment with no block
+behind it (thin brushes, slivers too thin to voxelize) is drawn unconditionally.
+
+Props are placed at their exact Source origin. Settling them onto the voxel
+floor and nudging them out of voxel walls only undid the grid's rounding while
+surfaces were snapped to it; against exact surfaces the same corrections moved
+props off the geometry they really stand on, so mod export no longer applies
+them.
+
+Brushes thinner than the brush-mesh cut-off are no longer exported as props of
+their own: their faces arrive as unowned fragments like any other, and their
+cells remain in the light-occlusion mask.
+
+Collision still comes from the voxel grid, one full block per solid cell, so
+where a face sits off the grid its collision can differ from what is drawn by
+up to a block. Deriving sub-block collision from the same exact geometry is the
+next step and shares its shape machinery with prop collision (D9, D15).

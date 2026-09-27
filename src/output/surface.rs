@@ -1,13 +1,17 @@
-//! Versioned binary spatial table for canonical visible map faces.
+//! Versioned binary spatial table for the map's exact visible geometry.
 
 use crate::bsp::texcoord::BlockTexCoord;
+use crate::voxel::fragments::{Fragment, MAX_VERTICES, QUANTUM};
 use crate::voxel::grid::IVec3;
-use crate::voxel::surface::{FaceDirection, FacePatch, SourceProvenance, VisibleFaceRecord};
+use crate::voxel::surface::SourceProvenance;
 use anyhow::{Result, ensure};
 use std::collections::{BTreeMap, HashMap};
 
 pub const MAGIC: [u8; 8] = *b"S2FACE\0\0";
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
+
+/// Flag bit: the owner cell holds an `src2mc:surface` block.
+const OWNED: u8 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct MaterialId(pub u32);
@@ -29,23 +33,26 @@ impl Default for Limits {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct EncodedFace {
     pub cell: IVec3,
-    pub patch: FacePatch,
+    /// Offset from `cell` to the owner block, `None` when unowned.
+    pub owner: Option<IVec3>,
     pub material: MaterialId,
     pub uv: BlockTexCoord,
     pub provenance: SourceProvenance,
+    pub vertices: Vec<[u16; 3]>,
 }
 
 impl EncodedFace {
-    pub fn from_visible(face: VisibleFaceRecord, material: MaterialId) -> Self {
+    pub fn from_fragment(fragment: &Fragment, material: MaterialId) -> Self {
         Self {
-            cell: face.cell,
-            patch: face.patch,
+            cell: fragment.cell,
+            owner: fragment.owner,
             material,
-            uv: face.source.uv,
-            provenance: face.source.provenance,
+            uv: fragment.source.uv,
+            provenance: fragment.source.provenance,
+            vertices: fragment.vertices.clone(),
         }
     }
 }
@@ -53,8 +60,8 @@ impl EncodedFace {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct UvKey([u64; 8]);
 
-/// Encode faces into sparse 16³ section buckets. Input order is deliberately
-/// irrelevant to the output bytes.
+/// Encode fragments into sparse 16³ section buckets. Input order is
+/// deliberately irrelevant to the output bytes.
 pub fn encode(faces: impl IntoIterator<Item = EncodedFace>, limits: Limits) -> Result<Vec<u8>> {
     let mut buckets: BTreeMap<IVec3, Vec<(EncodedFace, UvKey)>> = BTreeMap::new();
     let mut uv_keys = Vec::new();
@@ -63,7 +70,7 @@ pub fn encode(faces: impl IntoIterator<Item = EncodedFace>, limits: Limits) -> R
     for face in faces {
         ensure!(face_count < limits.max_faces, "surface face limit exceeded");
         let uv = uv_key(face.uv)?;
-        validate_patch(face.patch)?;
+        validate_vertices(&face.vertices)?;
         uv_keys.push(uv);
         buckets
             .entry(section_of(face.cell))
@@ -101,28 +108,43 @@ pub fn encode(faces: impl IntoIterator<Item = EncodedFace>, limits: Limits) -> R
         }
     }
     for (section, mut records) in buckets {
-        records.sort_by_key(|(face, uv)| {
-            (
+        let mut keyed = Vec::with_capacity(records.len());
+        for (face, uv) in records.drain(..) {
+            let (primary, secondary) = provenance_values(face.provenance)?;
+            let key = (
                 local_index(face.cell),
-                patch_byte(face.patch).expect("validated patch"),
-                face.material,
-                *uv,
-                face.provenance,
-            )
-        });
+                provenance_tag(face.provenance),
+                primary,
+                secondary,
+            );
+            keyed.push((key, face, uv));
+        }
+        keyed.sort_by_key(|(key, _, _)| *key);
+        for pair in keyed.windows(2) {
+            ensure!(
+                pair[0].0 != pair[1].0,
+                "two surface fragments share cell and provenance {:?}",
+                pair[0].1.provenance
+            );
+        }
         for coordinate in section {
             put_i32(&mut out, coordinate);
         }
-        put_u32(&mut out, records.len() as u32);
-        for (face, uv) in records {
-            put_u16(&mut out, local_index(face.cell));
-            out.push(patch_byte(face.patch)?);
-            out.push(provenance_tag(face.provenance));
+        put_u32(&mut out, keyed.len() as u32);
+        for ((local, tag, primary, secondary), face, uv) in keyed {
+            put_u16(&mut out, local);
+            out.push(flags(face.owner)?);
+            out.push(tag);
             put_u32(&mut out, face.material.0);
             put_u32(&mut out, uv_ids[&uv]);
-            let (primary, secondary) = provenance_values(face.provenance)?;
             put_u32(&mut out, primary);
             put_u32(&mut out, secondary);
+            out.push(face.vertices.len() as u8);
+            for vertex in &face.vertices {
+                for coordinate in vertex {
+                    put_u16(&mut out, *coordinate);
+                }
+            }
         }
     }
     Ok(out)
@@ -150,59 +172,38 @@ fn local_index(cell: IVec3) -> u16 {
     ((cell[1] & 15) << 8 | (cell[2] & 15) << 4 | (cell[0] & 15)) as u16
 }
 
-fn patch_byte(patch: FacePatch) -> Result<u8> {
-    validate_patch(patch)?;
-    let direction = direction_number(patch.direction);
-    let (plane_axis, a_axis, b_axis) = patch_axes(patch.direction);
-    let plane = patch.min[plane_axis];
-    let a = patch.min[a_axis];
-    let b = patch.min[b_axis];
-    Ok(direction | (plane << 3) | (a << 5) | (b << 6))
-}
-
-fn validate_patch(patch: FacePatch) -> Result<()> {
-    let (plane_axis, a_axis, b_axis) = patch_axes(patch.direction);
-    ensure!(
-        patch.min[plane_axis] == patch.max[plane_axis],
-        "patch is not planar"
-    );
-    ensure!(
-        patch.min[plane_axis] <= 2,
-        "patch plane is outside its cell"
-    );
-    for axis in [a_axis, b_axis] {
-        ensure!(patch.min[axis] <= 1, "patch minimum is outside its cell");
+/// Bit 0 owned, then each owner-offset axis plus one in two bits.
+fn flags(owner: Option<IVec3>) -> Result<u8> {
+    let offset = owner.unwrap_or([0, 0, 0]);
+    let mut out = if owner.is_some() { OWNED } else { 0 };
+    for (axis, value) in offset.into_iter().enumerate() {
         ensure!(
-            patch.max[axis] == patch.min[axis] + 1,
-            "patch is not a half-block micro-patch"
+            (-1..=1).contains(&value),
+            "owner offset {offset:?} is not a neighbour"
         );
+        out |= ((value + 1) as u8) << (1 + 2 * axis);
     }
+    Ok(out)
+}
+
+fn validate_vertices(vertices: &[[u16; 3]]) -> Result<()> {
+    ensure!(
+        (3..=MAX_VERTICES).contains(&vertices.len()),
+        "surface fragment has {} vertices",
+        vertices.len()
+    );
+    ensure!(
+        vertices.iter().flatten().all(|&c| f64::from(c) <= QUANTUM),
+        "surface fragment vertex is outside its cell"
+    );
     Ok(())
-}
-
-fn patch_axes(direction: FaceDirection) -> (usize, usize, usize) {
-    match direction {
-        FaceDirection::Down | FaceDirection::Up => (1, 0, 2),
-        FaceDirection::North | FaceDirection::South => (2, 0, 1),
-        FaceDirection::West | FaceDirection::East => (0, 2, 1),
-    }
-}
-
-fn direction_number(direction: FaceDirection) -> u8 {
-    match direction {
-        FaceDirection::Down => 0,
-        FaceDirection::Up => 1,
-        FaceDirection::North => 2,
-        FaceDirection::South => 3,
-        FaceDirection::West => 4,
-        FaceDirection::East => 5,
-    }
 }
 
 fn provenance_tag(provenance: SourceProvenance) -> u8 {
     match provenance {
         SourceProvenance::Brush { .. } => 0,
         SourceProvenance::Displacement { .. } => 1,
+        SourceProvenance::Face { .. } => 2,
     }
 }
 
@@ -213,6 +214,7 @@ fn provenance_values(provenance: SourceProvenance) -> Result<(u32, u32)> {
             displacement,
             triangle,
         } => (displacement, triangle),
+        SourceProvenance::Face { face, piece } => (face, piece),
     };
     Ok((u32::try_from(a)?, u32::try_from(b)?))
 }
@@ -236,17 +238,19 @@ mod tests {
     fn face(cell: IVec3, uv_offset: f64) -> EncodedFace {
         EncodedFace {
             cell,
-            patch: FacePatch {
-                direction: FaceDirection::Up,
-                min: [0, 2, 1],
-                max: [1, 2, 2],
-            },
+            owner: Some([0, 0, 0]),
             material: MaterialId(7),
             uv: BlockTexCoord {
                 u: [1.0, 0.0, 0.0, uv_offset],
                 v: [0.0, 0.0, 1.0, 0.0],
             },
-            provenance: SourceProvenance::Brush { brush: 12, side: 3 },
+            provenance: SourceProvenance::Face { face: 12, piece: 0 },
+            vertices: vec![
+                [0, 4096, 0],
+                [0, 4096, 4096],
+                [4096, 4096, 4096],
+                [4096, 4096, 0],
+            ],
         }
     }
 
@@ -255,7 +259,7 @@ mod tests {
         let a = face([-1, 16, 31], 2.0);
         let b = face([16, -1, 0], 1.0);
         assert_eq!(
-            encode([a, b], Limits::default()).unwrap(),
+            encode([a.clone(), b.clone()], Limits::default()).unwrap(),
             encode([b, a], Limits::default()).unwrap()
         );
     }
@@ -269,12 +273,47 @@ mod tests {
     }
 
     #[test]
-    fn rejects_nonfinite_uv_and_non_micro_patch() {
-        let mut invalid_uv = face([0, 0, 0], f64::NAN);
+    fn a_record_is_its_fixed_part_then_its_vertices() {
+        let bytes = encode([face([1, 2, 3], 0.0)], Limits::default()).unwrap();
+        // Header 24, one UV region 64, section coordinates 12 and count 4.
+        let record = &bytes[24 + 64 + 16..];
+        assert_eq!(
+            u16::from_le_bytes([record[0], record[1]]),
+            2 << 8 | 3 << 4 | 1
+        );
+        assert_eq!(record[2], OWNED | 0b010101 << 1);
+        assert_eq!(record[3], 2);
+        assert_eq!(record[20], 4);
+        assert_eq!(record.len(), 21 + 4 * 6);
+        assert_eq!(u16::from_le_bytes([record[23], record[24]]), 4096);
+    }
+
+    #[test]
+    fn rejects_nonfinite_uv_and_bad_polygons() {
+        let invalid_uv = face([0, 0, 0], f64::NAN);
         assert!(encode([invalid_uv], Limits::default()).is_err());
-        invalid_uv.uv.u[3] = 0.0;
-        invalid_uv.patch.max[0] = 2;
-        assert!(encode([invalid_uv], Limits::default()).is_err());
+        let mut outside = face([0, 0, 0], 0.0);
+        outside.vertices[0][0] = 4097;
+        assert!(encode([outside], Limits::default()).is_err());
+        let mut line = face([0, 0, 0], 0.0);
+        line.vertices.truncate(2);
+        assert!(encode([line], Limits::default()).is_err());
+    }
+
+    #[test]
+    fn owner_offsets_pack_per_axis_and_unowned_is_centred() {
+        assert_eq!(flags(None).unwrap(), 0b0010_1010);
+        assert_eq!(flags(Some([0, -1, 0])).unwrap(), 0b0010_0011);
+        assert_eq!(flags(Some([1, 0, -1])).unwrap(), 0b0000_1101);
+        assert!(flags(Some([0, 2, 0])).is_err());
+    }
+
+    #[test]
+    fn rejects_two_fragments_with_one_key() {
+        let a = face([0, 0, 0], 0.0);
+        let mut b = face([0, 0, 0], 1.0);
+        b.material = MaterialId(8);
+        assert!(encode([a, b], Limits::default()).is_err());
     }
 
     #[test]

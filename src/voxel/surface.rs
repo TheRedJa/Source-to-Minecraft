@@ -67,6 +67,12 @@ pub enum SourceProvenance {
         displacement: usize,
         triangle: usize,
     },
+    /// A face the map compiler wrote to the BSP's face lump, and which of the
+    /// pieces it had to be split into to be stored.
+    Face {
+        face: usize,
+        piece: usize,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

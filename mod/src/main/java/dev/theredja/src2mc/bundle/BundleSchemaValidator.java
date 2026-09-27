@@ -29,6 +29,10 @@ final class BundleSchemaValidator {
     private static final byte[] MESH_MAGIC = {'S','2','M','E','S','H',0,0};
     private static final byte[] PVS_MAGIC = {'S','2','P','V','I','S',0,0};
     private static final byte[] OCCLUSION_MAGIC = {'S','2','O','C','C','L',0,0};
+    /** Fragment record bytes before the vertex array: cell, flags, kind, four u32s, vertex count. */
+    private static final int FRAGMENT_FIXED_BYTES = 21;
+    /** The only flag byte an unowned fragment may carry: not owned, zero offset on every axis. */
+    private static final int UNOWNED_FLAGS = 0x2A;
     private static final byte[] PNG_SIGNATURE = {(byte)137,80,78,71,13,10,26,10};
 
     private BundleSchemaValidator() {}
@@ -294,11 +298,12 @@ final class BundleSchemaValidator {
 
     private static SurfaceTable validateFaces(ZipFile zip, ZipEntry entry, int materialCount) throws IOException {
         try (Binary in = new Binary(zip.getInputStream(entry), entry.getSize())) {
-            in.magic(FACE_MAGIC); in.version();
+            in.magic(FACE_MAGIC); in.version(2);
             long uvCount = in.count(BundleLimits.MAX_UV_REGIONS_PER_MAP, "UV region");
             long sectionCount = in.count(BundleLimits.MAX_SECTIONS_PER_MAP, "section");
-            long faceCount = in.count(BundleLimits.MAX_FACES_PER_MAP, "face");
-            in.requireRemaining(Math.addExact(Math.multiplyExact(uvCount, 64), Math.multiplyExact(sectionCount, 16)), "surface header counts");
+            long faceCount = in.count(BundleLimits.MAX_FACES_PER_MAP, "fragment");
+            in.requireRemaining(Math.addExact(Math.addExact(Math.multiplyExact(uvCount, 64), Math.multiplyExact(sectionCount, 16)),
+                Math.multiplyExact(faceCount, FRAGMENT_FIXED_BYTES + 3L * 6)), "surface header counts");
             long[] priorUv = null;
             List<SurfaceTable.UvRegion> uvRegions = new ArrayList<>((int) uvCount);
             for (long i = 0; i < uvCount; i++) {
@@ -317,23 +322,36 @@ final class BundleSchemaValidator {
                 if (priorSection != null && compare(priorSection, section) >= 0) fail(BundleErrorCode.INVALID_SCHEMA, "sections are not uniquely sorted");
                 priorSection = section;
                 long count = in.u32(); if (count == 0) fail(BundleErrorCode.INVALID_SCHEMA, "empty surface section");
+                seenFaces = Math.addExact(seenFaces, count); if (seenFaces > faceCount) fail(BundleErrorCode.INVALID_SCHEMA, "section fragment counts exceed header");
+                // Records are variable-length; the smallest (a triangle) bounds the allocation.
+                in.requireRemaining(Math.multiplyExact(count, FRAGMENT_FIXED_BYTES + 3L * 6), "fragment records");
                 List<SurfaceTable.Face> faces = new ArrayList<>((int) count);
-                seenFaces = Math.addExact(seenFaces, count); if (seenFaces > faceCount) fail(BundleErrorCode.INVALID_SCHEMA, "section face counts exceed header");
-                in.requireRemaining(Math.multiplyExact(count, 20), "face records");
                 FaceOrder prior = null;
                 for (long f = 0; f < count; f++) {
-                    byte[] record = in.bytes(20);
-                    int local = u16(record, 0), patch = record[2] & 255, provenance = record[3] & 255;
-                    if ((local & 0xf000) != 0 || (patch & 0x80) != 0 || (patch & 7) > 5 || ((patch >>> 3) & 3) > 2 || provenance > 1) fail(BundleErrorCode.INVALID_SCHEMA, "invalid face record bits");
+                    byte[] record = in.bytes(FRAGMENT_FIXED_BYTES);
+                    int local = u16(record, 0), flags = record[2] & 255, provenance = record[3] & 255, vertexCount = record[20] & 255;
+                    // Flags: bit 0 owned; bits 1-2, 3-4, 5-6 owner offset X, Y, Z plus one; bit 7 zero.
+                    int ownerDx = (flags >>> 1 & 3) - 1, ownerDy = (flags >>> 3 & 3) - 1, ownerDz = (flags >>> 5 & 3) - 1;
+                    boolean owned = (flags & 1) != 0;
+                    if ((local & 0xf000) != 0 || (flags & 0x80) != 0 || ownerDx > 1 || ownerDy > 1 || ownerDz > 1
+                        || (!owned && flags != UNOWNED_FLAGS) || provenance > 2) fail(BundleErrorCode.INVALID_SCHEMA, "invalid fragment record bits");
+                    if (vertexCount < 3 || vertexCount > SurfaceTable.MAX_FRAGMENT_VERTICES) fail(BundleErrorCode.INVALID_SCHEMA, "invalid fragment vertex count");
                     if (u32(record, 4) >= Integer.toUnsignedLong(materialCount) || u32(record, 8) >= uvCount) fail(BundleErrorCode.INVALID_REFERENCE, "surface reference out of range");
-                    FaceOrder order = new FaceOrder(local, patch, u32(record,4), u32(record,8), provenance, u32(record,12), u32(record,16));
-                    if (prior != null && prior.compareTo(order) >= 0) fail(BundleErrorCode.INVALID_SCHEMA, "faces are not uniquely sorted");
+                    FaceOrder order = new FaceOrder(local, provenance, u32(record,12), u32(record,16));
+                    if (prior != null && prior.compareTo(order) >= 0) fail(BundleErrorCode.INVALID_SCHEMA, "fragments are not uniquely sorted");
                     prior = order;
-                    faces.add(new SurfaceTable.Face(local, patch, provenance, (int)u32(record,4), (int)u32(record,8), u32(record,12), u32(record,16)));
+                    byte[] coords = in.bytes(vertexCount * 6);
+                    short[] vertices = new short[vertexCount * 3];
+                    for (int n = 0; n < vertices.length; n++) {
+                        int value = u16(coords, n * 2);
+                        if (value > SurfaceTable.CELL_UNITS) fail(BundleErrorCode.INVALID_SCHEMA, "fragment vertex outside its cell");
+                        vertices[n] = (short) value;
+                    }
+                    faces.add(new SurfaceTable.Face(local, owned, ownerDx, ownerDy, ownerDz, provenance, (int)u32(record,4), (int)u32(record,8), u32(record,12), u32(record,16), vertices));
                 }
                 sections.put(new SurfaceTable.SectionPos(section[0], section[1], section[2]), faces);
             }
-            if (seenFaces != faceCount) fail(BundleErrorCode.INVALID_SCHEMA, "surface face count differs");
+            if (seenFaces != faceCount) fail(BundleErrorCode.INVALID_SCHEMA, "surface fragment count differs");
             in.end();
             return new SurfaceTable(uvRegions, sections);
         }
@@ -497,7 +515,7 @@ final class BundleSchemaValidator {
     private static void fail(BundleErrorCode code,String message)throws BundleValidationException{throw new BundleValidationException(code,message);}
 
     private static int compareModels(BundleModel left, BundleModel right) { int c=left.contentId().compareTo(right.contentId());if(c==0)c=left.sourceModel().compareTo(right.sourceModel());if(c==0){int[] a=left.materialIds(),b=right.materialIds();for(int i=0;i<Math.min(a.length,b.length);i++){c=Integer.compareUnsigned(a[i],b[i]);if(c!=0)return c;}c=Integer.compare(a.length,b.length);}return c; }
-    private record FaceOrder(int local,int patch,long material,long uv,int provenance,long primary,long secondary) implements Comparable<FaceOrder>{public int compareTo(FaceOrder o){int c=Integer.compare(local,o.local);if(c==0)c=Integer.compare(patch,o.patch);if(c==0)c=Long.compareUnsigned(material,o.material);if(c==0)c=Long.compareUnsigned(uv,o.uv);if(c==0)c=Integer.compare(provenance,o.provenance);if(c==0)c=Long.compareUnsigned(primary,o.primary);if(c==0)c=Long.compareUnsigned(secondary,o.secondary);return c;}}
+    private record FaceOrder(int local,int provenance,long primary,long secondary) implements Comparable<FaceOrder>{public int compareTo(FaceOrder o){int c=Integer.compare(local,o.local);if(c==0)c=Integer.compare(provenance,o.provenance);if(c==0)c=Long.compareUnsigned(primary,o.primary);if(c==0)c=Long.compareUnsigned(secondary,o.secondary);return c;}}
     private record DiagnosticOrder(int severity,String code,String message,String context) implements Comparable<DiagnosticOrder>{public int compareTo(DiagnosticOrder o){int c=Integer.compare(severity,o.severity);if(c==0)c=code.compareTo(o.code);if(c==0)c=message.compareTo(o.message);if(c==0)c=context.compareTo(o.context);return c;}}
 
     private static final class Binary implements AutoCloseable {
@@ -505,7 +523,8 @@ final class BundleSchemaValidator {
         Binary(InputStream in,long size){this.in=in;this.remaining=size;}
         byte[] bytes(int n)throws IOException{if(n<0||remaining<n)fail(BundleErrorCode.INVALID_SCHEMA,"truncated binary payload");byte[] b=in.readNBytes(n);if(b.length!=n)throw new EOFException();remaining-=n;return b;}
         void skip(int n)throws IOException{bytes(n);} void magic(byte[] expected)throws IOException{if(!Arrays.equals(bytes(expected.length),expected))fail(BundleErrorCode.INVALID_SCHEMA,"invalid binary magic");}
-        void version()throws IOException{long v=u32();if(v!=1)fail(BundleErrorCode.UNSUPPORTED_VERSION,"unsupported binary version "+v);}
+        void version()throws IOException{version(1);}
+        void version(long expected)throws IOException{long v=u32();if(v!=expected)fail(BundleErrorCode.UNSUPPORTED_VERSION,"unsupported binary version "+v);}
         int i32()throws IOException{return ByteBuffer.wrap(bytes(4)).order(ByteOrder.LITTLE_ENDIAN).getInt();} long u32()throws IOException{return Integer.toUnsignedLong(i32());}
         int i16()throws IOException{return ByteBuffer.wrap(bytes(2)).order(ByteOrder.LITTLE_ENDIAN).getShort();}
         long u32be()throws IOException{return Integer.toUnsignedLong(ByteBuffer.wrap(bytes(4)).getInt());}
