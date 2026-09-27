@@ -444,31 +444,6 @@ pub struct Props {
     /// the conversion did not build — and moving it there would invent a
     /// position rather than recover one.
     pub settle_max: f64,
-    /// Nudge a prop off converted map geometry it did not intersect in the
-    /// source map.
-    ///
-    /// Voxelizing a brush wall can round its face by up to a block, so a prop
-    /// placed flush against the real surface sometimes reads as embedded in
-    /// the voxel one. The correction measures the true brush plane and moves
-    /// the prop only as far as that rounding, along the collision normal —
-    /// never a whole-block search across a diagonal, which used to throw a
-    /// pipe run or a wall sign yards from where the mapper put it.
-    pub snap: bool,
-    /// How far the sub-block correction above may move a prop, in blocks.
-    ///
-    /// Hard-capped at one block regardless of this setting: the error being
-    /// undone is voxelization rounding, which cannot exceed a block by
-    /// construction, so anything asked for beyond that would be inventing a
-    /// position rather than recovering one. This exists to let the cap be
-    /// tightened, not loosened.
-    pub snap_max: f64,
-    /// Record up to this many individual per-prop snap offsets in
-    /// `diagnostics.json`, beyond the existing summary counts.
-    ///
-    /// Off by default: a map with several thousand props would otherwise
-    /// carry several thousand extra diagnostic entries just to measure a
-    /// change nobody asked to see. Set it when comparing two exports.
-    pub snap_diagnostics_limit: usize,
     /// Props whose longest dimension is at least this many Source units are
     /// solid. Smaller clutter is left walk-through; 0 makes everything solid,
     /// and a huge value nothing.
@@ -566,9 +541,6 @@ impl Default for Props {
             texture_repeat_max: 4,
             settle: true,
             settle_max: 1.0,
-            snap: true,
-            snap_max: 1.0,
-            snap_diagnostics_limit: 0,
             collision_min_size: 48.0,
             collision: CollisionMode::Shaped,
             collision_max_shapes: 16_384,
@@ -639,6 +611,10 @@ pub struct Output {
     pub paste_script: bool,
     pub voxelize: Voxelize,
     pub brush_meshes: BrushMeshes,
+    /// Also keep the map's exact visible faces, cut per cell, for the mod
+    /// bundle. Set by `mod export`, never from a config file.
+    #[serde(skip)]
+    pub exact_surfaces: bool,
 }
 
 impl Default for Output {
@@ -649,6 +625,7 @@ impl Default for Output {
             paste_script: true,
             voxelize: Voxelize::default(),
             brush_meshes: BrushMeshes::default(),
+            exact_surfaces: false,
         }
     }
 }

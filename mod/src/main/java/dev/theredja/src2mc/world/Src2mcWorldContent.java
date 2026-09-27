@@ -19,8 +19,8 @@ public final class Src2mcWorldContent {
     private static final DeferredRegister<BlockEntityType<?>> BLOCK_ENTITIES =
         DeferredRegister.create(BuiltInRegistries.BLOCK_ENTITY_TYPE, Src2mc.MOD_ID);
 
-    public static final DeferredBlock<Src2mcInvisibleBlock> SURFACE = BLOCKS.registerBlock(
-        "surface", Src2mcInvisibleBlock::new, properties());
+    public static final DeferredBlock<Src2mcSurfaceBlock> SURFACE = BLOCKS.registerBlock(
+        "surface", Src2mcSurfaceBlock::new, properties());
     public static final DeferredBlock<Src2mcInvisibleBlock> CARRIER = BLOCKS.registerBlock(
         "carrier", Src2mcInvisibleBlock::new, properties());
     public static final DeferredBlock<Src2mcDataBlock> MAP_ANCHOR = BLOCKS.registerBlock(

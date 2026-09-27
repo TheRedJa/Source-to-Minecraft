@@ -5,6 +5,10 @@ import java.util.Map;
 
 /** Immutable sparse map-local surface lookup retained by a validated generation. */
 public record SurfaceTable(List<UvRegion> uvRegions, Map<SectionPos, List<Face>> sections) {
+    /** Fragment vertex coordinates are in 1/4096 block within the owner cell. */
+    public static final int CELL_UNITS = 4096;
+    public static final int MAX_FRAGMENT_VERTICES = 64;
+
     public SurfaceTable {
         uvRegions = List.copyOf(uvRegions);
         sections = sections.entrySet().stream().collect(java.util.stream.Collectors.toUnmodifiableMap(
@@ -19,8 +23,57 @@ public record SurfaceTable(List<UvRegion> uvRegions, Map<SectionPos, List<Face>>
     }
 
     public record SectionPos(int x, int y, int z) {}
-    public record Face(int localCell, int patch, int provenance, int materialId, int uvRegionId,
-                       long sourcePrimary, long sourceSecondary) {}
+    /**
+     * One exact convex polygon clipped to its owner cell. {@code vertices} holds X, Y, Z per
+     * vertex in 1/4096 block relative to the cell, counter-clockwise seen from the front.
+     * An owned fragment is drawn only while its owner cell -- {@code localCell} plus the owner
+     * offset, each axis -1..1 -- still holds {@code src2mc:surface}. The offset is non-zero when
+     * the fragment sits just off the grid in an air cell in front of the block it rests on; an
+     * unowned fragment always has a zero offset.
+     */
+    public record Face(int localCell, boolean owned, int ownerDx, int ownerDy, int ownerDz, int provenance,
+                       int materialId, int uvRegionId, long sourcePrimary, long sourceSecondary, short[] vertices) {
+        public Face {
+            if (Math.abs(ownerDx) > 1 || Math.abs(ownerDy) > 1 || Math.abs(ownerDz) > 1
+                || (!owned && (ownerDx | ownerDy | ownerDz) != 0)) {
+                throw new IllegalArgumentException("invalid fragment owner offset");
+            }
+            if (vertices.length < 9 || vertices.length % 3 != 0 || vertices.length > MAX_FRAGMENT_VERTICES * 3) {
+                throw new IllegalArgumentException("fragment needs 3 to " + MAX_FRAGMENT_VERTICES + " vertices");
+            }
+            vertices = vertices.clone();
+        }
+        @Override public short[] vertices() { return vertices.clone(); }
+        public int vertexCount() { return vertices.length / 3; }
+        /** Coordinate {@code axis} (0 X, 1 Y, 2 Z) of vertex {@code index}, in blocks within the cell. */
+        public double coordinate(int index, int axis) { return vertices[index * 3 + axis] / (double) CELL_UNITS; }
+        /**
+         * Unit front normal by Newell's method, robust to the collinear leading vertices a
+         * clipped polygon can have; {0, 0, 0} for a degenerate polygon.
+         */
+        public double[] normal() {
+            double nx = 0, ny = 0, nz = 0;
+            int count = vertexCount();
+            for (int i = 0; i < count; i++) {
+                int a = i * 3, b = (i + 1) % count * 3;
+                nx += (double) (vertices[a + 1] - vertices[b + 1]) * (vertices[a + 2] + vertices[b + 2]);
+                ny += (double) (vertices[a + 2] - vertices[b + 2]) * (vertices[a] + vertices[b]);
+                nz += (double) (vertices[a] - vertices[b]) * (vertices[a + 1] + vertices[b + 1]);
+            }
+            double length = Math.sqrt(nx * nx + ny * ny + nz * nz);
+            return length == 0 ? new double[3] : new double[] {nx / length, ny / length, nz / length};
+        }
+        @Override public boolean equals(Object other) {
+            return other instanceof Face f && localCell == f.localCell && owned == f.owned && ownerDx == f.ownerDx
+                && ownerDy == f.ownerDy && ownerDz == f.ownerDz && provenance == f.provenance
+                && materialId == f.materialId && uvRegionId == f.uvRegionId && sourcePrimary == f.sourcePrimary
+                && sourceSecondary == f.sourceSecondary && java.util.Arrays.equals(vertices, f.vertices);
+        }
+        @Override public int hashCode() {
+            return java.util.Objects.hash(localCell, owned, ownerDx, ownerDy, ownerDz, provenance, materialId, uvRegionId, sourcePrimary, sourceSecondary,
+                java.util.Arrays.hashCode(vertices));
+        }
+    }
     public record UvRegion(double[] values) {
         public UvRegion { values = values.clone(); }
         @Override public double[] values() { return values.clone(); }

@@ -57,7 +57,10 @@ mod tests {
 
     fn decode_sections(bytes: &[u8]) -> Vec<(IVec3, Vec<u8>)> {
         assert_eq!(&bytes[0..8], &MAGIC);
-        assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), VERSION);
+        assert_eq!(
+            u32::from_le_bytes(bytes[8..12].try_into().unwrap()),
+            VERSION
+        );
         let count = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
         let mut at = 16;
         let mut out = Vec::new();

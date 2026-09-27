@@ -164,18 +164,22 @@ public final class SkyLightBake {
 
     /**
      * Everything in the map that stops daylight: the cells the voxelizer filled
-     * — recognized by the surface table having a face in them — and the cells
-     * the exporter recorded as occluding without holding a block.
+     * — the owner cells of the surface table's owned fragments, which hold the
+     * blocks — and the cells the exporter recorded as occluding without holding
+     * a block. A fragment's own cell can be air in front of its owner (a floor a
+     * quarter block above the block it rests on), and an unowned fragment has
+     * no block at all, so neither darkens the cell it lies in.
      */
     private static void fillOpaque(BundleMap map, MapPlacement placement, Region region, boolean[] opaque) {
         BlockPos translation = placement.translation();
         for (Map.Entry<SurfaceTable.SectionPos, List<SurfaceTable.Face>> entry : map.surfaces().sections().entrySet()) {
             SurfaceTable.SectionPos at = entry.getKey();
             for (SurfaceTable.Face face : entry.getValue()) {
+                if (!face.owned()) continue;
                 int local = face.localCell();
-                mark(region, opaque, translation.getX() + (at.x() << 4) + (local & 15),
-                    translation.getY() + (at.y() << 4) + ((local >> 8) & 15),
-                    translation.getZ() + (at.z() << 4) + ((local >> 4) & 15));
+                mark(region, opaque, translation.getX() + (at.x() << 4) + (local & 15) + face.ownerDx(),
+                    translation.getY() + (at.y() << 4) + ((local >> 8) & 15) + face.ownerDy(),
+                    translation.getZ() + (at.z() << 4) + ((local >> 4) & 15) + face.ownerDz());
             }
         }
         OcclusionTable occlusion = map.occlusion();

@@ -138,4 +138,30 @@ final class SkyLightBakeTest {
 
         assertEquals(baked.at(3, 9, 5), new net.minecraft.world.level.chunk.DataLayer(layer.clone()).get(3, 9, 5));
     }
+
+    /**
+     * A floor drawn a quarter block above the blocks it rests on: its fragments lie in the air
+     * cells at y = 11 and name the blocks at y = 10 as owners. The blocks stop daylight; the air
+     * the floor lies in does not, and neither does an unowned fragment's cell.
+     */
+    @Test
+    void ownerCellsOccludeAndFragmentCellsDoNot() {
+        short[] quad = {0, 1024, 0, 0, 1024, 4096, 4096, 1024, 4096, 4096, 1024, 0};
+        List<SurfaceTable.Face> faces = new java.util.ArrayList<>();
+        for (int x = 0; x < SIZE; x++) for (int z = 0; z < SIZE; z++) {
+            faces.add(new SurfaceTable.Face((11 << 8) | (z << 4) | x, true, 0, -1, 0, 0, 0, 0, x, z, quad));
+        }
+        faces.add(new SurfaceTable.Face((13 << 8) | (4 << 4) | 4, false, 0, 0, 0, 0, 0, 0, 99, 0, quad));
+        faces.sort(java.util.Comparator.comparingInt(SurfaceTable.Face::localCell));
+        BundleMap map = new BundleMap("m", "m.bsp", new int[]{0, 0, 0}, new int[]{SIZE - 1, SIZE - 1, SIZE - 1},
+            new int[]{0, 0, 0}, List.of(), List.of(), List.of(), false,
+            new SurfaceTable(List.of(), Map.of(new SurfaceTable.SectionPos(0, 0, 0), faces)), java.util.Set.of(), null, null, null);
+
+        SkyLightBake.Baked baked = bake(map);
+
+        assertEquals(15, baked.at(8, 11, 8), "the air cell the floor lies in");
+        assertEquals(15, baked.at(4, 13, 4), "an unowned fragment's cell");
+        assertEquals(0, baked.at(8, 10, 8), "the block the floor rests on");
+        assertTrue(baked.at(8, 9, 8) < 15, "under the blocks");
+    }
 }

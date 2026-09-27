@@ -1,6 +1,7 @@
 //! Voxelization: turning Source geometry into a Minecraft block grid.
 
 pub mod brush;
+pub mod fragments;
 pub mod grid;
 pub mod mesh;
 pub mod settle;

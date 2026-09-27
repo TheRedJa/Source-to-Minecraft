@@ -367,7 +367,10 @@ mod face_tests {
             // an unordered fan would put a diagonal in the sequence instead.
             for pair in 0..4 {
                 let edge = (face[(pair + 1) % 4] - face[pair]).length();
-                assert!((edge - 2.0).abs() < 1e-9, "corner {pair} is not an edge apart: {edge}");
+                assert!(
+                    (edge - 2.0).abs() < 1e-9,
+                    "corner {pair} is not an edge apart: {edge}"
+                );
             }
         }
     }

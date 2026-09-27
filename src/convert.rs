@@ -45,6 +45,9 @@ pub struct Conversion {
     /// block is written for them; they exist so the runtime can make the
     /// lighting behave as if the geometry were there.
     pub occluders: BTreeSet<IVec3>,
+    /// The map's exact visible geometry, one piece per owning cell. Only
+    /// filled when `output.exact_surfaces` asks for it.
+    pub fragments: Vec<crate::voxel::fragments::Fragment>,
 }
 
 /// One brush drawn as its own geometry rather than as blocks.
@@ -171,6 +174,9 @@ pub struct Stats {
     pub blocks_before_hollow: usize,
     /// Canonical material/UV records for visible brush and terrain faces.
     pub visible_faces: usize,
+    /// Drawn faces no converted brush could be found behind. They are kept,
+    /// on their material alone.
+    pub exact_faces_unmatched: usize,
     pub blocks: usize,
     /// Voxel count per block type, for sourcing materials.
     pub block_counts: BTreeMap<String, usize>,
@@ -921,6 +927,257 @@ const MESH_THICKNESS_SLACK: f64 = 1e-6;
 /// the rest. A thin brush with nothing visible on it is dropped outright, which
 /// is the same answer voxelizing would have reached: every side vetoed means no
 /// blocks.
+/// Slack, in Source units, when deciding a drawn face lies on a brush side
+/// and inside the brush. Face vertices are written from the same planes the
+/// brush is, so real matches agree far closer than this.
+const FACE_MATCH_SLACK: f64 = 0.5;
+/// Edge of the buckets brushes are filed under to find a face's brush, in
+/// Source units.
+const FACE_MATCH_BUCKET: f64 = 256.0;
+
+/// Brushes filed by model and position, to find the one a drawn face came from.
+struct SolidLookup<'a> {
+    solids: &'a [Solid],
+    buckets: std::collections::HashMap<(usize, [i64; 3]), Vec<u32>>,
+}
+
+impl<'a> SolidLookup<'a> {
+    fn new(solids: &'a [Solid]) -> Self {
+        let mut buckets: std::collections::HashMap<(usize, [i64; 3]), Vec<u32>> =
+            std::collections::HashMap::new();
+        for (index, solid) in solids.iter().enumerate() {
+            let min = Self::bucket(solid.bounds.min - Vec3::splat(FACE_MATCH_SLACK));
+            let max = Self::bucket(solid.bounds.max + Vec3::splat(FACE_MATCH_SLACK));
+            for x in min[0]..=max[0] {
+                for y in min[1]..=max[1] {
+                    for z in min[2]..=max[2] {
+                        buckets
+                            .entry((solid.model, [x, y, z]))
+                            .or_default()
+                            .push(index as u32);
+                    }
+                }
+            }
+        }
+        SolidLookup { solids, buckets }
+    }
+
+    fn bucket(p: Vec3) -> [i64; 3] {
+        [
+            (p.x / FACE_MATCH_BUCKET).floor() as i64,
+            (p.y / FACE_MATCH_BUCKET).floor() as i64,
+            (p.z / FACE_MATCH_BUCKET).floor() as i64,
+        ]
+    }
+
+    /// The brush whose side a face with this centre and outward normal lies
+    /// on, preferring one wearing the face's own texture info. Model-local
+    /// Source space throughout.
+    fn find(
+        &self,
+        model: usize,
+        centre: Vec3,
+        normal: Vec3,
+        texture_info: usize,
+    ) -> Option<&'a Solid> {
+        let candidates = self.buckets.get(&(model, Self::bucket(centre)))?;
+        let mut best: Option<(bool, usize, &'a Solid)> = None;
+        for &index in candidates {
+            let solid = &self.solids[index as usize];
+            if solid
+                .sides
+                .iter()
+                .any(|side| side.plane.distance_to(centre) > FACE_MATCH_SLACK)
+            {
+                continue;
+            }
+            let Some(side) = solid.sides.iter().find(|side| {
+                side.plane.normal.dot(normal) > 0.999
+                    && side.plane.distance_to(centre).abs() <= FACE_MATCH_SLACK
+            }) else {
+                continue;
+            };
+            let same_texture = side.texture_info == Some(texture_info);
+            let better = match best {
+                None => true,
+                Some((best_texture, best_brush, _)) => {
+                    (same_texture, std::cmp::Reverse(solid.brush_index))
+                        > (best_texture, std::cmp::Reverse(best_brush))
+                }
+            };
+            if better {
+                best = Some((same_texture, solid.brush_index, solid));
+            }
+        }
+        best.map(|(_, _, solid)| solid)
+    }
+}
+
+/// Every visible face of the converted world, as exact block-space polygons.
+///
+/// Brush faces come from the face lump — what the map compiler actually
+/// draws, already clipped against every other brush — rather than from brush
+/// sides, which would draw every hidden face between touching brushes too.
+/// The lump does not say which brush a face came from, and whether a brush is
+/// converted at all is decided per brush, so each face is traced back to its
+/// brush by plane and position and takes that brush's decision. Terrain comes
+/// from the displacement triangles, which is what the lump's base quad turns
+/// into in game.
+#[allow(clippy::too_many_arguments)]
+fn exact_polygons(
+    map: &Map,
+    config: &Config,
+    resolver: &Resolver,
+    transform: &Transform,
+    origins: &std::collections::HashMap<usize, Vec3>,
+    models: &[usize],
+    solids: &[Solid],
+    skybox: Option<&crate::bsp::skybox::Skybox>,
+    displacements: &[crate::bsp::displacement::Surface],
+) -> (Vec<crate::voxel::fragments::Polygon>, usize) {
+    use crate::voxel::fragments::Polygon;
+    use crate::voxel::surface::{FaceSource, SourceProvenance};
+    use vbsp::TextureFlags as F;
+    let skip_sky = config.contents.skip_sky;
+    let lookup = SolidLookup::new(solids);
+    let mut polygons = Vec::new();
+    let mut unmatched = 0usize;
+
+    for &model in models {
+        let Some(bsp_model) = map.bsp.models.get(model) else {
+            continue;
+        };
+        let origin = origins.get(&model).copied().unwrap_or(Vec3::ZERO);
+        let first = usize::try_from(bsp_model.first_face).unwrap_or(0);
+        let count = usize::try_from(bsp_model.face_count).unwrap_or(0);
+        for face_index in first..first.saturating_add(count) {
+            let Some(face) = map.bsp.faces.get(face_index) else {
+                break;
+            };
+            if face.displacement_info >= 0 {
+                continue;
+            }
+            let Ok(texture_info) = usize::try_from(face.texture_info) else {
+                continue;
+            };
+            let Some(info) = map.bsp.textures_info.get(texture_info) else {
+                continue;
+            };
+            if is_invisible(info.flags) || (skip_sky && info.flags.intersects(F::SKY | F::SKY2D)) {
+                continue;
+            }
+            let Some(material) = map.material_index(texture_info) else {
+                continue;
+            };
+            let Some(plane) = map.bsp.planes.get(face.plane_num as usize) else {
+                continue;
+            };
+            // The compiler writes the face's own plane, already facing out of
+            // the brush; `side` only repeats which half of the plane pair that
+            // is, and flipping by it points every second face into its brush.
+            let normal = Vec3::from(plane.normal);
+            let points: Vec<Vec3> = vbsp::Handle::new(&map.bsp, face)
+                .vertices()
+                .map(|vertex| Vec3::from(vertex.position))
+                .collect();
+            if points.len() < 3 {
+                continue;
+            }
+            let centre = points.iter().fold(Vec3::ZERO, |sum, &p| sum + p) / points.len() as f64;
+            let decision = match lookup.find(model, centre, normal, texture_info) {
+                // Left out with the 3D skybox, as the voxelizer leaves it out.
+                Some(solid) if skybox.is_some_and(|room| room.contains(&solid.bounds)) => {
+                    continue;
+                }
+                Some(solid) => resolver.decide(solid.flags),
+                // The lump has a face no brush accounts for. Rare; drawn on its
+                // material alone rather than lost.
+                None => {
+                    unmatched += 1;
+                    Decision::ByMaterial
+                }
+            };
+            if side_block(&decision, resolver, Some(material), info.flags, skip_sky).is_none() {
+                continue;
+            }
+            let source_normal = normal;
+            let uv = crate::bsp::texcoord::TexCoord::of(info).in_block_space(transform, origin);
+            let whole = Polygon::new(
+                FaceSource {
+                    provenance: SourceProvenance::Face {
+                        face: face_index,
+                        piece: 0,
+                    },
+                    material,
+                    uv,
+                },
+                transform.transform_direction(source_normal),
+                points
+                    .iter()
+                    .map(|&p| transform.to_block_space(p + origin))
+                    .collect(),
+            );
+            for (piece, points) in whole.pieces().into_iter().enumerate() {
+                let mut source = whole.source;
+                source.provenance = SourceProvenance::Face {
+                    face: face_index,
+                    piece,
+                };
+                polygons.push(Polygon::new(source, whole.normal, points));
+            }
+        }
+    }
+
+    for surface in displacements {
+        if skybox.is_some_and(|room| room.contains(&surface.bounds)) {
+            continue;
+        }
+        let (Some(material), Some(texcoord)) = (surface.material, surface.texcoord) else {
+            continue;
+        };
+        if resolver.block_for_material(material).is_none() {
+            continue;
+        }
+        let uv = texcoord.in_block_space(transform, Vec3::ZERO);
+        let triangles: Vec<[Vec3; 3]> = surface
+            .triangles
+            .iter()
+            .map(|tri| [tri.a, tri.b, tri.c].map(|p| transform.to_block_space(p)))
+            .collect();
+        // Terrain can fold, so a single triangle facing away from the base
+        // face is real. The winding of the whole surface is what says which
+        // side is the top.
+        let base = transform.transform_direction(surface.normal);
+        let winding: f64 = triangles
+            .iter()
+            .map(|[a, b, c]| (*b - *a).cross(*c - *a).dot(base))
+            .sum();
+        for (triangle, points) in triangles.into_iter().enumerate() {
+            let [a, b, c] = points;
+            let mut normal = (b - a).cross(c - a);
+            if winding < 0.0 {
+                normal = -normal;
+            }
+            if normal.length() <= 1.0e-12 || !normal.is_finite() {
+                continue;
+            }
+            polygons.push(Polygon::new(
+                FaceSource {
+                    provenance: SourceProvenance::Displacement {
+                        displacement: surface.index,
+                        triangle,
+                    },
+                    material,
+                    uv,
+                },
+                normal.normalized(),
+                vec![a, b, c],
+            ));
+        }
+    }
+    (polygons, unmatched)
+}
+
 fn split_brush_meshes(
     map: &Map,
     config: &Config,
@@ -1028,8 +1285,7 @@ fn brush_mesh(
         // of the texture is worth keeping: a sprite tiled every half block
         // needs far fewer texels than one stretched over ten.
         let span = |axis: [f64; 4], texels: f64| {
-            let rate =
-                (axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]).sqrt();
+            let rate = (axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]).sqrt();
             (rate > 0.0).then(|| texels / rate)
         };
         for (index, blocks) in [span(texcoord.u, size[0]), span(texcoord.v, size[1])]
@@ -1042,8 +1298,7 @@ fn brush_mesh(
         }
         for corner in 1..polygon.len() - 1 {
             let triangle = [polygon[0], polygon[corner], polygon[corner + 1]];
-            part.triangles
-                .push(triangle.map(|point| point - centre));
+            part.triangles.push(triangle.map(|point| point - centre));
             part.normals.push(plane.normal);
             part.uvs.push(triangle.map(uv_of));
         }
@@ -1093,9 +1348,13 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
     let entity_models = entity_models(map, config, &transform);
 
     // Gather every brush first so the voxelization itself parallelizes cleanly.
-    let solids: Vec<Solid> = models_to_convert(map, config, &entity_models)
+    let models = models_to_convert(map, config, &entity_models);
+    let model_solids: Vec<Solid> = models.iter().flat_map(|&model| map.solids(model)).collect();
+    // Every brush the world is made of, thin and skybox ones included: a drawn
+    // face is traced back to its brush to learn whether the brush is converted.
+    let exact_solids = config.output.exact_surfaces.then(|| model_solids.clone());
+    let solids: Vec<Solid> = model_solids
         .into_iter()
-        .flat_map(|model| map.solids(model))
         .filter(|solid| !skybox.is_some_and(|room| room.contains(&solid.bounds)))
         .collect();
 
@@ -1159,8 +1418,19 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
             if solids.is_empty() {
                 return None;
             }
+            // Counted apart: these brushes are not in `solids`, and adding
+            // their skips to its count underflowed the voxelized total.
+            let separate_skipped = std::sync::atomic::AtomicUsize::new(0);
             let (grid, _, _) = voxelize_solids(
-                &solids, map, config, &resolver, &transform, &origins, &tiles, &palette, &skipped,
+                &solids,
+                map,
+                config,
+                &resolver,
+                &transform,
+                &origins,
+                &tiles,
+                &palette,
+                &separate_skipped,
             );
             (grid.count() > 0).then(|| SeparateEntity {
                 entity: entity.entity,
@@ -1609,6 +1879,21 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
         })
         .collect();
 
+    let mut exact_faces_unmatched = 0;
+    let fragments = match &exact_solids {
+        Some(all_solids) => {
+            let (polygons, unmatched) = exact_polygons(
+                map, config, &resolver, &transform, &origins, &models, all_solids, skybox,
+                &surfaces,
+            );
+            exact_faces_unmatched = unmatched;
+            polygons
+                .par_iter()
+                .flat_map_iter(|polygon| crate::voxel::fragments::fragments(polygon, &grid))
+                .collect()
+        }
+        None => Vec::new(),
+    };
     Ok(Conversion {
         stats: Stats {
             solids_voxelized: solids.len() - skipped,
@@ -1632,6 +1917,7 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
             shapes_fitted,
             blocks_before_hollow,
             visible_faces: visible_surfaces.len(),
+            exact_faces_unmatched,
             blocks: grid.count(),
             block_counts,
         },
@@ -1646,6 +1932,7 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
         solid_index,
         brush_meshes,
         occluders,
+        fragments,
     })
 }
 
@@ -1821,15 +2108,20 @@ mod tests {
             !occluders.is_empty(),
             "drawn brushes must still darken the cells they cover"
         );
-        assert!(!meshes.is_empty(), "a real map has trim thinner than 8 units");
+        assert!(
+            !meshes.is_empty(),
+            "a real map has trim thinner than 8 units"
+        );
         assert!(
             voxelized.len() + meshes.len() <= total,
             "splitting invented brushes"
         );
 
         let limit = config.output.brush_meshes.max_thickness_units / transform.units_per_block();
-        let by_index: std::collections::HashMap<usize, &Solid> =
-            solids.iter().map(|solid| (solid.brush_index, solid)).collect();
+        let by_index: std::collections::HashMap<usize, &Solid> = solids
+            .iter()
+            .map(|solid| (solid.brush_index, solid))
+            .collect();
         for mesh in &meshes {
             // Measured against the brush's own faces, not its bounding box: a
             // tilted plate has a box far thicker than the plate.
@@ -1862,8 +2154,7 @@ mod tests {
 
         // Turning the feature off must put every brush back on the voxel path.
         config.output.brush_meshes.enabled = false;
-        let (all, none, no_cells) =
-            split_brush_meshes(&map, &config, &transform, &origins, solids);
+        let (all, none, no_cells) = split_brush_meshes(&map, &config, &transform, &origins, solids);
         assert_eq!(all.len(), total);
         assert!(none.is_empty());
         assert!(no_cells.is_empty());

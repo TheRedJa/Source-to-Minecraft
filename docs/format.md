@@ -69,9 +69,10 @@ those incidental ZIP properties.
 
 ## 5. Map surface table
 
-Each map's canonical visible faces are stored at
-`maps/<map-id>/surfaces.s2faces`. The payload begins with this fixed little-endian
-header:
+Each map's visible world geometry is stored at `maps/<map-id>/surfaces.s2faces`
+as exact polygons, one per map-local cell they fall in. Nothing is snapped to
+the block grid: a wall 8 units off a block boundary is drawn 8 units off it.
+The payload begins with this fixed little-endian header:
 
 | Field | Type | Value |
 | --- | --- | --- |
@@ -79,7 +80,7 @@ header:
 | version | `u32` | 2 |
 | UV-region count | `u32` | number of following UV records |
 | section count | `u32` | number of following section buckets |
-| face count | `u32` | total face records in all buckets |
+| fragment count | `u32` | total fragment records in all buckets |
 
 UV regions follow in lexicographic order of their canonical IEEE-754 bit
 patterns. Each consists of eight finite `f64` values: the four coefficients of
@@ -88,29 +89,53 @@ for `t`. Coordinates are map-local Minecraft block coordinates. Signed zero is
 canonicalized to positive zero before deduplication and writing.
 
 Each non-empty 16x16x16 map-local section then contains its signed `i32` X, Y,
-and Z section coordinates, a `u32` face count, and that many fixed 20-byte face
-records:
+and Z section coordinates, a `u32` fragment count, and that many
+variable-length fragment records:
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| local cell | `u16` | bits 0–3 X, 4–7 Z, 8–11 Y; high bits zero |
-| patch | `u8` | bits 0–2 direction, 3–4 plane, 5 A-min, 6 B-min; bit 7 zero |
-| provenance kind | `u8` | 0 brush side, 1 displacement triangle |
+| local cell | `u16` | owner cell: bits 0–3 X, 4–7 Z, 8–11 Y; high bits zero |
+| flags | `u8` | bit 0 *owned*; bits 1–6 owner offset; bit 7 zero |
+| provenance kind | `u8` | 0 brush side, 1 displacement triangle, 2 BSP draw face |
 | material ID | `u32` | index into the map's material-reference table |
 | UV-region ID | `u32` | index into this file's UV table |
-| provenance primary | `u32` | brush or displacement index |
-| provenance secondary | `u32` | side or triangle index |
+| provenance primary | `u32` | brush, displacement or BSP face index |
+| provenance secondary | `u32` | side, triangle, or piece index within the face |
+| vertex count | `u8` | 3–64 |
+| vertices | count x 3 `u16` | X, Y, Z within the owner cell, in 1/4096 block, 0–4096 |
 
-Directions 0–5 are down, up, north, south, west, and east. Plane and A/B
-coordinates are in half-block units 0–2. For up/down A is X and B is Z; for
-north/south A is X and B is Y; for west/east A is Z and B is Y. A face is one
-0.5x0.5 micro-patch: each tangential maximum is its encoded minimum plus one.
-This directly preserves the converter's fitted-shape geometry; v1 does not
-silently coalesce patches into larger rectangles.
+A fragment is one planar convex polygon, the part of a Source face that lies
+inside its owner cell. Its vertices are wound counter-clockwise seen from the
+front: `(v1 - v0) x (v2 - v0)` points out of the visible side. The absolute
+position of a vertex is `cell + coordinate / 4096`; a vertex on a shared cell
+boundary is written as exactly 0 or 4096 in each cell, so fragments meeting at a
+cell boundary share their edge bit-for-bit.
 
-Sections and faces use canonical coordinate/record order. `u32` references and
-counts avoid a campaign-wide `u16` ceiling; loaders must additionally enforce
-the defensive allocation limits in section 10.
+The fragment's cell is the one behind it, on the solid side of the face. A
+fragment lying exactly in a cell boundary plane belongs to the cell behind that
+plane, never to the one in front. Records are bucketed and positioned by this
+cell.
+
+*Owned* means the fragment has an owner block: an `src2mc:surface` block in the
+map's schematic at the owner cell, which is the fragment's cell plus the owner
+offset. The block is the fragment's editable handle: while the owner cell holds
+an `src2mc:surface` block the fragment is drawn, and once the block is broken or
+replaced it is not. The offset is zero when the fragment's own cell holds the
+block. It is one cell further behind, along the axis the normal points most
+along, when the face sits just off the grid — a floor a quarter of a block above
+the block it rests on. Bits 1–2, 3–4 and 5–6 hold the X, Y and Z offsets plus
+one, each 0, 1 or 2; 3 is invalid, and a fragment that is not owned has a zero
+offset (bits 1–6 = `0b010101`).
+
+A fragment that is not owned has no block near enough behind it — thin brushes,
+and faces whose solid side fills too little of the cells behind it to
+voxelize — and is drawn unconditionally.
+
+Records within a section are ordered by local cell, provenance kind,
+provenance primary, then provenance secondary, and that key is unique. `u32`
+references and counts avoid a campaign-wide `u16` ceiling; loaders must
+additionally enforce the defensive allocation limits in section 10, where the
+face limit counts fragments.
 
 ## 6. Campaign and map metadata
 
