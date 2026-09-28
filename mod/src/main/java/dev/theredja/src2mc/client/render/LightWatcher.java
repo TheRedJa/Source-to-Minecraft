@@ -114,6 +114,9 @@ final class LightWatcher {
             Watch watch = WATCHED.get(key);
             if (watch == null) continue;
             SectionPos section = SectionPos.of(key);
+            // A chunk whose light is still queued would record its empty light as the baseline,
+            // then report the arrival as a change and rebuild what was built against it.
+            if (!watch.initialized && !ChunkLightTracker.ready(level, section.x(), section.z())) continue;
             int hash = hashSection(section);
             checksLastTick++;
             if (!watch.initialized) {

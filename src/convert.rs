@@ -48,6 +48,9 @@ pub struct Conversion {
     /// The map's exact visible geometry, one piece per owning cell. Only
     /// filled when `output.exact_surfaces` asks for it.
     pub fragments: Vec<crate::voxel::fragments::Fragment>,
+    /// What every cell is solid as, finer than a block. Only computed along
+    /// with `fragments`.
+    pub collision: Option<crate::voxel::collision::CellCollision>,
 }
 
 /// One brush drawn as its own geometry rather than as blocks.
@@ -1144,17 +1147,20 @@ fn exact_polygons(
             .iter()
             .map(|tri| [tri.a, tri.b, tri.c].map(|p| transform.to_block_space(p)))
             .collect();
-        // Terrain can fold, so a single triangle facing away from the base
-        // face is real. The winding of the whole surface is what says which
-        // side is the top.
-        let base = transform.transform_direction(surface.normal);
+        // Each triangle faces the way it winds, which is how Source culls it.
+        // Terrain can fold, so a single triangle facing away from the surface
+        // is real; the surface's own facing, inverted displacements included,
+        // is settled in `displacement_surface`, and the winding agrees with it.
+        let facing = transform.transform_direction(surface.normal);
         let winding: f64 = triangles
             .iter()
-            .map(|[a, b, c]| (*b - *a).cross(*c - *a).dot(base))
+            .map(|[a, b, c]| (*b - *a).cross(*c - *a).dot(facing))
             .sum();
         for (triangle, points) in triangles.into_iter().enumerate() {
             let [a, b, c] = points;
             let mut normal = (b - a).cross(c - a);
+            // Only a mirroring transform can turn the winding against the
+            // facing here; the facing is what stays right through it.
             if winding < 0.0 {
                 normal = -normal;
             }
@@ -1178,20 +1184,31 @@ fn exact_polygons(
     (polygons, unmatched)
 }
 
+/// What [`split_brush_meshes`] leaves: brushes still to voxelize, the drawn
+/// thin ones, the cells those would have filled, and the thin ones' geometry
+/// with their contents flags, for collision.
+type SplitBrushes = (
+    Vec<Solid>,
+    Vec<BrushMesh>,
+    BTreeSet<IVec3>,
+    Vec<(vbsp::BrushFlags, BlockSolid)>,
+);
+
 fn split_brush_meshes(
     map: &Map,
     config: &Config,
     transform: &Transform,
     origins: &std::collections::HashMap<usize, Vec3>,
     solids: Vec<Solid>,
-) -> (Vec<Solid>, Vec<BrushMesh>, BTreeSet<IVec3>) {
+) -> SplitBrushes {
     if !config.output.brush_meshes.enabled {
-        return (solids, Vec::new(), BTreeSet::new());
+        return (solids, Vec::new(), BTreeSet::new(), Vec::new());
     }
     let limit = config.output.brush_meshes.max_thickness_units / transform.units_per_block();
     let mut voxelized = Vec::with_capacity(solids.len());
     let mut meshes = Vec::new();
     let mut occluders = BTreeSet::new();
+    let mut thin = Vec::new();
     for solid in solids {
         let origin = origins.get(&solid.model).copied().unwrap_or(Vec3::ZERO);
         let block = to_block_solid(&solid, transform, origin);
@@ -1216,8 +1233,9 @@ fn split_brush_meshes(
             });
         }
         meshes.push(mesh);
+        thin.push((solid.flags, block));
     }
-    (voxelized, meshes, occluders)
+    (voxelized, meshes, occluders, thin)
 }
 
 /// Build the drawable mesh for one brush, or `None` when none of its sides is
@@ -1366,7 +1384,7 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
 
     // Brushes thinner than the cut-off never reach the voxel grid: filling
     // every cell they touch is what turns a 4-unit plate into a 32-unit wall.
-    let (solids, brush_meshes, occluders) =
+    let (solids, brush_meshes, occluders, thin_solids) =
         split_brush_meshes(map, config, &transform, &origins, solids);
 
     // Continuous brush geometry, retained so a prop's overlap with the grid
@@ -1635,13 +1653,22 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
     // Props have no interior of their own to lose: they are already surfaces.
     let blocks_before_hollow = grid.count();
     let mut shapes_fitted = 0;
+    // Kept when collision is wanted: a cell hollowing emptied is sealed inside
+    // the map's mass and needs no collision of its own.
+    let mut before_hollow = None;
     let mut grid = match config.fill.mode {
         FillMode::Solid => grid,
-        FillMode::Hollow => shell::hollow(
-            &grid,
-            config.fill.shell_thickness,
-            config.fill.shell_neighborhood,
-        ),
+        FillMode::Hollow => {
+            let hollowed = shell::hollow(
+                &grid,
+                config.fill.shell_thickness,
+                config.fill.shell_neighborhood,
+            );
+            if config.output.exact_surfaces {
+                before_hollow = Some(grid);
+            }
+            hollowed
+        }
     };
     grid.merge(voxelized);
     let grid = grid;
@@ -1894,6 +1921,63 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
         }
         None => Vec::new(),
     };
+    let collision = config.output.exact_surfaces.then(|| {
+        let skip_sky = config.contents.skip_sky;
+        let converted: Vec<&BlockSolid> = solids
+            .iter()
+            .zip(&block_solids)
+            .filter(|(solid, _)| {
+                let decision = resolver.decide(solid.flags);
+                decision != Decision::Skip
+                    && solid.sides.iter().any(|side| {
+                        let material = side.texture_info.and_then(|i| map.material_index(i));
+                        side_block(&decision, &resolver, material, side.texture_flags, skip_sky)
+                            .is_some()
+                    })
+            })
+            .map(|(_, block)| block)
+            .collect();
+        let terrain = surfaces
+            .iter()
+            .filter(|surface| {
+                surface
+                    .material
+                    .and_then(|m| resolver.block_for_material(m))
+                    .is_some()
+            })
+            .map(|surface| crate::voxel::collision::Terrain {
+                triangles: surface
+                    .triangles
+                    .iter()
+                    .map(|tri| {
+                        [
+                            transform.to_block_space(tri.a),
+                            transform.to_block_space(tri.b),
+                            transform.to_block_space(tri.c),
+                        ]
+                    })
+                    .collect(),
+                inward: transform.transform_direction(-surface.normal),
+            })
+            .collect();
+        let interior = |cell: IVec3| {
+            before_hollow
+                .as_ref()
+                .is_some_and(|before| before.is_solid(cell) && !grid.is_solid(cell))
+        };
+        crate::voxel::collision::compute(&crate::voxel::collision::Sources {
+            grid: &grid,
+            interior: &interior,
+            solids: converted,
+            thin: thin_solids
+                .iter()
+                .filter(|(flags, _)| resolver.decide(*flags) != Decision::Skip)
+                .map(|(_, block)| block)
+                .collect(),
+            terrain,
+        })
+    });
+    drop(before_hollow);
     Ok(Conversion {
         stats: Stats {
             solids_voxelized: solids.len() - skipped,
@@ -1933,6 +2017,7 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
         brush_meshes,
         occluders,
         fragments,
+        collision,
     })
 }
 
@@ -2102,7 +2187,7 @@ mod tests {
             .collect();
         let total = solids.len();
 
-        let (voxelized, meshes, occluders) =
+        let (voxelized, meshes, occluders, _) =
             split_brush_meshes(&map, &config, &transform, &origins, solids.clone());
         assert!(
             !occluders.is_empty(),
@@ -2154,7 +2239,8 @@ mod tests {
 
         // Turning the feature off must put every brush back on the voxel path.
         config.output.brush_meshes.enabled = false;
-        let (all, none, no_cells) = split_brush_meshes(&map, &config, &transform, &origins, solids);
+        let (all, none, no_cells, _) =
+            split_brush_meshes(&map, &config, &transform, &origins, solids);
         assert_eq!(all.len(), total);
         assert!(none.is_empty());
         assert!(no_cells.is_empty());

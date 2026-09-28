@@ -46,6 +46,7 @@ public final class WorldPlacer {
     private static Block resolve(String blockName) {
         return switch (blockName) {
             case SchematicReader.SURFACE -> Src2mcWorldContent.SURFACE.get();
+            case SchematicReader.CARRIER -> Src2mcWorldContent.CARRIER.get();
             case SchematicReader.MAP_ANCHOR -> Src2mcWorldContent.MAP_ANCHOR.get();
             case SchematicReader.PROP_ROOT -> Src2mcWorldContent.PROP_ROOT.get();
             default -> throw new IllegalStateException("schematic reader let through unsupported block " + blockName);

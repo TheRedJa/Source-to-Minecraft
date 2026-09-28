@@ -701,6 +701,7 @@ mod tests {
             alpha_test,
             translucent,
             surface_prop: prop.map(str::to_string),
+            no_cull: false,
         }
     }
 

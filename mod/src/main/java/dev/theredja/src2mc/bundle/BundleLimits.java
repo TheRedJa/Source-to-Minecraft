@@ -18,6 +18,9 @@ final class BundleLimits {
     static final int MAX_UV_REGIONS_PER_MAP = 10_000_000;
     static final int MAX_SECTIONS_PER_MAP = 4_000_000;
     static final int MAX_FACES_PER_MAP = 100_000_000;
+    // A corruption guard, not a budget: every distinct shape in a real map is
+    // far below this, and exceeding it fails the bundle loudly.
+    static final int MAX_COLLISION_SHAPES_PER_MAP = 100_000_000;
     static final int MAX_VERTICES_PER_MESH = 10_000_000;
     static final int MAX_INDICES_PER_MESH = 30_000_000;
     static final int MAX_SUBMESHES_PER_MESH = 65_536;

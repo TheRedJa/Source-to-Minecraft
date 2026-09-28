@@ -129,6 +129,20 @@ final class PropTessellator {
         return (long) Math.max(-MAX_REPEAT_INDEX, Math.min(MAX_REPEAT_INDEX, result));
     }
 
+    /** Every triangle followed by its mirror: reversed winding, negated normals. */
+    static List<Triangle> withBackFaces(List<Triangle> triangles) {
+        List<Triangle> result = new ArrayList<>(triangles.size() * 2);
+        for (Triangle triangle : triangles) {
+            result.add(triangle);
+            result.add(new Triangle(triangle.page(), flipped(triangle.a()), flipped(triangle.c()), flipped(triangle.b())));
+        }
+        return result;
+    }
+
+    private static Vertex flipped(Vertex vertex) {
+        return new Vertex(vertex.x(), vertex.y(), vertex.z(), -vertex.nx(), -vertex.ny(), -vertex.nz(), vertex.u(), vertex.v());
+    }
+
     record Triangle(int page, Vertex a, Vertex b, Vertex c) {}
     record Vertex(double x, double y, double z, double nx, double ny, double nz, double u, double v) {
         Vertex withUv(double nextU, double nextV) { return new Vertex(x, y, z, nx, ny, nz, nextU, nextV); }

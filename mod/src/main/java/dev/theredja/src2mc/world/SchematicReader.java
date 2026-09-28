@@ -16,13 +16,14 @@ import net.minecraft.nbt.Tag;
  * standing in for WorldEdit's paste. Format is fixed by {@code src/output/schem.rs}:
  * gzipped NBT, {@code Blocks.Data} is a varint-per-cell array indexed by
  * {@code x + z*Width + y*Width*Length}, and the only palette entries a src2mc
- * schematic ever contains are air, surface, map_anchor and prop_root. Kept free
+ * schematic ever contains are air, surface, carrier, map_anchor and prop_root. Kept free
  * of block-registry lookups so it can run in a plain JVM unit test; {@link WorldPlacer}
  * resolves block names against the registry.
  */
 public final class SchematicReader {
     public static final String AIR = "minecraft:air";
     public static final String SURFACE = "src2mc:surface";
+    public static final String CARRIER = "src2mc:carrier";
     public static final String MAP_ANCHOR = "src2mc:map_anchor";
     public static final String PROP_ROOT = "src2mc:prop_root";
 
@@ -68,7 +69,7 @@ public final class SchematicReader {
             if (id < 0 || id >= palette.length) throw new IOException("schematic block id " + id + " has no palette entry");
             String name = palette[id];
             if (name.equals(AIR)) continue;
-            if (!name.equals(SURFACE) && !name.equals(MAP_ANCHOR) && !name.equals(PROP_ROOT)) {
+            if (!name.equals(SURFACE) && !name.equals(CARRIER) && !name.equals(MAP_ANCHOR) && !name.equals(PROP_ROOT)) {
                 throw new IOException("schematic contains unsupported block " + name);
             }
             int y = i / (width * length);

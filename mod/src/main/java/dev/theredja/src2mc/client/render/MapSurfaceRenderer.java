@@ -2,11 +2,7 @@ package dev.theredja.src2mc.client.render;
 
 import static net.minecraft.commands.Commands.literal;
 
-import com.mojang.blaze3d.vertex.BufferBuilder;
-import com.mojang.blaze3d.vertex.ByteBufferBuilder;
-import com.mojang.blaze3d.vertex.DefaultVertexFormat;
 import com.mojang.blaze3d.vertex.VertexBuffer;
-import com.mojang.blaze3d.vertex.VertexFormat;
 import dev.theredja.src2mc.Src2mc;
 import dev.theredja.src2mc.bundle.AtlasIndex;
 import dev.theredja.src2mc.bundle.BundleGeneration;
@@ -25,11 +21,11 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.renderer.GameRenderer;
 import net.minecraft.client.renderer.RenderType;
-import net.minecraft.client.renderer.texture.OverlayTexture;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.SectionPos;
 import net.minecraft.resources.ResourceLocation;
@@ -49,12 +45,28 @@ import org.joml.Matrix4f;
 @EventBusSubscriber(modid = Src2mc.MOD_ID, value = Dist.CLIENT)
 public final class MapSurfaceRenderer {
     private static final int REGION_SECTIONS = 4;
-    private static final long LOAD_BUILD_BUDGET_NANOS = 150_000_000L;
-    private static final long STEADY_BUILD_BUDGET_NANOS = 4_000_000L;
+    /** Render-thread time per frame for copying the world into new builds' snapshots. */
+    private static final long DISPATCH_BUDGET_NANOS = 3_000_000L;
+    /** Render-thread time per frame for filling and uploading finished builds; one always goes. */
+    private static final long UPLOAD_BUDGET_NANOS = 4_000_000L;
+    private static final int MAX_IN_FLIGHT = MeshBuildPool.THREADS * 2;
+    /** How long a region waits for its chunks' light before it is built with what is there. */
+    private static final long LIGHT_WAIT_NANOS = 3_000_000_000L;
+    /** A region's snapshot reaches this far past its bounds: a smooth sample reads up to one and a
+     * half blocks out, and an owned fragment's block is one cell away. */
+    private static final int SNAPSHOT_MARGIN = 2;
     private static final long MESH_GRACE_FRAMES = 600;
     private static final AtlasPageResidency PAGES = new AtlasPageResidency();
     private static final Map<MeshKey, Mesh> MESHES = new LinkedHashMap<>();
+    /** The same meshes by region, so per-region work does not walk every mesh. */
+    private static final Map<RegionKey, Map<PageClass, Mesh>> REGION_MESHES = new HashMap<>();
     private static final Map<RegionKey, Long> BUILT_REGIONS = new HashMap<>();
+    /** Bumped by every invalidation; a build finishing against an older value is thrown away. */
+    private static final Map<RegionKey, Integer> REGION_VERSIONS = new HashMap<>();
+    /** When each unbuilt region in range was first held back for its chunks' light. */
+    private static final Map<RegionKey, Long> WAITING_SINCE = new HashMap<>();
+    /** Each placement's regions with their world bounds, worked out once. */
+    private static final Map<MapPlacement, List<RegionEntry>> PLACEMENT_REGIONS = new HashMap<>();
     /** Identity-keyed: {@link BundleMap#hashCode()}/{@code equals} deep-hash the whole surface
      * table, so a regular HashMap would redo that work on every lookup; the same instance is
      * reused for a generation's lifetime, so identity is both correct and cheap. */
@@ -65,16 +77,14 @@ public final class MapSurfaceRenderer {
     private static long frame;
     private static long pvsRejectedRegions;
     private static boolean stillLoading = true;
-    /** Set once a full build pass completes with nothing skipped; gates the large load budget so
-     * a later relight (which always skips something at least once) never re-triggers it. */
-    private static boolean firstPassComplete;
     private static long relightsQueued;
+    /** Build pipeline counters, read back through {@code /src2mc_render_status}. */
+    private static int waitingLast, uploadsLast;
+    private static long dispatchNanosLast, uploadNanosLast, worstUploadNanos, buildsDiscarded, buildsFailed;
     /** Region rebuilds caused by surface blocks appearing or vanishing, and the hidden-fragment
      * count of the most recent build; read back through {@code /src2mc_render_status}. */
     private static long surfaceRebuildsQueued;
     private static int lastHiddenFragments;
-    private static long lastBuildNanos;
-    private static long worstBuildNanos;
     private static long shadowPassCallsSinceMainPass;
     private static long shadowPassCallsLastFrame;
     /** Shadow-pass draw-set accounting, accumulated across a frame's shadow invocations and latched
@@ -110,33 +120,92 @@ public final class MapSurfaceRenderer {
      * use, so a buffer built without the extra elements is read with the wrong stride. */
     private static boolean neutralEntityId = true;
 
-    /** Region builds in flight, oldest first; bounded so the accumulated triangle lists of
-     * half-built regions cannot pile up. */
-    private static final Map<RegionKey, PendingBuild> PENDING_BUILDS = new LinkedHashMap<>();
-    private static final int MAX_PENDING_BUILDS = 4;
+    /** Region builds running on {@link MeshBuildPool}, oldest first. */
+    private static final Map<RegionKey, InFlight> IN_FLIGHT = new LinkedHashMap<>();
 
-    private static final class PendingBuild {
-        final BundleManifest bundle;
-        final BundleMap map;
-        final MapPlacement placement;
-        final RegionGroup group;
-        final Map<PageClass, List<LitTriangle>> triangles = new HashMap<>();
-        final Map<Long, Integer> lightCache = new HashMap<>();
-        /** Keeps smooth light from reaching through the map's own surfaces; null when switched off. */
-        final SurfaceOcclusion occlusion;
-        int nextSection;
+    /**
+     * Everything one region build reads, fixed when it is started: the world through a snapshot
+     * (or, for a build that failed on a worker and is retried on the render thread, the live
+     * level), and the lighting switches as they were then.
+     */
+    private record BuildInput(BundleManifest bundle, BundleMap map, MapPlacement placement, RegionGroup group,
+                              net.minecraft.world.level.BlockAndTintGetter world, SurfaceOcclusion.Presence presence,
+                              boolean smooth, boolean occlude, long bakeEpoch, boolean bakeCovered) {}
+
+    /** A finished build, still to be uploaded. */
+    private static final class BuildResult {
+        final Map<PageClass, PackedVertices> meshes = new HashMap<>();
         /** Owned fragments left out because their cell's surface block is gone. */
         int hiddenFragments;
+        int drawnFragments;
+        /** The distinct owner cells found missing, map-local, packed by {@link #packCell}. */
+        final it.unimi.dsi.fastutil.longs.LongArrayList hiddenOwners = new it.unimi.dsi.fastutil.longs.LongArrayList();
         // Light provenance: what sky values this build captured, and which client bake they came
         // from. A mesh holds its light until it is rebuilt, so a build that ran before the bake
         // reached its sections stays wrong for the session.
         int skyMin = 15, skyMax = 0;
-        final long bakeEpoch = LightOcclusion.clientEpoch();
-        boolean bakeCovered;
+        long occlusionTested, occlusionBlocked;
+    }
 
-        PendingBuild(BundleManifest bundle, BundleMap map, MapPlacement placement, RegionGroup group) {
-            this.bundle = bundle; this.map = map; this.placement = placement; this.group = group;
-            this.occlusion = occlusionFor(placement, map);
+    private record InFlight(BuildInput input, int version, java.util.concurrent.CompletableFuture<BuildResult> result,
+                            long startedNanos, boolean lightTimedOut, int unloadedChunks) {}
+
+    /** What a region's last finished build saw, for {@code /src2mc_region_probe}. */
+    private record BuildInfo(long finishedNanos, int version, int drawnFragments, int hiddenFragments,
+                             boolean lightTimedOut, int unloadedChunks, int meshes) {}
+    private static final Map<RegionKey, BuildInfo> BUILD_INFO = new HashMap<>();
+
+    /**
+     * Owner cells each built region found without their surface block, so their fragments were
+     * left out. They are re-checked against the live world a few thousand per frame, and a region
+     * is rebuilt as soon as one of them has its block again.
+     *
+     * Needed because a block can reach the client with nothing telling the renderer: pasting a
+     * map registers its placement while the placer is still writing, regions build at once, and
+     * blocks written after that arrived with no rebuild following (seen on INFRA: whole regions
+     * built with every owner missing, all present a minute later). Breaking a block by hand is
+     * the only other way to hide fragments, so the list is normally short.
+     */
+    private static final Map<RegionKey, long[]> HIDDEN_OWNERS = new LinkedHashMap<>();
+    private static final int OWNER_CHECKS_PER_FRAME = 4096;
+    private static List<RegionKey> ownerCheckOrder = List.of();
+    private static int ownerCheckRegion, ownerCheckCell;
+    private static long ownerRechecks;
+
+    private static long packCell(int x, int y, int z) {
+        return ((long) x & 0x1FFFFFL) << 42 | ((long) y & 0x1FFFFFL) << 21 | ((long) z & 0x1FFFFFL);
+    }
+
+    private static int unpack(long packed, int shift) {
+        return (int) (packed << (64 - 21 - shift) >> (64 - 21));
+    }
+
+    /** Round-robin re-check of hidden owner cells; see {@link #HIDDEN_OWNERS}. */
+    private static void recheckHiddenOwners() {
+        if (HIDDEN_OWNERS.isEmpty()) return;
+        if (ownerCheckRegion >= ownerCheckOrder.size()) {
+            ownerCheckOrder = List.copyOf(HIDDEN_OWNERS.keySet());
+            ownerCheckRegion = 0;
+            ownerCheckCell = 0;
+        }
+        int budget = OWNER_CHECKS_PER_FRAME;
+        while (budget > 0 && ownerCheckRegion < ownerCheckOrder.size()) {
+            RegionKey key = ownerCheckOrder.get(ownerCheckRegion);
+            long[] cells = HIDDEN_OWNERS.get(key);
+            if (cells == null || !BUILT_REGIONS.containsKey(key)) { ownerCheckRegion++; ownerCheckCell = 0; continue; }
+            boolean appeared = false;
+            while (budget > 0 && ownerCheckCell < cells.length) {
+                long cell = cells[ownerCheckCell++];
+                budget--;
+                if (surfacePresent(key.placement(), unpack(cell, 42), unpack(cell, 21), unpack(cell, 0))) { appeared = true; break; }
+            }
+            if (appeared) {
+                HIDDEN_OWNERS.remove(key);
+                REGION_VERSIONS.merge(key, 1, Integer::sum);
+                BUILT_REGIONS.remove(key);
+                ownerRechecks++;
+            }
+            if (appeared || ownerCheckCell >= cells.length) { ownerCheckRegion++; ownerCheckCell = 0; }
         }
     }
 
@@ -151,6 +220,7 @@ public final class MapSurfaceRenderer {
     public static void registerCommand(RegisterClientCommandsEvent event) {
         event.getDispatcher().register(literal("src2mc_debug_face").executes(context -> inspectFace(context.getSource())));
         event.getDispatcher().register(literal("src2mc_render_status").executes(context -> renderStatus(context.getSource())));
+        event.getDispatcher().register(literal("src2mc_region_probe").executes(context -> probeRegion(context.getSource())));
         event.getDispatcher().register(literal("src2mc_rebuild_meshes").executes(context -> rebuildMeshes(context.getSource())));
         event.getDispatcher().register(literal("src2mc_iris_entity_id")
             .then(literal("neutral").executes(context -> setNeutralEntityId(context.getSource(), true)))
@@ -196,10 +266,7 @@ public final class MapSurfaceRenderer {
     /** Drops every built mesh, since the light is baked into them at build time. */
     private static int setLightOcclusion(net.minecraft.commands.CommandSourceStack source, boolean value) {
         lightOcclusion = value;
-        MESHES.values().forEach(Mesh::close);
-        MESHES.clear();
-        BUILT_REGIONS.clear();
-        PENDING_BUILDS.clear();
+        dropMeshes();
         PropRenderer.invalidateAllLight();
         source.sendSuccess(() -> Component.literal("src2mc light occlusion " + (value ? "on" : "off")
             + ": smooth light " + (value ? "ignores" : "reads") + " cells behind the map's own surfaces"), false);
@@ -209,10 +276,7 @@ public final class MapSurfaceRenderer {
     /** Drops every built mesh, since the light is baked into them at build time. */
     private static int setSmoothLighting(net.minecraft.commands.CommandSourceStack source, boolean value) {
         smoothLighting = value;
-        MESHES.values().forEach(Mesh::close);
-        MESHES.clear();
-        BUILT_REGIONS.clear();
-        PENDING_BUILDS.clear();
+        dropMeshes();
         PropRenderer.invalidateAllLight();
         source.sendSuccess(() -> Component.literal("src2mc smooth lighting " + (value ? "on" : "off")), false);
         return 1;
@@ -239,7 +303,7 @@ public final class MapSurfaceRenderer {
     private static int setRelight(net.minecraft.commands.CommandSourceStack source, boolean value) {
         LightWatcher.setEnabled(value);
         relightsQueued = 0;
-        worstBuildNanos = 0;
+        worstUploadNanos = 0;
         source.sendSuccess(() -> Component.literal("src2mc relight " + (value ? "on" : "off")), false);
         return 1;
     }
@@ -285,12 +349,8 @@ public final class MapSurfaceRenderer {
      */
     private static int rebuildMeshes(net.minecraft.commands.CommandSourceStack source) {
         int meshes = MESHES.size();
-        MESHES.values().forEach(Mesh::close);
-        MESHES.clear();
-        BUILT_REGIONS.clear();
-        PENDING_BUILDS.clear();
+        dropMeshes();
         stillLoading = true;
-        firstPassComplete = false;
         int props = PropRenderer.rebuildMeshes();
         source.sendSuccess(() -> Component.literal("src2mc: dropped " + meshes + " surface mesh(es) and "
             + props + " prop batch(es); both rebuild against the current light"), false);
@@ -329,9 +389,79 @@ public final class MapSurfaceRenderer {
             + ", relight " + (LightWatcher.enabled() ? "on" : "off")
             + ": watched=" + LightWatcher.watchedSections() + ", checks/tick=" + LightWatcher.checksLastTick()
             + ", invalidated/tick=" + LightWatcher.invalidatedLastTick() + ", queued=" + relightsQueued
-            + ", in-flight=" + PENDING_BUILDS.size()
             + ", surface-block rebuilds=" + surfaceRebuildsQueued + ", hidden fragments in last build=" + lastHiddenFragments
-            + ", build slice last=" + formatMillis(lastBuildNanos) + " worst=" + formatMillis(worstBuildNanos)), false);
+            + ", builds: " + MeshBuildPool.THREADS + " worker(s), in-flight=" + IN_FLIGHT.size()
+            + ", waiting for chunk light=" + waitingLast + " (" + ChunkLightTracker.pending() + " chunk(s) pending)"
+            + ", discarded=" + buildsDiscarded + ", failed on a worker=" + buildsFailed
+            + ", worker time=" + formatMillis(MeshBuildPool.WORKER_NANOS.get()) + " over " + MeshBuildPool.JOBS.get() + " job(s)"
+            + ", sections copied=" + WorldSnapshot.SHARED.copied + " reused=" + WorldSnapshot.SHARED.reused
+            + ", last frame: dispatch " + formatMillis(dispatchNanosLast) + ", " + uploadsLast + " upload(s) " + formatMillis(uploadNanosLast)
+            + ", worst upload frame=" + formatMillis(worstUploadNanos)), false);
+        return 1;
+    }
+
+    /**
+     * The state of every surface region around the camera: the one it stands in and its
+     * neighbours on the same level. For each: whether it is built, building or waiting, what its
+     * last build saw, and how many owned fragments the live world would hide now. A region that
+     * draws nothing while the live count says it should is a build that saw the wrong world.
+     */
+    private static int probeRegion(net.minecraft.commands.CommandSourceStack source) {
+        Minecraft minecraft = Minecraft.getInstance();
+        if (minecraft.level == null || level == null) { source.sendFailure(Component.literal("No client level")); return 0; }
+        var camera = minecraft.gameRenderer.getMainCamera().getPosition();
+        BundleGeneration generation = Src2mc.bundles().active();
+        long now = System.nanoTime();
+        long notDone = IN_FLIGHT.values().stream().filter(flight -> !flight.result.isDone()).count();
+        long oldest = IN_FLIGHT.values().stream().mapToLong(flight -> now - flight.startedNanos).max().orElse(0);
+        source.sendSuccess(() -> Component.literal("src2mc regions: built=" + BUILT_REGIONS.size() + ", in flight=" + IN_FLIGHT.size()
+            + " (" + notDone + " running, oldest " + formatMillis(oldest) + "), waiting=" + WAITING_SINCE.size()
+            + ", chunks pending light=" + ChunkLightTracker.pending()
+            + ", regions with hidden owners=" + HIDDEN_OWNERS.size() + ", rebuilt because an owner reappeared=" + ownerRechecks), false);
+        int shown = 0;
+        for (MapPlacement placement : placementSnapshot) {
+            BundleMap map = generation.findMap(placement.campaignId(), placement.mapId()).orElse(null);
+            if (map == null) continue;
+            BlockPos local = placement.toLocal(BlockPos.containing(camera));
+            RegionCoord at = regionCoord(Math.floorDiv(local.getX(), 16), Math.floorDiv(local.getY(), 16), Math.floorDiv(local.getZ(), 16));
+            var groups = regionGroups(map);
+            for (int dx = -1; dx <= 1; dx++) for (int dz = -1; dz <= 1; dz++) {
+                RegionCoord coord = new RegionCoord(at.x() + dx, at.y(), at.z() + dz);
+                RegionGroup group = groups.get(coord);
+                if (group == null) continue;
+                RegionKey key = new RegionKey(placement, coord);
+                int liveHidden = 0, liveOwned = 0;
+                for (SurfaceTable.SectionPos section : group.sections()) {
+                    List<SurfaceTable.Face> faces = map.surfaces().sections().get(section);
+                    if (faces == null) continue;
+                    for (SurfaceTable.Face face : faces) {
+                        if (!face.owned()) continue;
+                        int cell = face.localCell();
+                        int x = (section.x() << 4) + (cell & 15), y = (section.y() << 4) + (cell >> 8 & 15), z = (section.z() << 4) + (cell >> 4 & 15);
+                        liveOwned++;
+                        if (!surfacePresent(placement, x + face.ownerDx(), y + face.ownerDy(), z + face.ownerDz())) liveHidden++;
+                    }
+                }
+                BuildInfo info = BUILD_INFO.get(key);
+                InFlight flight = IN_FLIGHT.get(key);
+                Long waiting = WAITING_SINCE.get(key);
+                Map<PageClass, Mesh> meshes = REGION_MESHES.get(key);
+                String state = BUILT_REGIONS.containsKey(key) ? "built" : flight != null ? (flight.result.isDone() ? "finished, not uploaded" : "building")
+                    : waiting != null ? "waiting for light " + formatMillis(now - waiting) : "not built";
+                String line = String.format(java.util.Locale.ROOT, "  %s region %d,%d,%d%s: %s, version %d, meshes drawn %d%s; live owned fragments %d, hidden now %d",
+                    placement.mapId(), coord.x(), coord.y(), coord.z(), dx == 0 && dz == 0 ? " (camera)" : "", state,
+                    REGION_VERSIONS.getOrDefault(key, 0), meshes == null ? 0 : meshes.size(),
+                    info == null ? ", never finished" : String.format(java.util.Locale.ROOT,
+                        ", last build %s ago (version %d): drawn %d, hidden %d, light %s, unloaded chunks %d, meshes %d",
+                        formatMillis(now - info.finishedNanos), info.version, info.drawnFragments, info.hiddenFragments,
+                        info.lightTimedOut ? "timed out" : "ready", info.unloadedChunks, info.meshes),
+                    liveOwned, liveHidden);
+                source.sendSuccess(() -> Component.literal(line), false);
+                Src2mc.LOGGER.info("src2mc region probe: {}", line);
+                shown++;
+            }
+        }
+        if (shown == 0) source.sendFailure(Component.literal("No surface region of a placed map around the camera"));
         return 1;
     }
 
@@ -541,8 +671,13 @@ public final class MapSurfaceRenderer {
             placementSnapshot = placements;
         }
         frame++;
+        // PropRenderer draws later in this same event and shares this frame's copies.
+        WorldSnapshot.SHARED.newFrame();
         PAGES.pump(frame);
-        invalidateReadyPages(PAGES.drainReadyPages());
+        // A mesh never depends on whether its page has loaded: the draw picks the placeholder or
+        // the page each frame, and the geometry is the same either way. Rebuilding the regions
+        // whose page just arrived only repeated every build on joining.
+        PAGES.drainReadyPages();
         if (generation.sequence() == 0 || placements.isEmpty()) return;
 
         CameraVisibility.resolve(generation, minecraft);
@@ -551,41 +686,129 @@ public final class MapSurfaceRenderer {
         int cameraSectionX = SectionPos.blockToSectionCoord(camera.x);
         int cameraSectionZ = SectionPos.blockToSectionCoord(camera.z);
         int distance = minecraft.options.getEffectiveRenderDistance() + 1;
-        long buildBudget = stillLoading && !firstPassComplete ? LOAD_BUILD_BUDGET_NANOS : STEADY_BUILD_BUDGET_NANOS;
-        long buildDeadline = System.nanoTime() + buildBudget;
-        boolean skippedBuild = false;
+        List<BuildCandidate> candidates = new ArrayList<>();
         for (MapPlacement placement : placements) {
             var located = generation.findLocatedMap(placement.campaignId(), placement.mapId()).orElse(null);
             if (located == null || located.map().atlas() == null) continue;
             BundleMap map = located.map();
-            for (var groupEntry : regionGroups(map).entrySet()) {
-                RegionCoord coord = groupEntry.getKey();
-                RegionGroup group = groupEntry.getValue();
-                AABB bounds = regionBounds(placement, group);
-                int regionX = SectionPos.blockToSectionCoord((bounds.minX + bounds.maxX) * 0.5);
-                int regionZ = SectionPos.blockToSectionCoord((bounds.minZ + bounds.maxZ) * 0.5);
-                if (Math.abs(regionX - cameraSectionX) > distance || Math.abs(regionZ - cameraSectionZ) > distance) continue;
-                RegionKey regionKey = new RegionKey(placement, coord);
-                if (!BUILT_REGIONS.containsKey(regionKey)) {
-                    skippedBuild = true;
-                    if (!PENDING_BUILDS.containsKey(regionKey) && PENDING_BUILDS.size() < MAX_PENDING_BUILDS) {
-                        PENDING_BUILDS.put(regionKey, new PendingBuild(located.bundle(), map, placement, group));
-                    }
+            for (RegionEntry entry : regionEntries(placement, map)) {
+                if (Math.abs(entry.centerSectionX - cameraSectionX) > distance || Math.abs(entry.centerSectionZ - cameraSectionZ) > distance) continue;
+                RegionKey regionKey = entry.key;
+                if (BUILT_REGIONS.containsKey(regionKey)) {
+                    BUILT_REGIONS.put(regionKey, frame);
+                } else if (!IN_FLIGHT.containsKey(regionKey)) {
+                    candidates.add(new BuildCandidate(located.bundle(), map, entry, distanceSquared(entry.bounds, camera)));
                 }
-                if (BUILT_REGIONS.containsKey(regionKey)) BUILT_REGIONS.put(regionKey, frame);
-                if (pvsCulling && !regionPvsVisible(map, placement, group.clusters())) { pvsRejectedRegions++; continue; }
-                MESHES.forEach((key, mesh) -> { if (key.region.equals(regionKey)) mesh.lastVisibleFrame = frame; });
+                if (pvsCulling && !regionPvsVisible(map, placement, entry.group.clusters())) { pvsRejectedRegions++; continue; }
+                Map<PageClass, Mesh> meshes = REGION_MESHES.get(regionKey);
+                if (meshes != null) for (Mesh mesh : meshes.values()) mesh.lastVisibleFrame = frame;
             }
         }
-        drainPendingBuilds(buildDeadline);
-        stillLoading = skippedBuild;
-        if (!skippedBuild && PENDING_BUILDS.isEmpty()) firstPassComplete = true;
+        completeBuilds();
+        recheckHiddenOwners();
+        dispatchBuilds(minecraft, candidates, distance);
+        stillLoading = !candidates.isEmpty() || !IN_FLIGHT.isEmpty();
         discardExpiredMeshes();
         prefetchNearMeshes(generation);
         PAGES.pump(frame);
-        invalidateReadyPages(PAGES.drainReadyPages());
+        PAGES.drainReadyPages();
 
         draw(event, generation, false, false);
+    }
+
+    private record BuildCandidate(BundleManifest bundle, BundleMap map, RegionEntry entry, double distanceSquared) {}
+
+    /**
+     * Starts builds for the nearest unbuilt regions, as long as workers are free and this frame's
+     * copying budget lasts. A region whose chunks are still waiting for their light is held back,
+     * for at most {@link #LIGHT_WAIT_NANOS}: built now, it would be rebuilt as soon as that light
+     * landed.
+     */
+    private static void dispatchBuilds(Minecraft minecraft, List<BuildCandidate> candidates, int distance) {
+        long started = System.nanoTime();
+        candidates.sort(Comparator.comparingDouble(BuildCandidate::distanceSquared));
+        var camera = minecraft.gameRenderer.getMainCamera().getPosition();
+        int cameraChunkX = SectionPos.blockToSectionCoord(camera.x), cameraChunkZ = SectionPos.blockToSectionCoord(camera.z);
+        int waiting = 0;
+        Set<RegionKey> inRange = new HashSet<>();
+        for (BuildCandidate candidate : candidates) {
+            RegionEntry entry = candidate.entry;
+            inRange.add(entry.key);
+            if (IN_FLIGHT.size() >= MAX_IN_FLIGHT || System.nanoTime() - started >= DISPATCH_BUDGET_NANOS) continue;
+            int[] box = snapshotBox(entry);
+            boolean timedOut = false;
+            if (!ChunkLightTracker.settled(level, box[0], box[2], box[3], box[5], cameraChunkX, cameraChunkZ, distance)) {
+                long since = WAITING_SINCE.computeIfAbsent(entry.key, ignored -> System.nanoTime());
+                if (System.nanoTime() - since < LIGHT_WAIT_NANOS) { waiting++; continue; }
+                timedOut = true;
+            }
+            int unloaded = 0;
+            for (int cx = box[0] >> 4; cx <= box[3] >> 4; cx++) for (int cz = box[2] >> 4; cz <= box[5] >> 4; cz++) {
+                if (!level.hasChunk(cx, cz)) unloaded++;
+            }
+            WAITING_SINCE.remove(entry.key);
+            WorldSnapshot world = WorldSnapshot.capture(level, box[0], box[1], box[2], box[3], box[4], box[5]);
+            MapPlacement placement = entry.key.placement();
+            BuildInput input = new BuildInput(candidate.bundle, candidate.map, placement, entry.group, world,
+                (x, y, z) -> snapshotSurfacePresent(world, placement, x, y, z), smoothLighting, lightOcclusion,
+                LightOcclusion.clientEpoch(), LightOcclusion.baked(level).covers(
+                    SectionPos.blockToSectionCoord(placement.translation().getX() + entry.group.minX()),
+                    SectionPos.blockToSectionCoord(placement.translation().getZ() + entry.group.minZ())));
+            int version = REGION_VERSIONS.getOrDefault(entry.key, 0);
+            IN_FLIGHT.put(entry.key, new InFlight(input, version, MeshBuildPool.submit(() -> buildRegion(input)),
+                System.nanoTime(), timedOut, unloaded));
+        }
+        WAITING_SINCE.keySet().retainAll(inRange);
+        waitingLast = waiting;
+        dispatchNanosLast = System.nanoTime() - started;
+    }
+
+    /** World block box a region build reads, inclusive: min x, y, z then max x, y, z. */
+    private static int[] snapshotBox(RegionEntry entry) {
+        BlockPos t = entry.key.placement().translation();
+        RegionGroup group = entry.group;
+        return new int[] {
+            t.getX() + group.minX() - SNAPSHOT_MARGIN, t.getY() + group.minY() - SNAPSHOT_MARGIN, t.getZ() + group.minZ() - SNAPSHOT_MARGIN,
+            t.getX() + group.maxX() + SNAPSHOT_MARGIN, t.getY() + group.maxY() + SNAPSHOT_MARGIN, t.getZ() + group.maxZ() + SNAPSHOT_MARGIN};
+    }
+
+    /**
+     * Uploads finished builds, oldest first, until this frame's upload budget is spent; the first
+     * always goes, so a large region cannot stall the queue. A build that an invalidation
+     * overtook is thrown away and its region started again. A build that threw on its worker --
+     * most likely a modded block that expects a real level -- is retried here against the live
+     * level, the way every build ran before.
+     */
+    private static void completeBuilds() {
+        long started = System.nanoTime();
+        int uploads = 0;
+        var iterator = IN_FLIGHT.entrySet().iterator();
+        while (iterator.hasNext()) {
+            if (uploads > 0 && System.nanoTime() - started >= UPLOAD_BUDGET_NANOS) break;
+            var entry = iterator.next();
+            InFlight flight = entry.getValue();
+            if (!flight.result.isDone()) continue;
+            iterator.remove();
+            if (flight.version != REGION_VERSIONS.getOrDefault(entry.getKey(), 0)) { buildsDiscarded++; continue; }
+            BuildResult result;
+            try {
+                result = flight.result.join();
+            } catch (RuntimeException exception) {
+                if (buildsFailed++ == 0) Src2mc.LOGGER.warn("src2mc: a surface build failed on a worker; retrying on the render thread", exception);
+                BuildInput live = flight.input;
+                result = buildRegion(new BuildInput(live.bundle, live.map, live.placement, live.group, level,
+                    (x, y, z) -> surfacePresent(live.placement, x, y, z), live.smooth, live.occlude, live.bakeEpoch, live.bakeCovered));
+            }
+            finishRegionBuild(entry.getKey(), flight.input, result);
+            if (result.hiddenOwners.isEmpty()) HIDDEN_OWNERS.remove(entry.getKey());
+            else HIDDEN_OWNERS.put(entry.getKey(), result.hiddenOwners.toLongArray());
+            BUILD_INFO.put(entry.getKey(), new BuildInfo(System.nanoTime(), flight.version, result.drawnFragments, result.hiddenFragments,
+                flight.lightTimedOut, flight.unloadedChunks, result.meshes.size()));
+            uploads++;
+        }
+        uploadsLast = uploads;
+        uploadNanosLast = System.nanoTime() - started;
+        worstUploadNanos = Math.max(worstUploadNanos, uploadNanosLast);
     }
 
     /** NeoForge documents AFTER_PARTICLES as the safe basic custom-translucency stage. */
@@ -648,23 +871,6 @@ public final class MapSurfaceRenderer {
         }
     }
 
-    private static void invalidateReadyPages(List<AtlasPageResidency.PageKey> ready) {
-        if (ready.isEmpty()) return;
-        var affected = new HashSet<RegionKey>();
-        for (var item : MESHES.entrySet()) for (AtlasPageResidency.PageKey page : ready) {
-            if (item.getKey().page == page.page() && item.getValue().bundle.fingerprint().equals(page.fingerprint())) {
-                affected.add(item.getKey().region);
-            }
-        }
-        if (affected.isEmpty()) return;
-        affected.forEach(BUILT_REGIONS::remove);
-        MESHES.entrySet().removeIf(item -> {
-            if (!affected.contains(item.getKey().region)) return false;
-            item.getValue().close();
-            return true;
-        });
-    }
-
     private static double distanceSquared(AABB bounds, net.minecraft.world.phys.Vec3 camera) {
         double x = (bounds.minX + bounds.maxX) * 0.5 - camera.x;
         double y = (bounds.minY + bounds.maxY) * 0.5 - camera.y;
@@ -682,23 +888,23 @@ public final class MapSurfaceRenderer {
     }
 
     /**
-     * Advances one region build by whole sections until {@code deadline}, returning true once every
-     * section is tessellated. Region builds are split across frames because a 64-block region can
-     * hold dozens of sections: run atomically, one relight after a torch placement stalled the frame
-     * outright. The old meshes stay bound until the replacement uploads, so nothing flickers.
+     * Tessellates and lights one whole region, on a worker. Reads nothing but its input: the
+     * bundle's immutable tables and the world snapshot taken when the build was started.
      */
-    private static boolean advanceRegionBuild(PendingBuild build, long deadline) {
-        BundleMap map = build.map;
-        build.bakeCovered = LightOcclusion.baked(level).covers(
-            SectionPos.blockToSectionCoord(build.placement.translation().getX() + build.group.minX()),
-            SectionPos.blockToSectionCoord(build.placement.translation().getZ() + build.group.minZ()));
+    private static BuildResult buildRegion(BuildInput in) {
+        BundleMap map = in.map;
+        BuildResult result = new BuildResult();
+        SurfaceOcclusion occlusion = in.occlude
+            ? new SurfaceOcclusion(map.surfaces(), in.placement.translation().getX(), in.placement.translation().getY(),
+                in.placement.translation().getZ(), in.presence)
+            : null;
+        Map<Long, Integer> lightCache = new HashMap<>();
+        int baseX = in.group.minX(), baseY = in.group.minY(), baseZ = in.group.minZ();
         var sections = map.surfaces().sections();
-        while (build.nextSection < build.group.sections().size()) {
-            if (System.nanoTime() >= deadline) return false;
-            SurfaceTable.SectionPos section = build.group.sections().get(build.nextSection++);
+        for (SurfaceTable.SectionPos section : in.group.sections()) {
             List<SurfaceTable.Face> faces = sections.get(section);
             if (faces == null) continue;
-            int baseX = section.x() << 4, baseY = section.y() << 4, baseZ = section.z() << 4;
+            int sectionX = section.x() << 4, sectionY = section.y() << 4, sectionZ = section.z() << 4;
             // Fragments are sorted by cell and a cell's fragments usually share one owner, so one
             // lookup serves a run of them.
             int checkedOwner = -1;
@@ -711,28 +917,62 @@ public final class MapSurfaceRenderer {
                 AtlasIndex.Texture texture = map.atlas().textures().get(material.texture().contentId());
                 if (texture == null) continue;
                 int local = face.localCell();
-                int x = baseX + (local & 15), y = baseY + (local >> 8 & 15), z = baseZ + (local >> 4 & 15);
+                int x = sectionX + (local & 15), y = sectionY + (local >> 8 & 15), z = sectionZ + (local >> 4 & 15);
                 if (face.owned()) {
                     int owner = ownerKey(face);
                     if (owner != checkedOwner) {
                         checkedOwner = owner;
-                        cellPresent = surfacePresent(build.placement, x + face.ownerDx(), y + face.ownerDy(), z + face.ownerDz());
+                        cellPresent = in.presence.present(x + face.ownerDx(), y + face.ownerDy(), z + face.ownerDz());
+                        if (!cellPresent) result.hiddenOwners.add(packCell(x + face.ownerDx(), y + face.ownerDy(), z + face.ownerDz()));
                     }
-                    if (!cellPresent) { build.hiddenFragments++; continue; }
+                    if (!cellPresent) { result.hiddenFragments++; continue; }
                 }
+                result.drawnFragments++;
                 double[] normal = face.normal();
                 float nx = (float) normal[0], ny = (float) normal[1], nz = (float) normal[2];
                 for (var triangle : SurfaceTessellator.tessellate(x, y, z, face,
                     map.surfaces().uvRegions().get(face.uvRegionId()), material.texture(), texture, map.atlas().pageSize())) {
-                    build.triangles.computeIfAbsent(new PageClass(triangle.page(), material.renderClass()), ignored -> new ArrayList<>())
-                        .add(new LitTriangle(triangle,
-                            sampleVertexLight(build, triangle.a(), nx, ny, nz),
-                            sampleVertexLight(build, triangle.b(), nx, ny, nz),
-                            sampleVertexLight(build, triangle.c(), nx, ny, nz)));
+                    PackedVertices out = result.meshes.computeIfAbsent(new PageClass(triangle.page(), material.renderClass()), ignored -> new PackedVertices());
+                    // The drawn normal is the triangle's own, which a fan of a clipped polygon
+                    // shares with its face; light follows the face's.
+                    double abx = triangle.b().x() - triangle.a().x(), aby = triangle.b().y() - triangle.a().y(), abz = triangle.b().z() - triangle.a().z();
+                    double acx = triangle.c().x() - triangle.a().x(), acy = triangle.c().y() - triangle.a().y(), acz = triangle.c().z() - triangle.a().z();
+                    float tx = (float) (aby * acz - abz * acy), ty = (float) (abz * acx - abx * acz), tz = (float) (abx * acy - aby * acx);
+                    float length = (float) Math.sqrt(tx * tx + ty * ty + tz * tz);
+                    if (length > 0) { tx /= length; ty /= length; tz /= length; }
+                    for (SurfaceTessellator.Vertex vertex : List.of(triangle.a(), triangle.b(), triangle.c())) {
+                        int light = sampleVertexLight(in, result, vertex, nx, ny, nz, lightCache, occlusion);
+                        out.add((float) (vertex.x() - baseX), (float) (vertex.y() - baseY), (float) (vertex.z() - baseZ),
+                            (float) vertex.u(), (float) vertex.v(), tx, ty, tz, light);
+                    }
+                    // $nocull: the back is its own triangle, wound the other way and lit from the
+                    // side it faces, rather than a render state that would draw it with the
+                    // front's light and normal.
+                    if (material.doubleSided()) {
+                        for (SurfaceTessellator.Vertex vertex : List.of(triangle.a(), triangle.c(), triangle.b())) {
+                            int light = sampleVertexLight(in, result, vertex, -nx, -ny, -nz, lightCache, occlusion);
+                            out.add((float) (vertex.x() - baseX), (float) (vertex.y() - baseY), (float) (vertex.z() - baseZ),
+                                (float) vertex.u(), (float) vertex.v(), -tx, -ty, -tz, light);
+                        }
+                    }
                 }
             }
         }
-        return true;
+        if (occlusion != null) { result.occlusionTested = occlusion.tested; result.occlusionBlocked = occlusion.blocked; }
+        return result;
+    }
+
+    /** Identifies a fragment's owner cell within its section: its own cell plus the offset. */
+    private static int ownerKey(SurfaceTable.Face face) {
+        return face.localCell() * 27 + (face.ownerDx() + 1) * 9 + (face.ownerDy() + 1) * 3 + face.ownerDz() + 1;
+    }
+
+    /** The visibility test smooth light uses around {@code placement}'s own surfaces, or null when
+     * {@code /src2mc_light_occlusion} is off. Shared with props, which stand among the same walls. */
+    static SurfaceOcclusion occlusionFor(MapPlacement placement, BundleMap map, SurfaceOcclusion.Presence presence) {
+        if (!lightOcclusion || map == null) return null;
+        BlockPos t = placement.translation();
+        return new SurfaceOcclusion(map.surfaces(), t.getX(), t.getY(), t.getZ(), presence);
     }
 
     /**
@@ -741,19 +981,6 @@ public final class MapSurfaceRenderer {
      * {@link #checkOwnedCells} re-examines it on arrival, and guessing absent would blank every
      * region the moment it came into range ahead of its chunks.
      */
-    /** Identifies a fragment's owner cell within its section: its own cell plus the offset. */
-    private static int ownerKey(SurfaceTable.Face face) {
-        return face.localCell() * 27 + (face.ownerDx() + 1) * 9 + (face.ownerDy() + 1) * 3 + face.ownerDz() + 1;
-    }
-
-    /** The visibility test smooth light uses around {@code placement}'s own surfaces, or null when
-     * {@code /src2mc_light_occlusion} is off. Shared with props, which stand among the same walls. */
-    static SurfaceOcclusion occlusionFor(MapPlacement placement, BundleMap map) {
-        if (!lightOcclusion || map == null) return null;
-        BlockPos t = placement.translation();
-        return new SurfaceOcclusion(map.surfaces(), t.getX(), t.getY(), t.getZ(), (x, y, z) -> surfacePresent(placement, x, y, z));
-    }
-
     private static boolean surfacePresent(MapPlacement placement, int x, int y, int z) {
         int worldX = placement.translation().getX() + x, worldZ = placement.translation().getZ() + z;
         if (!level.hasChunk(SectionPos.blockToSectionCoord(worldX), SectionPos.blockToSectionCoord(worldZ))) return true;
@@ -761,47 +988,47 @@ public final class MapSurfaceRenderer {
             .is(Src2mcWorldContent.SURFACE.get());
     }
 
-    private static void finishRegionBuild(RegionKey regionKey, PendingBuild build) {
-        RegionGroup group = build.group;
-        BlockPos origin = build.placement.translation().offset(group.minX(), group.minY(), group.minZ());
-        AABB bounds = regionBounds(build.placement, group);
+    /** {@link #surfacePresent} for the prop renderer's render-thread fallback. */
+    static boolean surfacePresentLive(MapPlacement placement, int x, int y, int z) {
+        return surfacePresent(placement, x, y, z);
+    }
+
+    /** {@link #surfacePresent} against a snapshot, for a build on a worker. */
+    static boolean snapshotSurfacePresent(WorldSnapshot world, MapPlacement placement, int x, int y, int z) {
+        int worldX = placement.translation().getX() + x, worldZ = placement.translation().getZ() + z;
+        if (!world.hasChunkAt(worldX, worldZ)) return true;
+        return world.getBlockState(new BlockPos(worldX, placement.translation().getY() + y, worldZ))
+            .is(Src2mcWorldContent.SURFACE.get());
+    }
+
+    private static void finishRegionBuild(RegionKey regionKey, BuildInput input, BuildResult build) {
+        RegionGroup group = input.group;
+        BlockPos origin = input.placement.translation().offset(group.minX(), group.minY(), group.minZ());
+        AABB bounds = regionBounds(input.placement, group);
         BUILT_REGIONS.put(regionKey, frame);
         lastHiddenFragments = build.hiddenFragments;
-        if (build.occlusion != null) {
-            occlusionTestedLast = build.occlusion.tested;
-            occlusionBlockedLast = build.occlusion.blocked;
+        if (input.occlude) {
+            occlusionTestedLast = build.occlusionTested;
+            occlusionBlockedLast = build.occlusionBlocked;
         }
+        Map<PageClass, Mesh> meshes = REGION_MESHES.computeIfAbsent(regionKey, ignored -> new HashMap<>());
         // A rebuild after a surface block was broken can leave a page class with nothing in it;
         // its old mesh would otherwise go on drawing the fragments that were just removed.
-        MESHES.entrySet().removeIf(item -> {
-            MeshKey key = item.getKey();
-            if (!key.region.equals(regionKey) || build.triangles.containsKey(new PageClass(key.page, key.renderClass))) return false;
+        meshes.entrySet().removeIf(item -> {
+            if (build.meshes.containsKey(item.getKey())) return false;
+            MESHES.remove(new MeshKey(regionKey, item.getKey().page, item.getKey().renderClass));
             item.getValue().close();
             return true;
         });
-        build.triangles.forEach((pageClass, values) -> {
-            MeshKey key = new MeshKey(regionKey, pageClass.page, pageClass.renderClass);
-            Mesh old = MESHES.put(key, upload(build, build.map.atlas(), origin, bounds, values,
-                group.minX(), group.minY(), group.minZ()));
+        build.meshes.forEach((pageClass, vertices) -> {
+            var uploaded = vertices.upload(neutralEntityId);
+            Mesh mesh = new Mesh(input.bundle, input.map.atlas(), uploaded.buffer(), origin, bounds, frame,
+                input.bakeEpoch, input.bakeCovered, build.skyMin, build.skyMax, uploaded.vertexSize(), IrisCompat.shaderPackInUse());
+            MESHES.put(new MeshKey(regionKey, pageClass.page, pageClass.renderClass), mesh);
+            Mesh old = meshes.put(pageClass, mesh);
             if (old != null) old.close();
         });
-    }
-
-    /** Drains in-flight region builds oldest-first, so a started region finishes before a new one
-     * begins and no region is left half-tessellated for long. */
-    private static void drainPendingBuilds(long deadline) {
-        var iterator = PENDING_BUILDS.entrySet().iterator();
-        while (iterator.hasNext() && System.nanoTime() < deadline) {
-            var entry = iterator.next();
-            long sliceStarted = System.nanoTime();
-            boolean finished = advanceRegionBuild(entry.getValue(), deadline);
-            lastBuildNanos = System.nanoTime() - sliceStarted;
-            worstBuildNanos = Math.max(worstBuildNanos, lastBuildNanos);
-            if (finished) {
-                finishRegionBuild(entry.getKey(), entry.getValue());
-                iterator.remove();
-            }
-        }
+        if (meshes.isEmpty()) REGION_MESHES.remove(regionKey);
     }
 
     /**
@@ -814,59 +1041,19 @@ public final class MapSurfaceRenderer {
      * build's own cache, so the extra cost is lookups in a hash map, not light
      * computations, and nothing changes per frame.
      */
-    private static int sampleVertexLight(PendingBuild build, SurfaceTessellator.Vertex vertex, float nx, float ny, float nz) {
-        MapPlacement placement = build.placement;
-        Map<Long, Integer> cache = build.lightCache;
+    private static int sampleVertexLight(BuildInput in, BuildResult result, SurfaceTessellator.Vertex vertex, float nx, float ny, float nz,
+                                         Map<Long, Integer> cache, SurfaceOcclusion occlusion) {
+        MapPlacement placement = in.placement;
         double worldX = placement.translation().getX() + vertex.x();
         double worldY = placement.translation().getY() + vertex.y();
         double worldZ = placement.translation().getZ() + vertex.z();
-        int light = smoothLighting
-            ? LightSampler.smooth(level, worldX, worldY, worldZ, nx, ny, nz, cache, build.occlusion)
-            : LightSampler.sample(level, worldX, worldY, worldZ, nx, ny, nz, cache);
+        int light = in.smooth
+            ? LightSampler.smooth(in.world, worldX, worldY, worldZ, nx, ny, nz, cache, occlusion)
+            : LightSampler.sample(in.world, worldX, worldY, worldZ, nx, ny, nz, cache);
         int sky = light >> 20 & 0xF;
-        build.skyMin = Math.min(build.skyMin, sky);
-        build.skyMax = Math.max(build.skyMax, sky);
+        result.skyMin = Math.min(result.skyMin, sky);
+        result.skyMax = Math.max(result.skyMax, sky);
         return light;
-    }
-
-    private static Mesh upload(PendingBuild build, AtlasIndex atlas, BlockPos origin, AABB bounds,
-                               List<LitTriangle> triangles, int baseX, int baseY, int baseZ) {
-        int capacity = (int) Math.min(Integer.MAX_VALUE, Math.max(4096L, (long) triangles.size() * 3 * 36));
-        try (var bytes = new ByteBufferBuilder(capacity)) {
-            // Iris writes the captured ids into the extended format as each vertex is added, so
-            // the ids have to be neutral for the whole build, not just at the upload call.
-            int[] previousIds = neutralEntityId ? IrisCompat.setCapturedIds(0, 0, 0) : null;
-            try {
-                var builder = new BufferBuilder(bytes, VertexFormat.Mode.TRIANGLES, DefaultVertexFormat.NEW_ENTITY);
-                for (var lit : triangles) {
-                    SurfaceTessellator.Triangle triangle = lit.triangle();
-                    vertex(builder, triangle.a(), baseX, baseY, baseZ, triangle, lit.lightA());
-                    vertex(builder, triangle.b(), baseX, baseY, baseZ, triangle, lit.lightB());
-                    vertex(builder, triangle.c(), baseX, baseY, baseZ, triangle, lit.lightC());
-                }
-                try (var data = builder.buildOrThrow()) {
-                    var buffer = new VertexBuffer(VertexBuffer.Usage.STATIC);
-                    buffer.bind(); buffer.upload(data); VertexBuffer.unbind();
-                    return new Mesh(build.bundle, atlas, buffer, origin, bounds, frame,
-                        build.bakeEpoch, build.bakeCovered, build.skyMin, build.skyMax,
-                        data.drawState().format().getVertexSize(), IrisCompat.shaderPackInUse());
-                }
-            } finally {
-                IrisCompat.restoreCapturedIds(previousIds);
-            }
-        }
-    }
-
-    private static void vertex(BufferBuilder builder, SurfaceTessellator.Vertex vertex, int baseX, int baseY, int baseZ,
-                               SurfaceTessellator.Triangle triangle, int light) {
-        double abx = triangle.b().x() - triangle.a().x(), aby = triangle.b().y() - triangle.a().y(), abz = triangle.b().z() - triangle.a().z();
-        double acx = triangle.c().x() - triangle.a().x(), acy = triangle.c().y() - triangle.a().y(), acz = triangle.c().z() - triangle.a().z();
-        float nx = (float) (aby * acz - abz * acy), ny = (float) (abz * acx - abx * acz), nz = (float) (abx * acy - aby * acx);
-        float length = (float) Math.sqrt(nx * nx + ny * ny + nz * nz);
-        if (length > 0) { nx /= length; ny /= length; nz /= length; }
-        builder.addVertex((float) (vertex.x() - baseX), (float) (vertex.y() - baseY), (float) (vertex.z() - baseZ))
-            .setColor(255, 255, 255, 255).setUv((float) vertex.u(), (float) vertex.v()).setOverlay(OverlayTexture.NO_OVERLAY)
-            .setLight(light).setNormal(nx, ny, nz);
     }
 
     /** Removes the built mesh for the region overlapping {@code worldSection} so the next frame's
@@ -891,9 +1078,10 @@ public final class MapSurfaceRenderer {
     /** Drops the built region holding map-local section (x, y, z); true if one was built. */
     private static boolean invalidateRegion(MapPlacement placement, int sectionX, int sectionY, int sectionZ) {
         RegionKey key = new RegionKey(placement, regionCoord(sectionX, sectionY, sectionZ));
-        // A build already in flight sampled the pre-change world, so it has to restart.
-        PENDING_BUILDS.remove(key);
-        return BUILT_REGIONS.remove(key) != null;
+        // A build already in flight sampled the pre-change world: bumping the version throws its
+        // result away when it lands, and the region is started again.
+        REGION_VERSIONS.merge(key, 1, Integer::sum);
+        return BUILT_REGIONS.remove(key) != null || IN_FLIGHT.containsKey(key);
     }
 
     private static RegionCoord regionCoord(int sectionX, int sectionY, int sectionZ) {
@@ -927,7 +1115,7 @@ public final class MapSurfaceRenderer {
      * block: a fragment bucketed in the neighbouring chunk can be owned by a block in this one.
      */
     public static void checkOwnedCells(ClientLevel chunkLevel, net.minecraft.world.level.chunk.LevelChunk chunk) {
-        if (chunkLevel != level || (BUILT_REGIONS.isEmpty() && PENDING_BUILDS.isEmpty())) return;
+        if (chunkLevel != level || (BUILT_REGIONS.isEmpty() && IN_FLIGHT.isEmpty())) return;
         int chunkMinX = chunk.getPos().getMinBlockX(), chunkMinZ = chunk.getPos().getMinBlockZ();
         BundleGeneration generation = Src2mc.bundles().active();
         BlockPos.MutableBlockPos cursor = new BlockPos.MutableBlockPos();
@@ -946,7 +1134,7 @@ public final class MapSurfaceRenderer {
                         List<SurfaceTable.Face> faces = sections.get(new SurfaceTable.SectionPos(sx, sy, sz));
                         if (faces == null) continue;
                         RegionKey key = new RegionKey(placement, regionCoord(sx, sy, sz));
-                        if (!BUILT_REGIONS.containsKey(key) && !PENDING_BUILDS.containsKey(key)) continue;
+                        if (!BUILT_REGIONS.containsKey(key) && !IN_FLIGHT.containsKey(key)) continue;
                         if (ownedCellMissing(chunk, faces, translation, sx, sy, sz, chunkMinX, chunkMinZ, cursor)
                             && invalidateRegion(placement, sx, sy, sz)) surfaceRebuildsQueued++;
                     }
@@ -1026,25 +1214,65 @@ public final class MapSurfaceRenderer {
     }
 
     private static void discardExpiredMeshes() {
+        if (frame % 20 != 0) return;
         List<RegionKey> expired = BUILT_REGIONS.entrySet().stream()
             .filter(item -> frame - item.getValue() > MESH_GRACE_FRAMES).map(Map.Entry::getKey).toList();
         for (RegionKey region : expired) {
             BUILT_REGIONS.remove(region);
-            MESHES.entrySet().removeIf(item -> {
-                if (!item.getKey().region.equals(region)) return false;
-                item.getValue().close();
-                return true;
+            HIDDEN_OWNERS.remove(region);
+            Map<PageClass, Mesh> meshes = REGION_MESHES.remove(region);
+            if (meshes == null) continue;
+            meshes.forEach((pageClass, mesh) -> {
+                MESHES.remove(new MeshKey(region, pageClass.page, pageClass.renderClass));
+                mesh.close();
             });
         }
     }
 
+    /** Drops every built mesh and every build in flight; the regions build again from scratch. */
+    private static void dropMeshes() {
+        MESHES.values().forEach(Mesh::close);
+        MESHES.clear();
+        REGION_MESHES.clear();
+        BUILT_REGIONS.clear();
+        HIDDEN_OWNERS.clear();
+        ownerCheckOrder = List.of(); ownerCheckRegion = 0; ownerCheckCell = 0;
+        // Orphaned builds finish on their workers and are never looked at again.
+        IN_FLIGHT.clear();
+        WAITING_SINCE.clear();
+    }
+
+    /** Forwarded from {@link dev.theredja.src2mc.client.ClientLightRefresh}; see {@link ChunkLightTracker}. */
+    public static void chunkLoaded(ClientLevel chunkLevel, net.minecraft.world.level.chunk.LevelChunk chunk) {
+        ChunkLightTracker.onChunkLoad(chunkLevel, chunk.getPos());
+    }
+
+    public static void chunkUnloaded(ClientLevel chunkLevel, net.minecraft.world.level.ChunkPos pos) {
+        ChunkLightTracker.onChunkUnload(chunkLevel, pos);
+    }
+
+    /** The placement's regions, with their bounds and centre worked out once rather than per frame. */
+    private static List<RegionEntry> regionEntries(MapPlacement placement, BundleMap map) {
+        return PLACEMENT_REGIONS.computeIfAbsent(placement, ignored -> {
+            List<RegionEntry> entries = new ArrayList<>();
+            regionGroups(map).forEach((coord, group) -> {
+                AABB bounds = regionBounds(placement, group);
+                entries.add(new RegionEntry(new RegionKey(placement, coord), group, bounds,
+                    SectionPos.blockToSectionCoord((bounds.minX + bounds.maxX) * 0.5),
+                    SectionPos.blockToSectionCoord((bounds.minZ + bounds.maxZ) * 0.5)));
+            });
+            return List.copyOf(entries);
+        });
+    }
+
     private static void clear() {
-        MESHES.values().forEach(Mesh::close); MESHES.clear(); BUILT_REGIONS.clear(); REGION_GROUPS.clear();
-        PENDING_BUILDS.clear();
+        dropMeshes();
+        REGION_GROUPS.clear(); PLACEMENT_REGIONS.clear(); REGION_VERSIONS.clear(); BUILD_INFO.clear();
+        WorldSnapshot.SHARED.clear();
         PAGES.reset(-1);
         CameraVisibility.reset();
         level = null; generationSequence = -1; placementSnapshot = List.of(); frame = 0; pvsRejectedRegions = 0; stillLoading = true;
-        firstPassComplete = false; shadowPassCallsSinceMainPass = 0; shadowPassCallsLastFrame = 0;
+        shadowPassCallsSinceMainPass = 0; shadowPassCallsLastFrame = 0;
         shadowConsidered = 0; shadowRejectedUnbuilt = 0; shadowRejectedDistance = 0; shadowDrawn = 0;
         shadowConsideredLast = 0; shadowRejectedUnbuiltLast = 0; shadowRejectedDistanceLast = 0; shadowDrawnLast = 0;
     }
@@ -1059,7 +1287,7 @@ public final class MapSurfaceRenderer {
         return pvs.visible(CameraVisibility.row(), clusters);
     }
 
-    private record LitTriangle(SurfaceTessellator.Triangle triangle, int lightA, int lightB, int lightC) {}
+    private record RegionEntry(RegionKey key, RegionGroup group, AABB bounds, int centerSectionX, int centerSectionZ) {}
     private record RegionCoord(int x, int y, int z) {}
     private record RegionGroup(List<SurfaceTable.SectionPos> sections, short[] clusters,
                                 int minX, int minY, int minZ, int maxX, int maxY, int maxZ) {}

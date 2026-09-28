@@ -163,6 +163,26 @@ final class BundleValidatorTest {
         org.junit.jupiter.api.Assertions.assertArrayEquals(new double[]{0, 1, 0}, faces.get(2).normal(), 1e-12);
     }
 
+    /** {@code double_sided} is Source's $nocull; written only when set, so false is not canonical. */
+    @Test
+    void readsDoubleSidedMaterialsAndRejectsAWrittenFalse() throws Exception {
+        byte[] surfaces = surfaces(fragment((2 << 8) | (3 << 4) | 4, OWNED, 0, 0, 0, 7, 1, 0, 0, 0, 4096, 0, 0, 4096, 2048, 0));
+        for (String flag : List.of("true", "false")) {
+            Map<String, byte[]> payloads = fragmentPayloads(surfaces);
+            payloads.put("maps/d1_01.json", new String(payloads.get("maps/d1_01.json"), StandardCharsets.UTF_8)
+                .replace("\"reflectivity\":[0.5,0.5,0.5]}", "\"reflectivity\":[0.5,0.5,0.5],\"double_sided\":" + flag + "}")
+                .getBytes(StandardCharsets.UTF_8));
+            Path bundle = directory.resolve("double-sided-" + flag + ".src2mc");
+            writeBundle(bundle, 1, "hl2", payloads);
+            if (flag.equals("true")) {
+                org.junit.jupiter.api.Assertions.assertTrue(
+                    new BundleValidator().validate(bundle).maps().getFirst().materials().getFirst().doubleSided());
+            } else {
+                assertCode(BundleErrorCode.INVALID_SCHEMA, bundle);
+            }
+        }
+    }
+
     @Test
     void rejectsMalformedSurfaceFragments() throws Exception {
         int[] triangle = {0, 0, 0, 4096, 0, 0, 4096, 4096, 0};

@@ -23,7 +23,16 @@ pub struct Prop {
     /// The entity this came from, or `prop_static` for the `sprp` lump, which
     /// no longer has entities of its own by the time the map is compiled.
     pub classname: String,
+    /// Source's `solid`: [`SOLID_NONE`], [`SOLID_BBOX`] or [`SOLID_VPHYSICS`].
+    pub solid: u8,
 }
+
+/// Not solid at all; the player walks through it in the game.
+pub const SOLID_NONE: u8 = 0;
+/// Solid as its axis-aligned bounding box.
+pub const SOLID_BBOX: u8 = 2;
+/// Solid as its physics model.
+pub const SOLID_VPHYSICS: u8 = 6;
 
 impl Prop {
     /// Rotate and translate a point from model space into world space.
@@ -88,6 +97,7 @@ pub fn extract(map: &crate::bsp::Map) -> Vec<Prop> {
                 angles: prop.angles.map(f64::from),
                 scale: f64::from(prop.scale),
                 classname: "prop_static".to_string(),
+                solid: prop.solid,
             })
         })
         .collect()
@@ -115,12 +125,15 @@ pub fn extract_entities(bsp: &vbsp::Bsp) -> Vec<Prop> {
             let mut angles = [0.0; 3];
             let mut scale = 1.0;
             let mut classname = String::new();
+            // The engine's default for every model entity that leaves it out.
+            let mut solid = SOLID_VPHYSICS;
             for (key, value) in raw.properties() {
                 match key {
                     "model" => model = Some(value.to_string()),
                     "classname" => classname = value.to_string(),
                     "origin" => origin = triple(value),
                     "angles" => angles = triple(value).unwrap_or([0.0; 3]),
+                    "solid" => solid = value.trim().parse().unwrap_or(SOLID_VPHYSICS),
                     // Two spellings, one meaning; whichever is present wins.
                     "uniformscale" | "modelscale" => {
                         scale = value.parse().ok().filter(|s| *s > 0.0).unwrap_or(1.0)
@@ -139,6 +152,7 @@ pub fn extract_entities(bsp: &vbsp::Bsp) -> Vec<Prop> {
                 angles,
                 scale,
                 classname,
+                solid,
             })
         })
         .collect()
@@ -162,6 +176,7 @@ mod tests {
             angles,
             scale: 1.0,
             classname: "prop_static".into(),
+            solid: SOLID_VPHYSICS,
         }
     }
 

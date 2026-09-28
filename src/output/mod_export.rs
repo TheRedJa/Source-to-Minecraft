@@ -51,6 +51,9 @@ pub struct MapExport {
     /// Encoded light-occlusion mask; absent when no brush is drawn as geometry
     /// or the map was exported with the mask turned off.
     pub occlusion: Option<Vec<u8>>,
+    /// Encoded per-cell collision shapes; absent when the map was converted
+    /// without them.
+    pub collision: Option<Vec<u8>>,
     pub diagnostics: metadata::Diagnostics,
 }
 
@@ -71,10 +74,24 @@ pub fn from_conversion(
         conversion.transform.units_per_block() == UNITS_PER_BLOCK,
         "mod export requires exactly 32 Source units per block"
     );
-    let (grid_min, grid_max) = conversion
+    let (mut grid_min, mut grid_max) = conversion
         .grid
         .bounds()
         .context("mod export produced an empty map")?;
+    let extracted = crate::source::extract::extract_mod_props(map, config);
+    let mut collision = conversion.collision.clone();
+    let (mut solid_props, mut prop_cells) = (0, 0);
+    if let Some(collision) = collision.as_mut() {
+        (solid_props, prop_cells) = add_prop_collision(config, conversion, &extracted, collision);
+    }
+    // Carriers are blocks too, and may sit a cell outside the grid: the anchor
+    // layer below the map must stay free of them.
+    for cell in collision.iter().flat_map(|c| &c.carriers) {
+        for axis in 0..3 {
+            grid_min[axis] = grid_min[axis].min(cell[axis]);
+            grid_max[axis] = grid_max[axis].max(cell[axis]);
+        }
+    }
     let anchor_cell = [
         grid_min[0],
         grid_min[1]
@@ -86,12 +103,7 @@ pub fn from_conversion(
     let surface_block = palette.intern("src2mc:surface");
     palette.intern("src2mc:map_anchor");
     palette.intern("src2mc:prop_root");
-    let blocks = conversion
-        .grid
-        .iter()
-        .map(|(cell, _)| (cell, surface_block))
-        .collect();
-    let extracted = crate::source::extract::extract_mod_props(map, config);
+    let carrier_block = palette.intern("src2mc:carrier");
     // Prop and surface sections both drive the visibility table: every
     // 16-block section a transformed prop box spans, or a surface face's
     // cell falls in, collects the clusters of leaves whose boxes overlap it,
@@ -167,6 +179,7 @@ pub fn from_conversion(
                     texture: None,
                     surface_prop: None,
                     reflectivity: [0.0; 3],
+                    double_sided: false,
                 });
                 id
             })
@@ -179,6 +192,8 @@ pub fn from_conversion(
     // the voxel floor and nudged out of voxel walls, which undid the grid's
     // rounding while surfaces were snapped to it; now surfaces are exact, the
     // same corrections move props off the geometry they really stand on.
+    // A root may land in a carrier's cell: it then carries that cell's
+    // collision itself, and the carrier is left out.
     let mut taken = std::collections::HashSet::new();
     let mut props = Vec::new();
     let mut diagnostics = Vec::new();
@@ -227,6 +242,20 @@ pub fn from_conversion(
             material_ids: slots.clone(),
         });
     }
+    if let Some(collision) = collision.as_mut() {
+        collision.carriers.retain(|cell| !taken.contains(cell));
+    }
+    let blocks = conversion
+        .grid
+        .iter()
+        .map(|(cell, _)| (cell, surface_block))
+        .chain(
+            collision
+                .iter()
+                .flat_map(|c| &c.carriers)
+                .map(|cell| (*cell, carrier_block)),
+        )
+        .collect();
 
     // Brushes too thin to voxelize are no longer drawn as props of their own:
     // their faces are in the face lump like any other and arrive as surface
@@ -305,6 +334,36 @@ pub fn from_conversion(
     } else {
         None
     };
+    let collision = match &collision {
+        Some(collision) => {
+            let mut context = BTreeMap::new();
+            context.insert("solid_props".into(), solid_props.to_string());
+            context.insert("prop_cells".into(), prop_cells.to_string());
+            context.insert("shaped_cells".into(), collision.shapes.len().to_string());
+            context.insert("carriers".into(), collision.carriers.len().to_string());
+            context.insert("attached_pieces".into(), collision.attached.to_string());
+            context.insert(
+                "empty_blocks".into(),
+                collision
+                    .shapes
+                    .iter()
+                    .filter(|(cell, boxes)| boxes.is_empty() && !collision.carriers.contains(*cell))
+                    .count()
+                    .to_string(),
+            );
+            diagnostics.push(metadata::Diagnostic {
+                severity: metadata::Severity::Info,
+                code: "COLLISION_SUMMARY".into(),
+                message: "cells that collide as something other than a full block".into(),
+                context,
+            });
+            Some(
+                crate::output::cell_collision::encode(&collision.shapes)
+                    .context("encoding the collision table")?,
+            )
+        }
+        None => None,
+    };
     let occlusion = (!light_blockers.is_empty())
         .then(|| crate::output::occlusion::encode(&light_blockers))
         .transpose()
@@ -324,8 +383,61 @@ pub fn from_conversion(
         props,
         pvs,
         occlusion,
+        collision,
         diagnostics: metadata::Diagnostics::new(diagnostics)?,
     })
+}
+
+/// Give every solid prop large enough to bump into its collision: Source's
+/// `solid` decides whether it has any and whether it is its bounding box or
+/// its model. The model's own physics hull (`.phy`) is not read yet, so a
+/// physics prop collides as the shell of its drawn mesh. Returns how many
+/// props and cells took part.
+fn add_prop_collision(
+    config: &crate::config::Config,
+    conversion: &crate::convert::Conversion,
+    extracted: &[crate::source::extract::ModProp],
+    collision: &mut crate::voxel::collision::CellCollision,
+) -> (usize, usize) {
+    use crate::bsp::props::{SOLID_BBOX, SOLID_NONE};
+    use crate::voxel::collision::{SubCells, box_volume, shell_volume};
+    use rayon::prelude::*;
+    let transform = &conversion.transform;
+    let volumes: Vec<std::collections::HashMap<IVec3, SubCells>> = extracted
+        .par_iter()
+        .filter_map(|item| {
+            let size = item.bounds.size();
+            if item.prop.solid == SOLID_NONE
+                || size.x.max(size.y).max(size.z) < config.props.collision_min_size
+            {
+                return None;
+            }
+            if item.prop.solid == SOLID_BBOX {
+                let bounds = transform.transform_bounds(item.bounds);
+                return Some(box_volume(bounds.min, bounds.max));
+            }
+            let triangles: Vec<[crate::geom::Vec3; 3]> = item
+                .model
+                .parts
+                .iter()
+                .flat_map(|part| &part.triangles)
+                .map(|tri| tri.map(|v| transform.to_block_space(item.prop.place(v))))
+                .collect();
+            Some(shell_volume(&triangles))
+        })
+        .collect();
+    let solid = volumes.len();
+    let mut cells: std::collections::HashMap<IVec3, SubCells> = std::collections::HashMap::new();
+    for volume in volumes {
+        for (cell, bits) in volume {
+            cells
+                .entry(cell)
+                .or_insert_with(SubCells::empty)
+                .union(&bits);
+        }
+    }
+    let added = crate::voxel::collision::add_props(collision, &conversion.grid, cells);
+    (solid, added)
 }
 
 /// A single face or prop use contributing texel demand to a material.
@@ -392,6 +504,7 @@ fn extract_materials(
             texture: None,
             surface_prop: None,
             reflectivity: material.reflectivity,
+            double_sided: false,
         };
         let face_indices = &faces_by_material[index];
         let Some(material_assets) = resolver.assets(&material.name, Some(&material.raw_name))
@@ -413,6 +526,7 @@ fn extract_materials(
             metadata::RenderClass::Solid
         };
         reference_template.surface_prop = material_assets.surface_prop;
+        reference_template.double_sided = material_assets.no_cull;
         let Some(header) = decoder.header(&material_assets.base_texture) else {
             materials.push(reference_template);
             assign_material(
@@ -515,6 +629,7 @@ fn extract_materials(
             texture: None,
             surface_prop: None,
             reflectivity: [0.0; 3],
+            double_sided: false,
         };
         let Some(material_assets) = resolver.assets(name, None) else {
             materials.push(reference);
@@ -528,6 +643,7 @@ fn extract_materials(
             metadata::RenderClass::Solid
         };
         reference.surface_prop = material_assets.surface_prop;
+        reference.double_sided = material_assets.no_cull;
         let Some(header) = decoder.header(&material_assets.base_texture) else {
             materials.push(reference);
             continue;
@@ -856,6 +972,10 @@ pub fn write_campaign(
         if let Some(occlusion) = map.occlusion {
             archive.add(format!("{prefix}/occlusion.s2occl"), occlusion)?;
         }
+        let has_collision = map.collision.is_some();
+        if let Some(collision) = map.collision {
+            archive.add(format!("{prefix}/collision.s2coll"), collision)?;
+        }
         archive.add(
             format!("{prefix}/diagnostics.json"),
             map.diagnostics.encode()?,
@@ -876,6 +996,7 @@ pub fn write_campaign(
             props: format!("{prefix}/props.s2props"),
             pvs: has_pvs.then(|| format!("{prefix}/pvs.s2pvs")),
             occlusion: has_occlusion.then(|| format!("{prefix}/occlusion.s2occl")),
+            collision: has_collision.then(|| format!("{prefix}/collision.s2coll")),
             diagnostics: format!("{prefix}/diagnostics.json"),
         };
         archive.add(&metadata_path, meta.encode()?)?;
@@ -991,6 +1112,7 @@ mod tests {
             texture: None,
             surface_prop: None,
             reflectivity: [0.25, 0.5, 0.75],
+            double_sided: false,
         };
         let content_id = bundle::content_id(&mesh_bytes);
         MapExport {
@@ -1026,6 +1148,7 @@ mod tests {
             }],
             pvs: None,
             occlusion: None,
+            collision: None,
             props: vec![Prop {
                 source_ordinal: 0,
                 source_model: source_model.into(),
@@ -1230,6 +1353,7 @@ mod tests {
             texture: None,
             surface_prop: None,
             reflectivity: [0.0; 3],
+            double_sided: false,
         });
         map.models.push(ModelAsset {
             source_model: "models/b.mdl".into(),

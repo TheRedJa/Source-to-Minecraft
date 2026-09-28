@@ -38,6 +38,8 @@ const NAME_LEN: usize = 128;
 const ORIGIN: usize = 0;
 const ANGLES: usize = 12;
 const PROP_TYPE: usize = 24;
+/// `m_Solid`, the byte before the flags, in every version since 4.
+const SOLID: usize = 30;
 const FLAGS: usize = 31;
 /// The shortest record any version has: version 4.
 const MIN_STRIDE: usize = 56;
@@ -55,6 +57,9 @@ pub struct RawProp {
     /// Pitch, yaw, roll, as Source stores them.
     pub angles: [f32; 3],
     pub flags: u8,
+    /// How the engine collides with the prop: 0 not at all, 2 its bounding
+    /// box, 6 its physics model.
+    pub solid: u8,
     /// Uniform scale, or 1.0 for the versions that do not carry one.
     pub scale: f32,
 }
@@ -195,6 +200,7 @@ fn parse(lump: &[u8], version: u16) -> Result<StaticProps> {
             origin: read_vec(record, ORIGIN),
             angles: read_vec(record, ANGLES),
             flags: record[FLAGS],
+            solid: record[SOLID],
             scale: match scale_at {
                 Some(at) => f32::from_le_bytes(record[at..at + 4].try_into().unwrap()),
                 None => 1.0,

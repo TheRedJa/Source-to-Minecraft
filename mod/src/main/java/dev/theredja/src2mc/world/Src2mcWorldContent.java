@@ -19,10 +19,13 @@ public final class Src2mcWorldContent {
     private static final DeferredRegister<BlockEntityType<?>> BLOCK_ENTITIES =
         DeferredRegister.create(BuiltInRegistries.BLOCK_ENTITY_TYPE, Src2mc.MOD_ID);
 
+    // Both take their collision from the map's table, which depends on the position, so neither
+    // may have its shape cached per state. Forced solid: a dynamic shape would otherwise leave
+    // them non-solid to fluids and spawning, which a wall of the map is not.
     public static final DeferredBlock<Src2mcSurfaceBlock> SURFACE = BLOCKS.registerBlock(
-        "surface", Src2mcSurfaceBlock::new, properties());
-    public static final DeferredBlock<Src2mcInvisibleBlock> CARRIER = BLOCKS.registerBlock(
-        "carrier", Src2mcInvisibleBlock::new, properties());
+        "surface", Src2mcSurfaceBlock::new, properties().dynamicShape().forceSolidOn());
+    public static final DeferredBlock<Src2mcCarrierBlock> CARRIER = BLOCKS.registerBlock(
+        "carrier", Src2mcCarrierBlock::new, properties().dynamicShape().forceSolidOn().noOcclusion().replaceable());
     public static final DeferredBlock<Src2mcDataBlock> MAP_ANCHOR = BLOCKS.registerBlock(
         "map_anchor",
         props -> new Src2mcDataBlock(props, Src2mcWorldContent::newDataBlockEntity, false, true),
@@ -30,8 +33,8 @@ public final class Src2mcWorldContent {
     );
     public static final DeferredBlock<Src2mcDataBlock> PROP_ROOT = BLOCKS.registerBlock(
         "prop_root",
-        props -> new Src2mcDataBlock(props, Src2mcWorldContent::newDataBlockEntity, true, true),
-        properties()
+        props -> new Src2mcDataBlock(props, Src2mcWorldContent::newDataBlockEntity, true, true, true),
+        properties().dynamicShape()
     );
     public static final DeferredBlock<Src2mcDataBlock> PLACEHOLDER = BLOCKS.registerBlock(
         "placeholder",

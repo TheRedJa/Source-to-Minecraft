@@ -41,6 +41,11 @@ final class Src2mcCommands {
                 .then(argument("height", com.mojang.brigadier.arguments.IntegerArgumentType.integer(1, 512))
                     .executes(context -> lightColumn(context.getSource(),
                         com.mojang.brigadier.arguments.IntegerArgumentType.getInteger(context, "height")))))
+            .then(literal("collision")
+                .executes(context -> collisionStatus(context.getSource()))
+                .then(literal("exact").executes(context -> collisionMode(context.getSource(), true)))
+                .then(literal("full").executes(context -> collisionMode(context.getSource(), false)))
+                .then(literal("probe").executes(context -> collisionProbe(context.getSource()))))
             .then(literal("status").executes(context -> {
                 var generation = Src2mc.BUNDLES.active();
                 context.getSource().sendSuccess(
@@ -54,6 +59,47 @@ final class Src2mcCommands {
                 );
                 return 1;
             })));
+    }
+
+    private static int collisionStatus(net.minecraft.commands.CommandSourceStack source) {
+        source.sendSuccess(() -> Component.literal(
+            dev.theredja.src2mc.world.CollisionShapes.status(source.getLevel())), false);
+        return 1;
+    }
+
+    /**
+     * Exact is the map's own solid volume per cell; full is every map block a whole cube and
+     * every carrier nothing, as collision was before. One switch for client and server alike in
+     * a single-player world, since both sides read the same flag.
+     */
+    private static int collisionMode(net.minecraft.commands.CommandSourceStack source, boolean exact) {
+        dev.theredja.src2mc.world.CollisionShapes.setExact(exact);
+        return collisionStatus(source);
+    }
+
+    /** The collision of the block looked at, and of the cells the player stands in and on. */
+    private static int collisionProbe(net.minecraft.commands.CommandSourceStack source) {
+        var level = source.getLevel();
+        java.util.List<String> lines = new java.util.ArrayList<>();
+        if (source.getEntity() instanceof net.minecraft.world.entity.Entity entity
+            && entity.pick(8.0, 1.0F, false) instanceof net.minecraft.world.phys.BlockHitResult hit
+            && hit.getType() == net.minecraft.world.phys.HitResult.Type.BLOCK) {
+            lines.add(probeLine(level, "looked at", hit.getBlockPos()));
+        }
+        BlockPos feet = BlockPos.containing(source.getPosition());
+        lines.add(probeLine(level, "feet", feet));
+        lines.add(probeLine(level, "below", feet.below()));
+        for (String line : lines) source.sendSuccess(() -> Component.literal(line), false);
+        return 1;
+    }
+
+    private static String probeLine(net.minecraft.server.level.ServerLevel level, String label, BlockPos pos) {
+        var state = level.getBlockState(pos);
+        var shape = state.getCollisionShape(level, pos);
+        String bounds = shape.isEmpty() ? "none" : shape.bounds().toString().replace("AABB", "");
+        return label + " " + pos.toShortString() + " " + net.minecraft.core.registries.BuiltInRegistries.BLOCK.getKey(state.getBlock())
+            + ": collides " + bounds + " (" + shape.toAabbs().size() + " box(es)); "
+            + dev.theredja.src2mc.world.CollisionShapes.describe(level, pos);
     }
 
     /**

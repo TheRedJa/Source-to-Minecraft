@@ -2,11 +2,7 @@ package dev.theredja.src2mc.client.render;
 
 import static net.minecraft.commands.Commands.literal;
 
-import com.mojang.blaze3d.vertex.BufferBuilder;
-import com.mojang.blaze3d.vertex.ByteBufferBuilder;
-import com.mojang.blaze3d.vertex.DefaultVertexFormat;
 import com.mojang.blaze3d.vertex.VertexBuffer;
-import com.mojang.blaze3d.vertex.VertexFormat;
 import dev.theredja.src2mc.Src2mc;
 import dev.theredja.src2mc.bundle.AtlasIndex;
 import dev.theredja.src2mc.bundle.BundleGeneration;
@@ -31,7 +27,6 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.renderer.GameRenderer;
 import net.minecraft.client.renderer.RenderType;
-import net.minecraft.client.renderer.texture.OverlayTexture;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.SectionPos;
 import net.minecraft.ChatFormatting;
@@ -57,10 +52,17 @@ import org.joml.Matrix4f;
  */
 @EventBusSubscriber(modid = Src2mc.MOD_ID, value = Dist.CLIENT)
 public final class PropRenderer {
-    private static final int PROP_BUILDS_PER_FRAME = 32;
     private static final int PROP_DECODE_LOOKAHEAD = 256;
-    private static final long PROP_BUILD_BUDGET_NANOS = 4_000_000L;
-    private static final long PROP_REBUILD_BUDGET_NANOS = 4_000_000L;
+    /** Props being tessellated on workers to learn which batches they join. */
+    private static final int MAX_REGISTERING = 64;
+    private static final int MAX_SECTION_BUILDS = MeshBuildPool.THREADS * 2;
+    /** Render-thread time per frame for copying the world into new section rebuilds. */
+    private static final long DISPATCH_BUDGET_NANOS = 3_000_000L;
+    /** Render-thread time per frame for filling and uploading finished sections; one always goes. */
+    private static final long UPLOAD_BUDGET_NANOS = 4_000_000L;
+    /** Longest a dirty section waits for registration to go quiet or its chunks' light to land. */
+    private static final long DIRTY_WAIT_NANOS = 3_000_000_000L;
+    private static final int SNAPSHOT_MARGIN = 2;
     private static final int ROOT_RECHECK_FRAMES = 10;
     private static final long MESH_GRACE_FRAMES = 600;
     private static final RuntimeMeshResidency RUNTIME_MESHES = new RuntimeMeshResidency();
@@ -71,6 +73,16 @@ public final class PropRenderer {
     private static final Map<PropKey, RootStatus> ROOT_STATUS = new HashMap<>();
     private static final Set<PropKey> BUILT_PROPS = new HashSet<>();
     private static final Map<PropKey, Long> LAST_VISIBLE = new HashMap<>();
+    private static final Map<PropKey, Registration> REGISTERING = new java.util.LinkedHashMap<>();
+    /** Every batch key by section, so a section rebuild finds its batches without a scan. */
+    private static final Map<SectionKey, Set<AggregateKey>> SECTION_KEYS = new HashMap<>();
+    /** Bumped whenever a batch in the section is dirtied; a rebuild against an older value leaves it dirty. */
+    private static final Map<SectionKey, Integer> SECTION_VERSIONS = new HashMap<>();
+    private static final Map<SectionKey, SectionFlight> SECTION_BUILDS = new java.util.LinkedHashMap<>();
+    private static final Map<SectionKey, Long> DIRTY_SINCE = new HashMap<>();
+    private static int registrationsStartedLast, sectionsWaitingLast;
+    private static long registrationsFailed, sectionsFailed, sectionsOvertaken;
+    private static int lastScanSectionX = Integer.MIN_VALUE, lastScanSectionZ = Integer.MIN_VALUE;
     private static ClientLevel level;
     private static long generationSequence = -1;
     private static List<MapPlacement> placementSnapshot = List.of();
@@ -148,6 +160,11 @@ public final class PropRenderer {
                 + "  |  " + average.drawCalls() + " draws, " + formatMillions(average.triangles()) + " triangles, " + formatMs(average.renderMs()) + " ms render")));
         lines.add(statusLine("Memory", "Props " + formatBytes(propVbo) + "  |  Atlas " + formatBytes(atlas.residentVramBytes()), ChatFormatting.LIGHT_PURPLE)
             .append(detail("  Meshes " + runtimeMeshes.ready() + " ready, " + runtimeMeshes.pending() + " loading")));
+        lines.add(statusLine("Builds", REGISTERING.size() + " registering, " + SECTION_BUILDS.size() + " sections building", ChatFormatting.YELLOW)
+            .append(detail("  " + sectionsWaitingLast + " waiting (registration or chunk light), " + AGGREGATES.dirtyCount() + " dirty batches"
+                + ", " + sectionsOvertaken + " overtaken, failed " + registrationsFailed + "/" + sectionsFailed
+                + "  |  " + MeshBuildPool.THREADS + " workers, " + String.format(java.util.Locale.ROOT, "%.0f", MeshBuildPool.WORKER_NANOS.get() / 1.0e6)
+                + " ms worker time over " + MeshBuildPool.JOBS.get() + " jobs (surfaces too)")));
         if (invalidRoots != 0 || runtimeMeshes.failed() != 0) lines.add(statusLine("Warning", invalidRoots + " unavailable roots, " + runtimeMeshes.failed() + " failed meshes", ChatFormatting.RED)
             .append(detail(" (unloaded " + unloaded + ", missing " + missing + ", schema " + schema + ")")));
         return List.copyOf(lines);
@@ -197,12 +214,13 @@ public final class PropRenderer {
             PERF.add(PropRenderPerf.M_ROOT_SCAN_NANOS, System.nanoTime() - scanStart);
             PERF.add(PropRenderPerf.M_ROOT_SCAN_PROPS, scannedRoots);
         }
-        Map<PropKey, Map<BatchKey, List<PropTessellator.Triangle>>> tessCache = new HashMap<>();
         long buildStart = System.nanoTime();
-        buildVisibleProps(generation, minecraft, placements, tessCache);
+        completeRegistrations();
+        buildVisibleProps(generation, minecraft, placements);
         PERF.add(PropRenderPerf.M_BUILD_NANOS, System.nanoTime() - buildStart);
         discardExpiredMeshes();
-        rebuildDirtyAggregates(generation, minecraft.gameRenderer.getMainCamera().getPosition(), tessCache);
+        completeSectionBuilds();
+        dispatchSectionBuilds(generation, minecraft);
         CameraVisibility.resolve(generation, minecraft);
         OCCLUSION.beginFrame(frame);
         if (renderingEnabled) draw(event, generation, false, false);
@@ -256,10 +274,15 @@ public final class PropRenderer {
         return prop.stableId().equals(tag.getString("stable_id")) ? RootStatus.ACTIVE : RootStatus.IDENTITY;
     }
 
-    private static void buildVisibleProps(BundleGeneration generation, Minecraft minecraft, List<MapPlacement> placements,
-                                          Map<PropKey, Map<BatchKey, List<PropTessellator.Triangle>>> tessCache) {
+    private static void buildVisibleProps(BundleGeneration generation, Minecraft minecraft, List<MapPlacement> placements) {
         var camera = minecraft.gameRenderer.getMainCamera().getPosition();
         int cameraSectionX = SectionPos.blockToSectionCoord(camera.x), cameraSectionZ = SectionPos.blockToSectionCoord(camera.z);
+        // With nothing left to register and the camera in the same section, the walk over every
+        // prop of every placement only restamps residency, which has 600 frames of grace. It
+        // still runs on the frames the roots are rechecked, which is when new roots appear.
+        boolean moved = cameraSectionX != lastScanSectionX || cameraSectionZ != lastScanSectionZ;
+        if (!moved && nearbyUnbuilt == 0 && REGISTERING.isEmpty() && frame % ROOT_RECHECK_FRAMES != 1) return;
+        lastScanSectionX = cameraSectionX; lastScanSectionZ = cameraSectionZ;
         int distance = minecraft.options.getEffectiveRenderDistance() + 1;
         List<BuildCandidate> candidates = new ArrayList<>();
         int nearbyBuilt = 0;
@@ -277,6 +300,7 @@ public final class PropRenderer {
                 // Residency follows render distance, not the camera frustum. Looking away must not
                 // make a nearby prop expire and slowly rebuild when the player turns around.
                 if (BUILT_PROPS.contains(key)) { LAST_VISIBLE.put(key, frame); nearbyBuilt++; continue; }
+                if (REGISTERING.containsKey(key)) continue;
                 double x = placement.translation().getX() + translation[0] - camera.x;
                 double y = placement.translation().getY() + translation[1] - camera.y;
                 double z = placement.translation().getZ() + translation[2] - camera.z;
@@ -284,42 +308,60 @@ public final class PropRenderer {
             }
         }
         candidates.sort(Comparator.comparingDouble(BuildCandidate::distanceSquared));
-        nearbyProps = nearbyBuilt + candidates.size();
-        nearbyUnbuilt = candidates.size();
-        long started = System.nanoTime();
+        nearbyProps = nearbyBuilt + candidates.size() + REGISTERING.size();
+        nearbyUnbuilt = candidates.size() + REGISTERING.size();
+        int started = 0;
+        for (int index = 0; index < Math.min(candidates.size(), PROP_DECODE_LOOKAHEAD) && REGISTERING.size() < MAX_REGISTERING; index++) {
+            PropSource source = candidates.get(index).source();
+            if (source.prop().modelIndex() < 0 || source.prop().modelIndex() >= source.map().models().size()) continue;
+            RuntimeMesh mesh = RUNTIME_MESHES.request(generation.sequence(), source.bundle(), source.map().models().get(source.prop().modelIndex()).contentId()).orElse(null);
+            if (mesh == null) continue;
+            REGISTERING.put(new PropKey(source.placement(), source.prop().stableId()),
+                new Registration(source, MeshBuildPool.submit(() -> batchesOf(source, mesh))));
+            started++;
+        }
+        registrationsStartedLast = started;
+    }
+
+    /** The batches a prop's triangles land in; tessellated on a worker, where the geometry is thrown away again. */
+    private static Set<BatchKey> batchesOf(PropSource source, RuntimeMesh mesh) {
+        return Set.copyOf(tessellateProp(source, mesh).keySet());
+    }
+
+    /** Registers the props whose batches are known on the aggregates they contribute to. */
+    private static void completeRegistrations() {
         int builds = 0;
-        for (int index = 0; index < Math.min(candidates.size(), PROP_DECODE_LOOKAHEAD); index++) {
-            BuildCandidate candidate = candidates.get(index);
-            if (buildProp(generation, candidate, tessCache)) builds++;
-            if (builds >= PROP_BUILDS_PER_FRAME || (builds > 0 && System.nanoTime() - started >= PROP_BUILD_BUDGET_NANOS)) break;
+        var iterator = REGISTERING.entrySet().iterator();
+        while (iterator.hasNext()) {
+            var entry = iterator.next();
+            Registration registration = entry.getValue();
+            if (!registration.batches.isDone()) continue;
+            iterator.remove();
+            PropKey propKey = entry.getKey();
+            Set<BatchKey> batches;
+            try {
+                batches = registration.batches.join();
+            } catch (RuntimeException exception) {
+                if (registrationsFailed++ == 0) Src2mc.LOGGER.warn("src2mc: tessellating a prop failed; it is left out", exception);
+                batches = Set.of();
+            }
+            PropSource source = registration.source;
+            ROOT_DATA.put(propKey, source);
+            Set<AggregateKey> contributions = PROP_CONTRIBUTIONS.computeIfAbsent(propKey, ignored -> new HashSet<>());
+            for (BatchKey batch : batches) {
+                AggregateKey key = new AggregateKey(source.placement(), batch.section().x(), batch.section().y(), batch.section().z(), batch.page(), batch.renderClass());
+                if (contributions.add(key)) {
+                    AGGREGATES.register(key, propKey);
+                    SECTION_KEYS.computeIfAbsent(sectionOf(key), ignored -> new HashSet<>()).add(key);
+                    touch(key);
+                }
+            }
+            BUILT_PROPS.add(propKey);
+            LAST_VISIBLE.put(propKey, frame);
+            builds++;
         }
         buildsLastFrame = builds;
         PERF.add(PropRenderPerf.M_BUILDS, builds);
-    }
-
-    /**
-     * Registers a prop's tessellated contributions on aggregate batches; the
-     * affected aggregates are rebuilt by {@link #rebuildDirtyAggregates}.
-     *
-     * @return true only when this prop's mesh was decoded and the prop is built.
-     */
-    private static boolean buildProp(BundleGeneration generation, BuildCandidate candidate,
-                                     Map<PropKey, Map<BatchKey, List<PropTessellator.Triangle>>> tessCache) {
-        PropSource source = candidate.source();
-        if (source.prop().modelIndex() < 0 || source.prop().modelIndex() >= source.map().models().size()) return false;
-        RuntimeMesh mesh = RUNTIME_MESHES.request(generation.sequence(), source.bundle(), source.map().models().get(source.prop().modelIndex()).contentId()).orElse(null);
-        if (mesh == null) return false;
-        PropKey propKey = new PropKey(source.placement(), source.prop().stableId());
-        Map<BatchKey, List<PropTessellator.Triangle>> triangles = tessellateProp(source, mesh);
-        tessCache.put(propKey, triangles);
-        ROOT_DATA.put(propKey, source);
-        Set<AggregateKey> contributions = PROP_CONTRIBUTIONS.computeIfAbsent(propKey, ignored -> new HashSet<>());
-        for (BatchKey batch : triangles.keySet()) {
-            AggregateKey key = new AggregateKey(source.placement(), batch.section().x(), batch.section().y(), batch.section().z(), batch.page(), batch.renderClass());
-            if (contributions.add(key)) AGGREGATES.register(key, propKey);
-        }
-        BUILT_PROPS.add(propKey);
-        return true;
     }
 
     /** Tessellates one prop into map-local (section, page, render class) triangle batches. */
@@ -336,7 +378,11 @@ public final class PropRenderer {
             if (!material.textured() || material.renderClass() == BundleMaterial.RenderClass.FALLBACK) continue;
             AtlasIndex.Texture texture = map.atlas().textures().get(material.texture().contentId());
             if (texture == null) continue;
-            for (PropTessellator.Triangle triangle : PropTessellator.tessellate(mesh, submesh, prop, material.texture(), texture, map.atlas().pageSize())) {
+            List<PropTessellator.Triangle> tessellated = PropTessellator.tessellate(mesh, submesh, prop, material.texture(), texture, map.atlas().pageSize());
+            // $nocull: the back is its own triangle, wound the other way with the normal turned
+            // round, so it is culled, lit and shaded from the side it faces.
+            if (material.doubleSided()) tessellated = PropTessellator.withBackFaces(tessellated);
+            for (PropTessellator.Triangle triangle : tessellated) {
                 for (Section section : coveredSections(triangle)) {
                     for (PropTessellator.Triangle clipped : PropTessellator.clipSection(triangle, section.x << 4, section.y << 4, section.z << 4)) {
                         triangles.computeIfAbsent(new BatchKey(section, clipped.page(), material.renderClass()), ignored -> new ArrayList<>()).add(clipped);
@@ -347,65 +393,145 @@ public final class PropRenderer {
         return triangles;
     }
 
-    /** Rebuilds dirty aggregate batches nearest-first within the frame time budget. */
-    private static void rebuildDirtyAggregates(BundleGeneration generation, net.minecraft.world.phys.Vec3 camera,
-                                               Map<PropKey, Map<BatchKey, List<PropTessellator.Triangle>>> tessCache) {
+    /**
+     * Starts rebuilds of sections with dirty batches, nearest first. A section is rebuilt whole --
+     * every page and render class in it -- so each contributing prop is tessellated once per
+     * rebuild rather than once per batch.
+     *
+     * While props are still being registered, rebuilding would only be repeated as the next ones
+     * join the same sections, so rebuilds wait until registration goes quiet -- or a section has
+     * been dirty for {@link #DIRTY_WAIT_NANOS}. A section whose chunks' light has not landed yet
+     * waits for that too, as surface regions do.
+     */
+    private static void dispatchSectionBuilds(BundleGeneration generation, Minecraft minecraft) {
         long started = System.nanoTime();
-        List<RebuildCandidate> ordered = new ArrayList<>();
+        boolean registering = !REGISTERING.isEmpty() || registrationsStartedLast > 0;
+        var camera = minecraft.gameRenderer.getMainCamera().getPosition();
+        int cameraChunkX = SectionPos.blockToSectionCoord(camera.x), cameraChunkZ = SectionPos.blockToSectionCoord(camera.z);
+        int distance = minecraft.options.getEffectiveRenderDistance() + 1;
+        Map<SectionKey, Double> dirty = new HashMap<>();
         for (AggregateKey key : AGGREGATES.dirtyKeys()) {
-            BlockPos center = key.placement().translation().offset((key.sectionX() << 4) + 8, (key.sectionY() << 4) + 8, (key.sectionZ() << 4) + 8);
+            SectionKey section = sectionOf(key);
+            if (dirty.containsKey(section) || SECTION_BUILDS.containsKey(section)) continue;
+            BlockPos center = section.placement().translation().offset((section.x() << 4) + 8, (section.y() << 4) + 8, (section.z() << 4) + 8);
             double dx = center.getX() - camera.x, dy = center.getY() - camera.y, dz = center.getZ() - camera.z;
-            ordered.add(new RebuildCandidate(key, dx * dx + dy * dy + dz * dz));
+            dirty.put(section, dx * dx + dy * dy + dz * dz);
         }
-        if (ordered.isEmpty()) return;
-        ordered.sort(Comparator.comparingDouble(RebuildCandidate::distanceSquared));
-        int rebuilt = 0;
-        for (RebuildCandidate candidate : ordered) {
-            if (rebuilt > 0 && System.nanoTime() - started >= PROP_REBUILD_BUDGET_NANOS) break;
-            rebuildAggregate(generation, candidate.key(), tessCache);
-            rebuilt++;
+        DIRTY_SINCE.keySet().retainAll(dirty.keySet());
+        List<Map.Entry<SectionKey, Double>> ordered = new ArrayList<>(dirty.entrySet());
+        ordered.sort(Map.Entry.comparingByValue());
+        int waiting = 0;
+        for (var item : ordered) {
+            if (SECTION_BUILDS.size() >= MAX_SECTION_BUILDS || System.nanoTime() - started >= DISPATCH_BUDGET_NANOS) break;
+            SectionKey section = item.getKey();
+            long since = DIRTY_SINCE.computeIfAbsent(section, ignored -> System.nanoTime());
+            boolean overdue = System.nanoTime() - since >= DIRTY_WAIT_NANOS;
+            if (registering && !overdue) { waiting++; continue; }
+            BlockPos t = section.placement().translation();
+            int minX = t.getX() + (section.x() << 4) - SNAPSHOT_MARGIN, minY = t.getY() + (section.y() << 4) - SNAPSHOT_MARGIN;
+            int minZ = t.getZ() + (section.z() << 4) - SNAPSHOT_MARGIN;
+            int maxX = minX + 15 + 2 * SNAPSHOT_MARGIN, maxY = minY + 15 + 2 * SNAPSHOT_MARGIN, maxZ = minZ + 15 + 2 * SNAPSHOT_MARGIN;
+            if (!overdue && !ChunkLightTracker.settled(level, minX, minZ, maxX, maxZ, cameraChunkX, cameraChunkZ, distance)) { waiting++; continue; }
+            List<Contributor> contributors = new ArrayList<>();
+            Set<PropKey> seen = new HashSet<>();
+            for (AggregateKey key : SECTION_KEYS.getOrDefault(section, Set.of())) {
+                for (PropKey contributor : AGGREGATES.contributors(key)) {
+                    if (!seen.add(contributor)) continue;
+                    PropSource source = ROOT_DATA.get(contributor);
+                    if (source == null || source.prop().modelIndex() < 0 || source.prop().modelIndex() >= source.map().models().size()) continue;
+                    // Decoded meshes are cached per generation with no eviction, so a prop built
+                    // once can always be re-tessellated for a rebuild.
+                    RuntimeMesh mesh = RUNTIME_MESHES.request(generation.sequence(), source.bundle(),
+                        source.map().models().get(source.prop().modelIndex()).contentId()).orElse(null);
+                    if (mesh != null) contributors.add(new Contributor(source, mesh));
+                }
+            }
+            WorldSnapshot world = WorldSnapshot.capture(level, minX, minY, minZ, maxX, maxY, maxZ);
+            MapPlacement placement = section.placement();
+            BundleMap map = generation.findMap(placement.campaignId(), placement.mapId()).orElse(null);
+            SectionInput input = new SectionInput(section, List.copyOf(contributors), world,
+                MapSurfaceRenderer.occlusionFor(placement, map, (x, y, z) -> MapSurfaceRenderer.snapshotSurfacePresent(world, placement, x, y, z)),
+                MapSurfaceRenderer.smoothLighting());
+            SECTION_BUILDS.put(section, new SectionFlight(input, SECTION_VERSIONS.getOrDefault(section, 0),
+                MeshBuildPool.submit(() -> buildSection(input))));
+            DIRTY_SINCE.remove(section);
         }
-        PERF.add(PropRenderPerf.M_REBUILT_AGGREGATES, rebuilt);
-        PERF.add(PropRenderPerf.M_DIRTY_REMAINING, AGGREGATES.dirtyCount());
+        sectionsWaitingLast = waiting;
         PERF.add(PropRenderPerf.M_REBUILD_NANOS, System.nanoTime() - started);
     }
 
-    private static void rebuildAggregate(BundleGeneration generation, AggregateKey key,
-                                         Map<PropKey, Map<BatchKey, List<PropTessellator.Triangle>>> tessCache) {
-        List<PropTessellator.Triangle> merged = new ArrayList<>();
-        BundleManifest bundle = null;
-        AtlasIndex atlas = null;
-        for (PropKey contributor : AGGREGATES.contributors(key)) {
-            PropSource source = ROOT_DATA.get(contributor);
-            if (source == null) continue;
-            Map<BatchKey, List<PropTessellator.Triangle>> tessellated = tessellateCached(generation, contributor, source, tessCache);
-            merged.addAll(tessellated.getOrDefault(new BatchKey(new Section(key.sectionX(), key.sectionY(), key.sectionZ()), key.page(), key.renderClass()), List.of()));
-            if (bundle == null) { bundle = source.bundle(); atlas = source.map().atlas(); }
+    /** Tessellates and lights every batch of one section, on a worker. */
+    private static Map<PageClass, PackedVertices> buildSection(SectionInput in) {
+        SectionKey section = in.section;
+        Section at = new Section(section.x(), section.y(), section.z());
+        int baseX = section.x() << 4, baseY = section.y() << 4, baseZ = section.z() << 4;
+        Map<Long, Integer> lightCache = new HashMap<>();
+        Map<PageClass, PackedVertices> result = new HashMap<>();
+        for (Contributor contributor : in.contributors) {
+            for (var batch : tessellateProp(contributor.source, contributor.mesh).entrySet()) {
+                if (!batch.getKey().section().equals(at)) continue;
+                PackedVertices out = result.computeIfAbsent(new PageClass(batch.getKey().page(), batch.getKey().renderClass()), ignored -> new PackedVertices());
+                for (PropTessellator.Triangle triangle : batch.getValue()) {
+                    for (PropTessellator.Vertex vertex : List.of(triangle.a(), triangle.b(), triangle.c())) {
+                        int light = sampleVertexLight(in, section.placement(), vertex, lightCache);
+                        out.add((float) (vertex.x() - baseX), (float) (vertex.y() - baseY), (float) (vertex.z() - baseZ),
+                            (float) vertex.u(), (float) vertex.v(), (float) vertex.nx(), (float) vertex.ny(), (float) vertex.nz(), light);
+                    }
+                }
+            }
         }
-        Mesh old = AGGREGATES.value(key);
-        OCCLUSION.invalidate(key);
-        if (old != null) old.close();
-        Mesh mesh = bundle == null || merged.isEmpty()
-            ? null
-            : upload(bundle, atlas, key.placement(), key.sectionX(), key.sectionY(), key.sectionZ(), merged);
-        AGGREGATES.rebuildComplete(key, mesh);
+        return result;
     }
 
-    /** @return the prop's per-batch triangles, re-tessellating from the cached decoded mesh when needed. */
-    private static Map<BatchKey, List<PropTessellator.Triangle>> tessellateCached(BundleGeneration generation, PropKey propKey,
-                                                                                  PropSource source,
-                                                                                  Map<PropKey, Map<BatchKey, List<PropTessellator.Triangle>>> tessCache) {
-        Map<BatchKey, List<PropTessellator.Triangle>> cached = tessCache.get(propKey);
-        if (cached != null) return cached;
-        RuntimeMesh mesh = null;
-        if (source.prop().modelIndex() >= 0 && source.prop().modelIndex() < source.map().models().size()) {
-            // Decoded meshes are cached per generation with no eviction, so a prop built once
-            // can always be re-tessellated for aggregate rebuilds.
-            mesh = RUNTIME_MESHES.request(generation.sequence(), source.bundle(), source.map().models().get(source.prop().modelIndex()).contentId()).orElse(null);
+    /**
+     * Uploads finished section rebuilds, oldest first, within this frame's budget; the first always
+     * goes. A rebuild that a later change overtook still goes up -- it is closer to the truth than
+     * what is drawn -- but its batches stay dirty and are rebuilt again. One that threw on its
+     * worker is redone here against the live level.
+     */
+    private static void completeSectionBuilds() {
+        long started = System.nanoTime();
+        int uploaded = 0;
+        var iterator = SECTION_BUILDS.entrySet().iterator();
+        while (iterator.hasNext()) {
+            if (uploaded > 0 && System.nanoTime() - started >= UPLOAD_BUDGET_NANOS) break;
+            var entry = iterator.next();
+            SectionFlight flight = entry.getValue();
+            if (!flight.result.isDone()) continue;
+            iterator.remove();
+            SectionKey section = entry.getKey();
+            Map<PageClass, PackedVertices> built;
+            try {
+                built = flight.result.join();
+            } catch (RuntimeException exception) {
+                if (sectionsFailed++ == 0) Src2mc.LOGGER.warn("src2mc: a prop batch build failed on a worker; retrying on the render thread", exception);
+                SectionInput in = flight.input;
+                MapPlacement placement = section.placement();
+                BundleMap map = Src2mc.bundles().active().findMap(placement.campaignId(), placement.mapId()).orElse(null);
+                built = buildSection(new SectionInput(section, in.contributors, level,
+                    MapSurfaceRenderer.occlusionFor(placement, map, (x, y, z) -> MapSurfaceRenderer.surfacePresentLive(placement, x, y, z)), in.smooth));
+            }
+            boolean current = flight.version == SECTION_VERSIONS.getOrDefault(section, 0);
+            BlockPos origin = section.placement().translation().offset(section.x() << 4, section.y() << 4, section.z() << 4);
+            for (AggregateKey key : List.copyOf(SECTION_KEYS.getOrDefault(section, Set.of()))) {
+                PackedVertices vertices = built.get(new PageClass(key.page(), key.renderClass()));
+                Mesh mesh = vertices == null || vertices.isEmpty() ? null : upload(flight.input, origin, vertices);
+                Mesh old = AGGREGATES.value(key);
+                OCCLUSION.invalidate(key);
+                if (old != null) old.close();
+                if (current) {
+                    AGGREGATES.rebuildComplete(key, mesh);
+                    if (!AGGREGATES.keys().contains(key)) removeSectionKey(key);
+                } else {
+                    AGGREGATES.publish(key, mesh);
+                }
+                uploaded++;
+                PERF.add(PropRenderPerf.M_REBUILT_AGGREGATES, 1);
+            }
+            if (!current) sectionsOvertaken++;
         }
-        Map<BatchKey, List<PropTessellator.Triangle>> triangles = mesh == null ? Map.of() : tessellateProp(source, mesh);
-        tessCache.put(propKey, triangles);
-        return triangles;
+        PERF.add(PropRenderPerf.M_DIRTY_REMAINING, AGGREGATES.dirtyCount());
+        PERF.add(PropRenderPerf.M_REBUILD_NANOS, System.nanoTime() - started);
     }
 
     private static List<Section> coveredSections(PropTessellator.Triangle triangle) {
@@ -424,72 +550,38 @@ public final class PropRenderer {
 
     private static int floorSection(double coordinate) { return (int) Math.floor(coordinate / 16.0); }
 
-    private static Mesh upload(BundleManifest bundle, AtlasIndex atlas, MapPlacement placement, int sectionX, int sectionY, int sectionZ, List<PropTessellator.Triangle> triangles) {
-        int baseX = sectionX << 4, baseY = sectionY << 4, baseZ = sectionZ << 4;
-        int capacity = (int) Math.min(Integer.MAX_VALUE, Math.max(4096L, (long) triangles.size() * 3 * 36));
-        Map<Long, Integer> lightCache = new HashMap<>();
-        // A prop stands among the map's own walls and floors, and now at its exact position its
-        // lower vertices sit inside the block under a floor that lies part-way up that block.
-        // The surfaces' visibility test and open-cell fallback keep it from reading daylight
-        // through that block the way the brightest-neighbour fallback did.
-        SurfaceOcclusion occlusion = MapSurfaceRenderer.occlusionFor(placement,
-            Src2mc.bundles().active().findMap(placement.campaignId(), placement.mapId()).orElse(null));
-        try (var bytes = new ByteBufferBuilder(capacity)) {
-            // See IrisCompat.setCapturedIds: with a pack in use Iris stamps whatever entity was
-            // rendering into every vertex of what is static world geometry.
-            int[] previousIds = MapSurfaceRenderer.neutralEntityId() ? IrisCompat.setCapturedIds(0, 0, 0) : null;
-            try {
-                var builder = new BufferBuilder(bytes, VertexFormat.Mode.TRIANGLES, DefaultVertexFormat.NEW_ENTITY);
-                for (PropTessellator.Triangle triangle : triangles) {
-                    vertex(builder, triangle.a(), baseX, baseY, baseZ, sampleVertexLight(placement, triangle.a(), lightCache, occlusion));
-                    vertex(builder, triangle.b(), baseX, baseY, baseZ, sampleVertexLight(placement, triangle.b(), lightCache, occlusion));
-                    vertex(builder, triangle.c(), baseX, baseY, baseZ, sampleVertexLight(placement, triangle.c(), lightCache, occlusion));
-                }
-                try (var data = builder.buildOrThrow()) {
-                    var buffer = new VertexBuffer(VertexBuffer.Usage.STATIC);
-                    buffer.bind(); buffer.upload(data); VertexBuffer.unbind();
-                    BlockPos origin = placement.translation().offset(baseX, baseY, baseZ);
-                    long estimatedVboBytes = (long) triangles.size() * 3L * 36L;
-                    AABB bounds = null;
-                    for (PropTessellator.Triangle triangle : triangles) for (PropTessellator.Vertex vertex : List.of(triangle.a(), triangle.b(), triangle.c())) {
-                        AABB point = new AABB(vertex.x(), vertex.y(), vertex.z(), vertex.x(), vertex.y(), vertex.z());
-                        bounds = bounds == null ? point : bounds.minmax(point);
-                    }
-                    return new Mesh(bundle, atlas, buffer, origin, bounds.move(placement.translation()).inflate(0.01), estimatedVboBytes, triangles.size());
-                }
-            } finally {
-                IrisCompat.restoreCapturedIds(previousIds);
-            }
-        }
+    private static Mesh upload(SectionInput input, BlockPos origin, PackedVertices vertices) {
+        var uploaded = vertices.upload(MapSurfaceRenderer.neutralEntityId());
+        double[] b = vertices.bounds();
+        AABB bounds = new AABB(b[0], b[1], b[2], b[3], b[4], b[5]).move(origin.getX(), origin.getY(), origin.getZ()).inflate(0.01);
+        Contributor first = input.contributors.isEmpty() ? null : input.contributors.get(0);
+        return new Mesh(first == null ? null : first.source.bundle(), first == null ? null : first.source.map().atlas(), uploaded.buffer(),
+            origin, bounds, (long) vertices.vertices() * 36L, vertices.triangles());
     }
 
-    private static void vertex(BufferBuilder builder, PropTessellator.Vertex vertex, int baseX, int baseY, int baseZ, int light) {
-        builder.addVertex((float) (vertex.x() - baseX), (float) (vertex.y() - baseY), (float) (vertex.z() - baseZ))
-            .setColor(255, 255, 255, 255).setUv((float) vertex.u(), (float) vertex.v()).setOverlay(OverlayTexture.NO_OVERLAY)
-            .setLight(light).setNormal((float) vertex.nx(), (float) vertex.ny(), (float) vertex.nz());
-    }
-
-    /** One sample per vertex, along the vertex's own normal; tessCache stays
-     * lighting-independent, so only this upload step changes on a relight. One value for the
-     * whole triangle is vanilla's flat lighting, and on a prop-sized mesh it showed every
-     * block boundary the prop crossed. */
-    private static int sampleVertexLight(MapPlacement placement, PropTessellator.Vertex vertex, Map<Long, Integer> cache,
-                                         SurfaceOcclusion occlusion) {
+    /** One sample per vertex, along the vertex's own normal. One value for the whole triangle is
+     * vanilla's flat lighting, and on a prop-sized mesh it showed every block boundary the prop
+     * crossed. */
+    private static int sampleVertexLight(SectionInput in, MapPlacement placement, PropTessellator.Vertex vertex, Map<Long, Integer> cache) {
         float nx = (float) vertex.nx(), ny = (float) vertex.ny(), nz = (float) vertex.nz();
         float length = (float) Math.sqrt(nx * nx + ny * ny + nz * nz);
         if (length > 1.0e-6f) { nx /= length; ny /= length; nz /= length; } else { nx = 0; ny = 1; nz = 0; }
         double worldX = placement.translation().getX() + vertex.x();
         double worldY = placement.translation().getY() + vertex.y();
         double worldZ = placement.translation().getZ() + vertex.z();
-        return MapSurfaceRenderer.smoothLighting()
-            ? LightSampler.smooth(level, worldX, worldY, worldZ, nx, ny, nz, cache, occlusion)
-            : LightSampler.sample(level, worldX, worldY, worldZ, nx, ny, nz, cache);
+        // A prop stands among the map's own walls and floors, and at its exact position its lower
+        // vertices sit inside the block under a floor that lies part-way up that block. The
+        // surfaces' visibility test and open-cell fallback keep it from reading daylight through
+        // that block the way the brightest-neighbour fallback did.
+        return in.smooth
+            ? LightSampler.smooth(in.world, worldX, worldY, worldZ, nx, ny, nz, cache, in.occlusion)
+            : LightSampler.sample(in.world, worldX, worldY, worldZ, nx, ny, nz, cache);
     }
 
     /** Rebuilds every prop aggregate, for a change in how light is sampled rather than in the
      * light itself. */
     static void invalidateAllLight() {
-        for (AggregateKey key : AGGREGATES.keys()) AGGREGATES.markDirty(key);
+        for (AggregateKey key : AGGREGATES.keys()) { AGGREGATES.markDirty(key); touch(key); }
     }
 
     /** Marks aggregates for the section overlapping {@code worldSection} and all 26 neighbours
@@ -503,7 +595,7 @@ public final class PropRenderer {
         for (AggregateKey key : AGGREGATES.keys()) {
             if (!key.placement().equals(placement)) continue;
             int dx = Math.abs(key.sectionX() - sx), dy = Math.abs(key.sectionY() - sy), dz = Math.abs(key.sectionZ() - sz);
-            if (Math.max(dx, Math.max(dy, dz)) <= 1) AGGREGATES.markDirty(key);
+            if (Math.max(dx, Math.max(dy, dz)) <= 1) { AGGREGATES.markDirty(key); touch(key); }
         }
     }
 
@@ -592,7 +684,9 @@ public final class PropRenderer {
         if (contributions != null) for (AggregateKey aggregate : contributions) {
             OCCLUSION.invalidate(aggregate);
             if (AGGREGATES.unregister(aggregate, key)) dirtied++;
+            touch(aggregate);
         }
+        REGISTERING.remove(key);
         ROOT_DATA.remove(key);
         BUILT_PROPS.remove(key); LAST_VISIBLE.remove(key);
         return dirtied;
@@ -617,6 +711,7 @@ public final class PropRenderer {
         AGGREGATES.values().forEach(Mesh::close); AGGREGATES.clear();
         PROP_CONTRIBUTIONS.clear(); ROOT_DATA.clear();
         ROOTS.clear(); ROOT_STATUS.clear(); BUILT_PROPS.clear(); LAST_VISIBLE.clear();
+        clearBuilds();
         OCCLUSION.close();
         return batches;
     }
@@ -625,6 +720,7 @@ public final class PropRenderer {
         AGGREGATES.values().forEach(Mesh::close); AGGREGATES.clear();
         PROP_CONTRIBUTIONS.clear(); ROOT_DATA.clear();
         ROOTS.clear(); ROOT_STATUS.clear(); BUILT_PROPS.clear(); LAST_VISIBLE.clear(); PERF.reset(); OCCLUSION.close();
+        clearBuilds();
         CameraVisibility.reset();
         level = null; generationSequence = -1; placementSnapshot = List.of(); frame = 0; nearbyProps = 0; nearbyUnbuilt = 0; buildsLastFrame = 0;
         shadowPassCallsSinceMainPass = 0; shadowPassCallsLastFrame = 0;
@@ -632,13 +728,43 @@ public final class PropRenderer {
         shadowConsideredLast = 0; shadowRejectedDistanceLast = 0; shadowDrawnLast = 0;
     }
 
+    /** Forgets every registration and section rebuild in flight; their workers finish unobserved. */
+    private static void clearBuilds() {
+        REGISTERING.clear(); SECTION_KEYS.clear(); SECTION_VERSIONS.clear(); SECTION_BUILDS.clear(); DIRTY_SINCE.clear();
+        lastScanSectionX = Integer.MIN_VALUE; lastScanSectionZ = Integer.MIN_VALUE;
+    }
+
+    private static SectionKey sectionOf(AggregateKey key) {
+        return new SectionKey(key.placement(), key.sectionX(), key.sectionY(), key.sectionZ());
+    }
+
+    /** Records that a batch in the key's section changed, for any rebuild of it already running. */
+    private static void touch(AggregateKey key) {
+        SECTION_VERSIONS.merge(sectionOf(key), 1, Integer::sum);
+    }
+
+    private static void removeSectionKey(AggregateKey key) {
+        SectionKey section = sectionOf(key);
+        Set<AggregateKey> keys = SECTION_KEYS.get(section);
+        if (keys == null) return;
+        keys.remove(key);
+        if (keys.isEmpty()) { SECTION_KEYS.remove(section); SECTION_VERSIONS.remove(section); }
+    }
+
     private record PropKey(MapPlacement placement, String stableId) {}
+    private record SectionKey(MapPlacement placement, int x, int y, int z) {}
+    private record PageClass(int page, BundleMaterial.RenderClass renderClass) {}
+    private record Registration(PropSource source, java.util.concurrent.CompletableFuture<Set<BatchKey>> batches) {}
+    private record Contributor(PropSource source, RuntimeMesh mesh) {}
+    /** One section rebuild's inputs, fixed when it starts; see {@link MapSurfaceRenderer}'s BuildInput. */
+    private record SectionInput(SectionKey section, List<Contributor> contributors, net.minecraft.world.level.BlockAndTintGetter world,
+                                SurfaceOcclusion occlusion, boolean smooth) {}
+    private record SectionFlight(SectionInput input, int version, java.util.concurrent.CompletableFuture<Map<PageClass, PackedVertices>> result) {}
     private record PropSource(BundleManifest bundle, BundleMap map, MapPlacement placement, BundleProp prop) {}
     private record Section(int x, int y, int z) {}
     private record BatchKey(Section section, int page, BundleMaterial.RenderClass renderClass) {}
     private record AggregateKey(MapPlacement placement, int sectionX, int sectionY, int sectionZ, int page, BundleMaterial.RenderClass renderClass) {}
     private record BuildCandidate(PropSource source, double distanceSquared) {}
-    private record RebuildCandidate(AggregateKey key, double distanceSquared) {}
     private enum RootStatus { ACTIVE, UNLOADED, MISSING, SCHEMA, CAMPAIGN, MAP, IDENTITY }
     private static final class Mesh implements AutoCloseable {
         final BundleManifest bundle; final AtlasIndex atlas; final VertexBuffer buffer; final BlockPos origin; final AABB bounds; final long estimatedVboBytes; final long triangles;

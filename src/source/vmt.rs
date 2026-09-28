@@ -42,6 +42,8 @@ pub struct MaterialAssets {
     pub translucent: bool,
     /// `$surfaceprop`, e.g. `concrete` or `metalgrate`.
     pub surface_prop: Option<String>,
+    /// `$nocull`: both sides are drawn, as on a single-sheet fence mesh.
+    pub no_cull: bool,
 }
 
 /// A parsed VMT: its shader and every scalar key found in it.
@@ -197,6 +199,7 @@ impl<'a> Materials<'a> {
             base_texture,
             alpha_test: vmt.flag("$alphatest"),
             translucent: vmt.flag("$translucent"),
+            no_cull: vmt.flag("$nocull"),
             surface_prop: vmt
                 .get("$surfaceprop")
                 .map(|v| v.trim_matches('"').to_string()),
@@ -305,6 +308,13 @@ mod tests {
         );
         assert_eq!(vmt.get("$basetexture"), Some("a/b"));
         assert!(vmt.flag("$translucent"));
+    }
+
+    #[test]
+    fn nocull_is_read_as_a_flag() {
+        let vmt = parse(r#""VertexlitGeneric" { "$basetexture" "a/b" "$alphatest" 1 "$nocull" 1 }"#);
+        assert!(vmt.flag("$nocull"));
+        assert!(!parse(r#""x" { "$basetexture" "a/b" }"#).flag("$nocull"));
     }
 
     #[test]

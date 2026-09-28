@@ -37,6 +37,7 @@ public final class Src2mc {
         NeoForge.EVENT_BUS.addListener((net.neoforged.neoforge.event.server.ServerStoppedEvent event) -> {
             dev.theredja.src2mc.world.LightOcclusion.clear();
             dev.theredja.src2mc.world.SurfaceChangeTracker.clear();
+            dev.theredja.src2mc.world.CollisionShapes.clear();
         });
         LOGGER.info("src2mc initialized; bundles load in the background during startup");
     }

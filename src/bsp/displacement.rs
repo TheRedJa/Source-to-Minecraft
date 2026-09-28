@@ -19,8 +19,10 @@ use crate::voxel::mesh::Triangle;
 pub struct Surface {
     pub index: usize,
     pub triangles: Vec<Triangle>,
-    /// Outward normal of the face the displacement was built on, which is the
-    /// side the player walks on. Solid material lies behind it.
+    /// The side the displacement is seen from, which is the side the player
+    /// walks on; solid material lies behind it. It is the outward normal of the
+    /// face it was built on, turned round for an inverted displacement, whose
+    /// triangles wind the other way.
     pub normal: Vec3,
     /// Index into [`crate::bsp::Map::materials`].
     pub material: Option<usize>,
@@ -65,11 +67,22 @@ impl super::Map {
         let plane = self.bsp.planes.get(face.plane_num as usize)?;
         // A face records which side of its plane it faces on; side 1 means the
         // stored normal points away from the surface.
-        let normal = if face.side == 0 {
+        let base = if face.side == 0 {
             Vec3::from(plane.normal)
         } else {
             -Vec3::from(plane.normal)
         };
+        // Hammer can invert a displacement, mirroring it through its base
+        // plane. A mirror reverses the winding, and Source culls by winding, so
+        // an inverted displacement is seen from the side opposite its base face:
+        // INFRA builds cave ceilings on upward faces this way (56 of 135 in
+        // infra_c6_m4_waterplant). Terrain can fold, so it is the winding of the
+        // whole surface that decides, not any single triangle.
+        let winding: f64 = triangles
+            .iter()
+            .map(|t| (t.b - t.a).cross(t.c - t.a).dot(base))
+            .sum();
+        let normal = if winding < 0.0 { -base } else { base };
 
         Some(Surface {
             index,
@@ -159,6 +172,25 @@ mod tests {
             "only {up} of {} face up",
             surfaces.len()
         );
+    }
+
+    /// INFRA's waterplant builds cave ceilings from inverted displacements on
+    /// upward faces; each must face the way its triangles wind, down into the
+    /// cave, not the way its base face points.
+    #[test]
+    fn inverted_displacements_face_the_way_they_wind() {
+        let path = "/mnt/games/SteamLibrary/steamapps/common/infra/infra/pak02_dir.vpk:maps/infra_c6_m4_waterplant.bsp";
+        if !Path::new(path.split(".vpk:").next().unwrap()).with_extension("vpk").exists() {
+            return;
+        }
+        let map = Map::load(Path::new(path)).unwrap();
+        let surfaces = map.displacement_surfaces();
+        for s in &surfaces {
+            let winding: f64 = s.triangles.iter().map(|t| (t.b - t.a).cross(t.c - t.a).dot(s.normal)).sum();
+            assert!(winding > 0.0, "displacement {} winds against its normal", s.index);
+        }
+        let ceiling = surfaces.iter().find(|s| s.index == 12).expect("displacement 12");
+        assert!(ceiling.normal.z < -0.99, "the cave ceiling faces down, got {:?}", ceiling.normal);
     }
 
     #[test]
