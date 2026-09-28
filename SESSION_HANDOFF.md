@@ -1,6 +1,6 @@
 # src2mc implementation handoff
 
-Updated: 2026-09-28 (Europe/Berlin), DEV-0.11.0 (collision, off-thread mesh builds, $nocull, inverted displacements; uncommitted)
+Updated: 2026-09-28 (Europe/Berlin), DEV-0.11.0 (collision, off-thread mesh builds, $nocull, inverted displacements; committed a716988)
 
 This document records the active implementation state and the empirical context
 needed to continue the work in a new session. `AGENTS.md` contains mandatory
@@ -8,7 +8,8 @@ working rules. Durable requirements and design authority remain in
 `docs/mod-requirements.md`, `docs/decisions.md`, `docs/format.md`, and
 `mod/IMPLEMENTATION_PLAN.md`.
 
-**Current task:** two rendering fixes, both waiting for the user's in-game check.
+**Current task:** none open. The last two rendering fixes are done and
+user-confirmed in game (2026-09-28):
 - Inverted displacements (DEV-0.11.0): Hammer can invert a displacement,
   mirroring it through its base plane. That reverses the winding, and Source
   culls by winding. The converter used to force every displacement to face its
@@ -20,8 +21,9 @@ working rules. Durable requirements and design authority remain in
 - Double-sided materials (DEV-0.10.0): Source's `$nocull` (fence meshes,
   grates, foliage cards) is read by the converter and written as the material
   flag `double_sided`. The mod adds a mirrored back face for such materials,
-  wound the other way and lit from the side it faces. Off-thread builds (DEV-0.9.0) are done and user-confirmed,
-including the see-through-regions fix (hidden-owner recheck).
+  wound the other way and lit from the side it faces.
+
+Off-thread builds (DEV-0.9.0) are done and user-confirmed, including the see-through-regions fix (hidden-owner recheck).
 
 ## Product goal and history
 
