@@ -369,6 +369,7 @@ mod tests {
             angles,
             scale: 1.0,
             classname: "prop_static".into(),
+            solid: crate::bsp::props::SOLID_VPHYSICS,
         }
     }
 

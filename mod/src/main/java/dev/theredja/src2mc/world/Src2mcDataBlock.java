@@ -16,6 +16,11 @@ final class Src2mcDataBlock extends Block implements EntityBlock {
     private final BiFunction<BlockPos, BlockState, BlockEntity> factory;
     private final boolean hidden;
     private final boolean nonColliding;
+    /**
+     * A prop root may sit in a cell that holds prop or map collision; it then collides as that
+     * cell's table shape, as the carrier it replaced would have. Needs a dynamic shape.
+     */
+    private final boolean carriesCollision;
 
     Src2mcDataBlock(
         Properties properties,
@@ -23,10 +28,21 @@ final class Src2mcDataBlock extends Block implements EntityBlock {
         boolean hidden,
         boolean nonColliding
     ) {
+        this(properties, factory, hidden, nonColliding, false);
+    }
+
+    Src2mcDataBlock(
+        Properties properties,
+        BiFunction<BlockPos, BlockState, BlockEntity> factory,
+        boolean hidden,
+        boolean nonColliding,
+        boolean carriesCollision
+    ) {
         super(properties);
         this.factory = factory;
         this.hidden = hidden;
         this.nonColliding = nonColliding;
+        this.carriesCollision = carriesCollision;
     }
 
     @Override
@@ -43,6 +59,7 @@ final class Src2mcDataBlock extends Block implements EntityBlock {
     }
 
     @Override public VoxelShape getCollisionShape(BlockState state, BlockGetter level, BlockPos position, CollisionContext context) {
+        if (carriesCollision) return CollisionShapes.carrier(level, position);
         return nonColliding ? Shapes.empty() : super.getCollisionShape(state, level, position, context);
     }
 }

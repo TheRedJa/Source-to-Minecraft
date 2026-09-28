@@ -106,4 +106,17 @@ final class PropBatchAggregatorTest {
         assertEquals(0, aggregates.dirtyCount());
         assertTrue(aggregates.values().isEmpty());
     }
+
+    /** An overtaken rebuild shows its value but leaves the batch dirty for the next one. */
+    @Test
+    void publishSetsTheValueAndKeepsTheAggregateDirty() {
+        var aggregates = new PropBatchAggregator<String, String, Integer>();
+        aggregates.register("a", "p1");
+        aggregates.publish("a", 7);
+        assertEquals(7, aggregates.value("a"));
+        assertEquals(List.of("a"), aggregates.dirtyKeys());
+        aggregates.rebuildComplete("a", 8);
+        assertEquals(8, aggregates.value("a"));
+        assertEquals(0, aggregates.dirtyCount());
+    }
 }

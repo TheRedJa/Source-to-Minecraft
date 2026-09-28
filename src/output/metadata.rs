@@ -85,6 +85,10 @@ pub struct MapMetadata {
     /// geometry, or was exported with the mask turned off.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub occlusion: Option<String>,
+    /// Optional per-cell collision shapes. Absent when the map was exported
+    /// without them, and every block then collides as a full cube.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub collision: Option<String>,
     pub diagnostics: String,
 }
 
@@ -101,6 +105,9 @@ pub struct MaterialReference {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub surface_prop: Option<String>,
     pub reflectivity: [f64; 3],
+    /// Source's `$nocull`: drawn from both sides. Written only when set.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub double_sided: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -314,6 +321,12 @@ impl MapMetadata {
                 "non-canonical occlusion path"
             );
         }
+        if let Some(collision) = &self.collision {
+            ensure!(
+                collision == &format!("maps/{}/collision.s2coll", self.map_id),
+                "non-canonical collision path"
+            );
+        }
         for material in &mut self.materials {
             material.validate()?;
         }
@@ -514,6 +527,7 @@ mod tests {
                 texture: None,
                 surface_prop: Some("brick".into()),
                 reflectivity: [-0.0, 0.5, 1.0],
+                double_sided: false,
             }],
             models: vec![
                 ModelReference {
@@ -530,6 +544,7 @@ mod tests {
             props: "maps/d1_01/props.s2props".into(),
             pvs: Some("maps/d1_01/pvs.s2pvs".into()),
             occlusion: Some("maps/d1_01/occlusion.s2occl".into()),
+            collision: None,
             diagnostics: "maps/d1_01/diagnostics.json".into(),
         };
         let value: serde_json::Value =

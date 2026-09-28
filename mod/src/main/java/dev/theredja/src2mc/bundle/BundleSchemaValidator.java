@@ -92,6 +92,7 @@ final class BundleSchemaValidator {
             "cell_min", "cell_max", "anchor_cell", "surfaces", "materials", "models", "props"));
         if (map.has("pvs")) expected.add("pvs");
         if (map.has("occlusion")) expected.add("occlusion");
+        if (map.has("collision")) expected.add("collision");
         expected.add("diagnostics");
         keys(map, expected.toArray(String[]::new));
         format(map, "src2mc-map", path);
@@ -147,6 +148,12 @@ final class BundleSchemaValidator {
             referenced.add(occlusionPath);
             occlusion = validateOcclusion(zip, required(entries, occlusionPath));
         }
+        CollisionTable collision = null;
+        if (map.has("collision")) {
+            String collisionPath = exactPath(map, "collision", prefix + "collision.s2coll");
+            referenced.add(collisionPath);
+            collision = validateCollision(zip, required(entries, collisionPath));
+        }
         referenced.addAll(List.of(surfaces, props, diagnostics));
         SurfaceTable surfaceTable = validateFaces(zip, required(entries, surfaces), materials.size());
         List<BundleProp> propRecords = validateProps(zip, required(entries, props), modelRefs.size());
@@ -169,7 +176,17 @@ final class BundleSchemaValidator {
         }
         long mapHeight = (long) max[1] - min[1] + 1;
         return new BundleMap(mapId, sourceName, min, max, anchor, loadedMaterials, modelRefs, propRecords, mapHeight > 384,
-            surfaceTable, modelRefs.stream().map(BundleModel::contentId).collect(java.util.stream.Collectors.toUnmodifiableSet()), atlas, pvs, occlusion);
+            surfaceTable, modelRefs.stream().map(BundleModel::contentId).collect(java.util.stream.Collectors.toUnmodifiableSet()), atlas, pvs, occlusion, collision);
+    }
+
+    /** Parses and validates the optional per-cell collision table (format.md section 14). */
+    private static CollisionTable validateCollision(ZipFile zip, ZipEntry entry) throws IOException {
+        byte[] bytes;
+        try (InputStream input = zip.getInputStream(entry)) {
+            bytes = input.readNBytes((int) Math.min(entry.getSize(), Integer.MAX_VALUE - 8));
+            if (bytes.length != entry.getSize() || input.read() != -1) fail(BundleErrorCode.INVALID_SCHEMA, "collision table size differs from its entry");
+        }
+        return CollisionTable.decode(bytes, BundleLimits.MAX_COLLISION_SHAPES_PER_MAP, BundleLimits.MAX_SECTIONS_PER_MAP);
     }
 
     private static AtlasIndex validateAtlas(ZipFile zip, Map<String, ZipEntry> entries, Map<String, String> hashes, String path, Set<String> referenced) throws IOException {
@@ -244,13 +261,18 @@ final class BundleSchemaValidator {
     }
 
     private static BundleMaterial validateMaterial(JsonObject material, Map<String, int[]> textures) throws BundleValidationException {
-        Set<String> allowed = Set.of("source_material", "source_material_raw", "render_class", "texture", "surface_prop", "reflectivity");
+        Set<String> allowed = Set.of("source_material", "source_material_raw", "render_class", "texture", "surface_prop", "reflectivity", "double_sided");
         if (!allowed.containsAll(material.keySet()) || !material.has("source_material") || !material.has("render_class") || !material.has("reflectivity")) fail(BundleErrorCode.INVALID_SCHEMA, "invalid material fields");
         String source = string(material, "source_material");
         if (source.isEmpty()) fail(BundleErrorCode.INVALID_SCHEMA, "empty source material");
         if (material.has("source_material_raw") && source.equals(string(material, "source_material_raw"))) fail(BundleErrorCode.INVALID_SCHEMA, "redundant raw material path");
         String renderClassName = string(material, "render_class");
         if (!Set.of("solid", "cutout", "translucent", "fallback").contains(renderClassName)) fail(BundleErrorCode.INVALID_SCHEMA, "invalid render class");
+        // Written only when set, so a present flag has to be true.
+        if (material.has("double_sided") && !(material.get("double_sided").isJsonPrimitive()
+            && material.get("double_sided").getAsJsonPrimitive().isBoolean() && material.get("double_sided").getAsBoolean())) {
+            fail(BundleErrorCode.INVALID_SCHEMA, "double_sided must be true when present");
+        }
         JsonArray reflectivity = array(material, "reflectivity");
         if (reflectivity.size() != 3) fail(BundleErrorCode.INVALID_SCHEMA, "reflectivity must have three values");
         for (JsonElement value : reflectivity) finiteNumber(value, "reflectivity");
@@ -272,7 +294,7 @@ final class BundleSchemaValidator {
             case "cutout" -> BundleMaterial.RenderClass.CUTOUT;
             case "translucent" -> BundleMaterial.RenderClass.TRANSLUCENT;
             default -> BundleMaterial.RenderClass.FALLBACK;
-        }, loadedTexture);
+        }, loadedTexture, material.has("double_sided"));
     }
 
     private static void validateDiagnostics(JsonObject diagnostics) throws BundleValidationException {

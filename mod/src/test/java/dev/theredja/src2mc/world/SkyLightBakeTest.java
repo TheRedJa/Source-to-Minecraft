@@ -24,7 +24,7 @@ final class SkyLightBakeTest {
         return new BundleMap("m", "m.bsp", new int[]{0, 0, 0}, new int[]{SIZE - 1, SIZE - 1, SIZE - 1},
             new int[]{0, 0, 0}, List.of(), List.of(), List.of(), false,
             new SurfaceTable(List.of(), Map.of()), java.util.Set.of(), null, null,
-            occlusion == null ? null : new OcclusionTable(occlusion));
+            occlusion == null ? null : new OcclusionTable(occlusion), null);
     }
 
     /** Occluding cells, map-local, in the exporter's bit order. */
@@ -155,7 +155,7 @@ final class SkyLightBakeTest {
         faces.sort(java.util.Comparator.comparingInt(SurfaceTable.Face::localCell));
         BundleMap map = new BundleMap("m", "m.bsp", new int[]{0, 0, 0}, new int[]{SIZE - 1, SIZE - 1, SIZE - 1},
             new int[]{0, 0, 0}, List.of(), List.of(), List.of(), false,
-            new SurfaceTable(List.of(), Map.of(new SurfaceTable.SectionPos(0, 0, 0), faces)), java.util.Set.of(), null, null, null);
+            new SurfaceTable(List.of(), Map.of(new SurfaceTable.SectionPos(0, 0, 0), faces)), java.util.Set.of(), null, null, null, null);
 
         SkyLightBake.Baked baked = bake(map);
 

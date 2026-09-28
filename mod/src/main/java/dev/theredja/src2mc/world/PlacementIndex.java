@@ -8,7 +8,14 @@ import net.minecraft.core.BlockPos;
 
 /** Deterministic immutable-friendly placement set with ambiguity rejection. */
 public final class PlacementIndex {
+    /** Bumped by every registration anywhere, so a cache built from placements can tell it is stale with one read. */
+    private static final java.util.concurrent.atomic.AtomicLong EPOCH = new java.util.concurrent.atomic.AtomicLong();
     private final List<MapPlacement> placements = new ArrayList<>();
+
+    public static long epoch() { return EPOCH.get(); }
+
+    /** Mark placement-derived caches stale, for an index published after it was filled. */
+    public static void touch() { EPOCH.incrementAndGet(); }
 
     public Registration register(MapPlacement placement) {
         int replacement = -1;
@@ -26,6 +33,7 @@ public final class PlacementIndex {
         if (replacement >= 0) placements.remove(replacement);
         placements.add(placement);
         placements.sort(Comparator.comparingLong(value -> value.anchorWorld().asLong()));
+        EPOCH.incrementAndGet();
         return Registration.ADDED;
     }
 

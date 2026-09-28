@@ -41,7 +41,15 @@ public final class ClientLightRefresh {
         // A region built before this chunk arrived took its owned cells as present.
         if (level instanceof net.minecraft.client.multiplayer.ClientLevel client
             && event.getChunk() instanceof net.minecraft.world.level.chunk.LevelChunk chunk) {
+            MapSurfaceRenderer.chunkLoaded(client, chunk);
             MapSurfaceRenderer.checkOwnedCells(client, chunk);
+        }
+    }
+
+    @SubscribeEvent
+    static void onChunkUnload(ChunkEvent.Unload event) {
+        if (event.getLevel() instanceof net.minecraft.client.multiplayer.ClientLevel client) {
+            MapSurfaceRenderer.chunkUnloaded(client, event.getChunk().getPos());
         }
     }
 

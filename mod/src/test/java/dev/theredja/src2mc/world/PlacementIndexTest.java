@@ -13,8 +13,8 @@ final class PlacementIndexTest {
     private static BundleMap map(String id, int width) {
         return new BundleMap(id, id + ".bsp", new int[]{0, 0, 0}, new int[]{width - 1, 3, 3},
             new int[]{0, -1, 0}, List.of(new dev.theredja.src2mc.bundle.BundleMaterial(
-                "test", dev.theredja.src2mc.bundle.BundleMaterial.RenderClass.FALLBACK, null)),
-            List.of(), List.of(), false, new SurfaceTable(List.of(), Map.of()), java.util.Set.of(), null, null, null);
+                "test", dev.theredja.src2mc.bundle.BundleMaterial.RenderClass.FALLBACK, null, false)),
+            List.of(), List.of(), false, new SurfaceTable(List.of(), Map.of()), java.util.Set.of(), null, null, null, null);
     }
 
     @Test void twoInstancesOfOneMapResolveIndependently() {

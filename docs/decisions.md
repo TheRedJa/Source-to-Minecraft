@@ -235,7 +235,8 @@ chunk work cannot combine old tables with new textures or meshes.
 
 ## D15 — Per-cell collision preserves disconnected occupancy
 
-The fixed 4x4x4 collision quantization is represented as subcell occupancy, not
+The fixed collision quantization (4x4x4 as first planned; sixteenths for the
+map's own geometry since D18) is represented as subcell occupancy, not
 as one bounding box around every triangle fragment in a block. Disconnected
 occupied regions remain disconnected. Runtime shapes may merge adjacent
 occupied subcells into fewer boxes only when the represented volume is
@@ -311,7 +312,55 @@ Brushes thinner than the brush-mesh cut-off are no longer exported as props of
 their own: their faces arrive as unowned fragments like any other, and their
 cells remain in the light-occlusion mask.
 
-Collision still comes from the voxel grid, one full block per solid cell, so
-where a face sits off the grid its collision can differ from what is drawn by
-up to a block. Deriving sub-block collision from the same exact geometry is the
-next step and shares its shape machinery with prop collision (D9, D15).
+Collision came from the voxel grid, one full block per solid cell, until D18.
+
+## D18 — Map collision is the exact solid volume of each cell
+
+A map block collides as the solid volume inside its cell, not as a full cube.
+The converter computes it from the converted brushes (exact planes) and the
+displacement terrain (a height field one sixteenth thick), rounds it outward to sixteenths of a block and stores it per cell in the
+collision table (format section 14). Outward, because a sixteenth of slack is
+invisible and a floor you fall through is not; separate pieces stay separate
+boxes, so gaps between bars stay open (D15).
+
+Collision follows the same ownership as the surfaces (D17):
+
+- A block's own volume is its shape. A block the voxelizer rounded into a room
+  collides as the little of it that is really there. Source terrain has no
+  thickness, so the blocks the grid backs it with collide as nothing: backing
+  them put collision under an upstairs terrain floor into the ceiling of the
+  room below.
+- Volume in a cell with no block hangs off the face-adjacent block it touches
+  most, as a shape reaching into that cell. A floor that sits 8 units up into
+  the air above its block is stood on where it is drawn, and breaking the block
+  takes both away together. Only face neighbours carry pieces: Minecraft asks a
+  block for a shape reaching past its cell only where the entity's box touches
+  that cell's face.
+- Volume that touches no block, and every thin brush — drawn whatever blocks
+  surround it — is carried by a `src2mc:carrier` in its own cell. Carriers only
+  collide: no light, no face culling, and replaceable like tall grass so
+  building into the cell simply takes its place.
+
+A map block is aimed at and outlined as its collision. One with no collision
+keeps a full-cube outline only if it owns a drawn fragment, so it can still be
+broken to remove that surface; one that owns nothing is outlined as nothing
+and building into its cell replaces it, so no invisible, unreachable block
+ever stands in the way. The block itself stays, because the light around it
+was built with it there.
+
+Both blocks use a dynamic shape, and their light and occlusion stay fixed (the
+surface block a solid cube, the carrier nothing), so the sky-light bake and the
+exact-surface renderer are unaffected. Shapes are looked up per world position
+from an immutable per-generation table; nothing is cached per block state, and
+breaking or placing a block needs no invalidation. `/src2mc collision
+exact|full` switches back to full cubes for comparison, and `/src2mc collision
+probe` prints the shape of the block looked at and the cells stood in and on.
+
+Props join the same table (first version, 2026-09-27). Source's own `solid`
+setting decides: not solid, solid as the bounding box, or solid as the physics
+model. Props smaller than `props.collision_min_size` stay walk-through. The
+model's physics hull (`.phy`) is not read yet, so a physics prop collides as
+the shell of its drawn mesh, a sixteenth thick. A prop's piece in a map
+block's cell joins that block's shape, and one in an empty cell gets a carrier,
+or the prop root when a root lands there; roots carry their cell's shape.
+Removing a root does not yet remove its prop's collision elsewhere.

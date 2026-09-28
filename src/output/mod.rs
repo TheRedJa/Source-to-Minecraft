@@ -3,6 +3,7 @@
 pub mod atlas;
 pub mod bake;
 pub mod bundle;
+pub mod cell_collision;
 pub mod collision;
 pub mod dimension;
 pub mod display;

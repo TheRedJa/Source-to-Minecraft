@@ -1,12 +1,27 @@
 # src2mc implementation handoff
 
-Updated: 2026-09-27 (Europe/Berlin)
+Updated: 2026-09-28 (Europe/Berlin), DEV-0.11.0 (collision, off-thread mesh builds, $nocull, inverted displacements; uncommitted)
 
 This document records the active implementation state and the empirical context
 needed to continue the work in a new session. `AGENTS.md` contains mandatory
 working rules. Durable requirements and design authority remain in
 `docs/mod-requirements.md`, `docs/decisions.md`, `docs/format.md`, and
 `mod/IMPLEMENTATION_PLAN.md`.
+
+**Current task:** two rendering fixes, both waiting for the user's in-game check.
+- Inverted displacements (DEV-0.11.0): Hammer can invert a displacement,
+  mirroring it through its base plane. That reverses the winding, and Source
+  culls by winding. The converter used to force every displacement to face its
+  base face, so INFRA's cave ceilings (56 of 135 displacements in
+  `infra_c6_m4_waterplant`) were drawn inside out: see-through from inside,
+  solid from outside. `bsp/displacement.rs` now takes the facing from the
+  surface's winding, and drawing, the voxel solidify direction and terrain
+  collision all follow it.
+- Double-sided materials (DEV-0.10.0): Source's `$nocull` (fence meshes,
+  grates, foliage cards) is read by the converter and written as the material
+  flag `double_sided`. The mod adds a mirrored back face for such materials,
+  wound the other way and lit from the side it faces. Off-thread builds (DEV-0.9.0) are done and user-confirmed,
+including the see-through-regions fix (hidden-owner recheck).
 
 ## Product goal and history
 
@@ -69,7 +84,7 @@ for editing, moving, or transforming src2mc content.
   `/mnt/games/SteamLibrary/steamapps/common/Half-Life 2/hl2/maps/d1_trainstation_02.bsp`
 - Generated HL2 output: `target/phase3-ingame/`
 - Development jar: `mod/build/libs/src2mc-<VERSION>.jar` (currently
-  `src2mc-DEV-0.5.0.jar`)
+  `src2mc-DEV-0.11.0.jar`)
 - WorldEdit schematic directory in this instance:
   `mod/runs/client/config/worldedit/schematics`
 
@@ -81,10 +96,10 @@ pushed unless a later session explicitly does so.
 ## Versioning
 
 The converter and the mod share one version, written only in the root `VERSION`
-file (currently `DEV-0.5.0`). `build.rs` passes it to the CLI's `--version`;
+file (currently `DEV-0.11.0`). `build.rs` passes it to the CLI's `--version`;
 `mod/build.gradle` stamps it into the jar name and `neoforge.mods.toml`. FML
 21.1 only loads a mod version starting with a digit (`^\d+.*`), so the
-mods.toml gets `0.6.0-DEV`, the same version with the stage moved to the end.
+mods.toml gets `0.11.0-DEV`, the same version with the stage moved to the end.
 `Cargo.toml` deliberately has no `version`: Cargo requires plain semver and
 cannot hold the `DEV-` stage prefix. The minor number tracks the implementation
 plan's phase in progress (Phase 5). The release workflow refuses a tag that
@@ -520,7 +535,153 @@ Besides performance, Phase 5 still requires:
 Do not start Phase 6 collision until the Phase 5 rendering/lifecycle and large-map
 performance gates are complete.
 
-## Exact per-cell surfaces (DEV-0.6.0, implemented 2026-09-27, awaiting in-game test)
+## Off-thread mesh builds (DEV-0.9.0, implemented 2026-09-28, user-confirmed 2026-09-28)
+
+Problem: joining a world with large maps ran at about 5 fps for one to three
+minutes. Every surface region was tessellated and lit on the render thread under
+a 150 ms per-frame load budget, props under 4 + 4 ms, and most regions were built
+several times: again when their atlas page arrived, and again when their chunks'
+light arrived (the client applies chunk light through `ClientLevel`'s light
+queue, a tenth of the queue per frame, after the blocks).
+
+Now (all in `mod/src/main/java/dev/theredja/src2mc/client/render/`):
+
+- `MeshBuildPool`: a third of the cores, at most six, just below normal priority.
+  Workers tessellate and light; they return `PackedVertices` (plain arrays). The
+  render thread only fills the `BufferBuilder` and uploads, because Iris stamps
+  its captured entity ids from render-thread state into every vertex.
+- `WorldSnapshot`: an immutable copy of block states and light around a build
+  (`BlockAndTintGetter`). Sections with a data layer are copied; sections without
+  one take the engine's own answer per column (sky: bottom row of the next lit
+  section above; block: 0). Copies are shared by the builds of both renderers
+  within one frame and dropped at the next. A first version kept them for 1 s
+  with event-based invalidation, and on joining it served copies taken before
+  chunks arrived: regions were built with almost all their surface blocks
+  "missing" (probe: hidden 20854 of 20986 at build, 0 live) and stayed
+  see-through until `/src2mc_rebuild_meshes`.
+- `ChunkLightTracker`: NeoForge posts the client chunk load event before the
+  chunk's light is queued, so a marker queued from the event re-queues a second
+  marker that runs after the light. Builds whose chunks (within render distance)
+  are not light-ready wait, for at most 3 s. The light watcher does not take a
+  baseline hash from a chunk whose light is still pending.
+- Surfaces: nearest region first, up to 2 × workers in flight, 3 ms/frame for
+  snapshots, 4 ms/frame for uploads (one always goes). An invalidation bumps the
+  region's version; a build that lands against an older version is discarded.
+  A build that throws on a worker is retried on the render thread against the
+  live level. The rebuild on atlas page arrival is gone (the mesh never depended
+  on the page). Meshes are indexed by region, and region bounds are cached per
+  placement, which removes the per-frame walk over every mesh for every region.
+- Props: a prop is tessellated on a worker only to learn its batches
+  (registration); sections are then rebuilt whole on a worker, every page and
+  class at once. Section rebuilds wait while registrations are running (at most
+  3 s), so a section is not rebuilt once per arriving prop. An overtaken rebuild is
+  still uploaded but its batches stay dirty. The per-frame walk over every prop
+  only runs when something can have changed.
+- Counters: `/src2mc_render_status` (workers, in flight, waiting for chunk light,
+  discarded, failed, worker time, sections copied/reused, dispatch and upload ms)
+  and `/src2mc_prop_status` ("Builds" line).
+
+In-game result (2026-09-28): the user reports loading is "literally instant",
+1-2 s, down from one to three minutes at about 5 fps. Bug found afterwards: after
+a paste, regions far from the player stayed see-through until `/src2mc reload`;
+the lower the render distance during the paste, the more of the map (all of it
+at 4 chunks, none at 24). The probe showed the builds really had no owner
+blocks yet, and the blocks arrived later with nothing triggering a rebuild.
+Before, the rebuild when an atlas page arrived hid this. Dropping the cross-frame
+copy cache did not help. The fix is `HIDDEN_OWNERS` in `MapSurfaceRenderer`:
+every built region's missing owner cells are re-checked against the live world,
+4096 per frame, and the region is rebuilt when one appears. It is user-confirmed.
+Which message arrived late is still unknown; a likely one is that the client
+ignores surface-change payloads while it has no placement, and the placement is
+registered near the end of the paste. For
+diagnosis, `/src2mc_region_probe` lists, for the camera's region and its eight
+neighbours on the same level:
+- state (built, building, waiting for light, not built) and version;
+- what the last build saw (fragments drawn and hidden, whether the light wait
+  timed out, unloaded chunks);
+- how many owned fragments the live world would hide now.
+
+The probe also logs each line.
+
+## Sub-block collision (DEV-0.8.0, implemented 2026-09-27, user-confirmed 2026-09-28)
+
+Design: `docs/decisions.md` D18; format: `docs/format.md` section 14.
+
+- Converter: `src/voxel/collision.rs` computes each cell's solid volume in
+  sixteenths from the converted brushes (octree against the brush planes) and
+  the displacements (height field along the inward axis, one sixteenth
+  thick: Source terrain has no thickness, and following the grid's
+  `solidify` backing put 1.5 blocks of collision into the ceiling of the
+  INFRA basement under an upstairs terrain floor; user-reported, fixed
+  before commit). A map block that no brush or terrain reaches (that
+  backing) collides as nothing. Rounded outward; separate pieces stay separate
+  boxes. `src/output/cell_collision.rs` writes `maps/<id>/collision.s2coll`.
+- Ownership mirrors the surfaces: a map block's own volume is its shape (a
+  full block needs no entry). Volume in an air cell hangs off the
+  face-adjacent block it touches most, as a shape reaching into that cell
+  (-16..32 sixteenths). Untouching volume and every thin brush get a
+  `src2mc:carrier` block in the schematic. Hollowed interior cells get nothing.
+- INFRA furnace: 123,449 shaped cells, 21,784 carriers, 29,303 attached
+  pieces, 14,317 blocks with no volume (mostly terrain backing); the whole
+  export takes about 12 s.
+- Mod: `bundle/CollisionTable.java` (decode and validate),
+  `world/CollisionShapes.java` (per-side, per-dimension placement snapshot,
+  rebuilt on a placement epoch or generation change, the server's only on the
+  server thread; shapes built lazily per shape id). `Src2mcSurfaceBlock` and
+  the new `Src2mcCarrierBlock` are `dynamicShape().forceSolidOn()`; light,
+  occlusion shape and skylight stay fixed (surface: solid cube, carrier:
+  nothing). The carrier is `noOcclusion().replaceable()`; that was decided
+  without asking and is easy to flip if the user wants carrier cells
+  unbuildable. The schematic reader and the placer accept `src2mc:carrier`.
+- Lithium 0.15.4 (checked in its bytecode): the sweeper calls
+  `getCollisionShape(level, pos, ctx)` and checks edge cells through
+  `hasLargeCollisionShape()`, like vanilla; that is true for dynamic-shape
+  blocks. Vanilla `BlockCollisions` passes the `LevelChunk`.
+- Shape building: `world/TableShape.java` builds a shape in one pass from its
+  box edges (an `ArrayVoxelShape` subclass, the only way to its constructor).
+  `Shapes.or` box by box took 55.6 s for INFRA's 14,655 shapes (up to 251
+  boxes each), which the user saw as 10-30 s of lag entering new areas; now
+  0.11 s, and all shapes of a table are prebuilt off-thread on first use.
+  The owner-cell cache is keyed by `CollisionTable` identity: keying it by the
+  `SurfaceTable` record hashed every fragment per lookup and gave 0 fps.
+- Outline: a map block is outlined as its collision; with no collision it is
+  a full cube only if it owns a drawn fragment, otherwise nothing and
+  replaceable by building (user asked to lose the black outlines of empty
+  backing blocks). Blocks stay in the world so lighting is unchanged.
+- Commands: `/src2mc collision` (status and counters), `/src2mc collision
+  exact|full` (A/B against full cubes), `/src2mc collision probe` (block
+  looked at, feet and below: shape, boxes, table entry).
+- Tests: 11 Rust volume tests and 4 encoder tests; Java `CollisionTableTest`
+  and `CollisionShapesTest`. All Rust (525) and mod (86) tests pass; the jar
+  builds against the regenerated INFRA bundle.
+
+Needs the user in game (install the regenerated bundles and schematics,
+`/src2mc reload`, and place the maps again, since the schematics now hold
+carriers):
+- Floors part-way up a block: you stand on the visible surface.
+- Low ceilings and door frames: headroom matches what is drawn.
+- Stairs and ramps: walking up works (step height 0.6).
+- Fence and railing gaps stay passable; thin plates are solid.
+- Breaking and re-placing blocks keeps the right shapes; building into a
+  carrier cell works.
+- No FPS or TPS regression while moving through dense areas.
+
+Prop collision, first version (awaiting in-game check):
+- `bsp/rawprops.rs` reads `m_Solid` (byte 30); entity props read the `solid`
+  key (default 6). 0 is walk-through, 2 the world AABB (`box_volume`), 6 the
+  drawn mesh's shell a sixteenth thick (`shell_volume`), since `.phy` is not
+  parsed. Props under `props.collision_min_size` (48 units) get none.
+- `mod_export.rs` `add_prop_collision` merges it (`collision::add_props`):
+  into a partial block's shape, else a carrier. Roots may land on carrier
+  cells and then carry that shape (`Src2mcDataBlock` `carriesCollision`,
+  `prop_root` is `dynamicShape()`).
+- INFRA furnace: 6,117 solid props, 94,852 prop cells, 84,042 carriers,
+  56,325 distinct shapes (1.79M boxes, up to 615 per shape; built in 0.6 s),
+  12 MB table.
+- Not done: removing a root does not remove its prop's collision; `.phy`
+  hulls; `/src2mc collision full` also turns prop collision off.
+
+## Exact per-cell surfaces (DEV-0.6.0, implemented 2026-09-27, user-verified in game)
 
 Motivation: open areas looked right, tight spaces (hallways, low ceilings, doors,
 windows) fell apart because surfaces were snapped to 0.5-block micro-patches and
@@ -560,8 +721,8 @@ collision is whole blocks. See `docs/decisions.md` D17 and `docs/format.md` §5.
   daylight seeped through the hidden map mass. The occlusion mask now holds
   every schematic block plus the thin-brush cells (format §13 semantics
   widened; binary unchanged).
-- Collision is unchanged (full blocks from the voxel grid). Next step: sub-block
-  collision from the same geometry.
+- Collision was still full blocks at this point; see "Sub-block collision"
+  above.
 
 ## Shaderpack shadow bug (fixed, user-verified)
 

@@ -62,6 +62,12 @@ final class PropBatchAggregator<K, P, M> {
         if (entry.contributors.isEmpty()) entries.remove(key);
     }
 
+    /** Publishes a value but leaves the aggregate dirty, for a rebuild that a later change overtook. */
+    void publish(K key, M value) {
+        Entry<P, M> entry = entries.get(key);
+        if (entry != null) entry.value = value;
+    }
+
     List<K> dirtyKeys() { return new ArrayList<>(dirty); }
     int dirtyCount() { return dirty.size(); }
     Set<K> keys() { return entries.keySet(); }

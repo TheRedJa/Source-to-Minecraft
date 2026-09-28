@@ -23,6 +23,8 @@ public final class PlacementNetwork {
                 PlacementIndex index = new PlacementIndex();
                 payload.placements().forEach(index::register);
                 CLIENT.put(payload.dimension(), index);
+                // Registration already moved the epoch, but before the index was published.
+                PlacementIndex.touch();
                 // The client draws from its own light engine, so it bakes the
                 // map's sky light itself from the same bundle the server used.
                 if (context.player().level() instanceof net.minecraft.world.level.Level level) {

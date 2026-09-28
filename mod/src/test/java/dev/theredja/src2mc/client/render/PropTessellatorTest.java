@@ -62,6 +62,25 @@ final class PropTessellatorTest {
             new int[]{0, 1, 2}, new RuntimeMesh.Submesh[]{new RuntimeMesh.Submesh(0, 3, 0)});
     }
 
+    /** A $nocull back face: same corners and texture, the other winding, the normal turned round. */
+    @Test void aBackFaceMirrorsItsFront() {
+        var a = new PropTessellator.Vertex(0, 0, 0, 0, 0, 1, 0.1, 0.2);
+        var b = new PropTessellator.Vertex(1, 0, 0, 0, 0, 1, 0.3, 0.2);
+        var c = new PropTessellator.Vertex(0, 1, 0, 0, 0, 1, 0.1, 0.4);
+        var both = PropTessellator.withBackFaces(List.of(new PropTessellator.Triangle(2, a, b, c)));
+        assertEquals(2, both.size());
+        var back = both.get(1);
+        assertEquals(2, back.page());
+        assertEquals(List.of(a.x(), c.x(), b.x()), List.of(back.a().x(), back.b().x(), back.c().x()));
+        assertEquals(List.of(a.y(), c.y(), b.y()), List.of(back.a().y(), back.b().y(), back.c().y()));
+        assertEquals(-1.0, back.a().nz());
+        assertEquals(c.u(), back.b().u());
+        // Opposite winding: the geometric normal of the back points the other way.
+        double front = (b.x() - a.x()) * (c.y() - a.y()) - (b.y() - a.y()) * (c.x() - a.x());
+        double mirrored = (back.b().x() - back.a().x()) * (back.c().y() - back.a().y()) - (back.b().y() - back.a().y()) * (back.c().x() - back.a().x());
+        assertTrue(front * mirrored < 0);
+    }
+
     private static double area(PropTessellator.Triangle triangle) {
         double abx = triangle.b().x() - triangle.a().x(), aby = triangle.b().y() - triangle.a().y();
         double acx = triangle.c().x() - triangle.a().x(), acy = triangle.c().y() - triangle.a().y();

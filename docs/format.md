@@ -162,6 +162,8 @@ fields in order:
 | `models` | unique model-reference array sorted by content ID, source path, then material IDs |
 | `props` | canonical `maps/<map-id>/props.s2props` path |
 | `pvs` | optional canonical `maps/<map-id>/pvs.s2pvs` path; absent when the map has no usable PVS |
+| `occlusion` | optional canonical `maps/<map-id>/occlusion.s2occl` path (section 13) |
+| `collision` | optional canonical `maps/<map-id>/collision.s2coll` path (section 14) |
 | `diagnostics` | canonical `maps/<map-id>/diagnostics.json` path |
 
 Surface-table material IDs index `materials` directly. This array therefore
@@ -169,7 +171,10 @@ retains the converter/BSP material order and is not sorted during encoding.
 Each material record contains the normalized diagnostic `source_material`, an
 optional differing `source_material_raw`, `render_class` (`solid`, `cutout`,
 `translucent`, or `fallback`), an optional texture reference, optional Source
-`surface_prop`, and three finite reflectivity values. Cutout takes precedence
+`surface_prop`, three finite reflectivity values, and `double_sided`, present
+only as `true`, when the Source material sets `$nocull`. A double-sided
+surface is drawn from both sides; the mod adds each triangle's mirror, wound
+the other way and lit from the side it faces. Cutout takes precedence
 when Source declares both alpha-test and translucency, matching Source's hard
 alpha test rather than turning grates into blended panes.
 
@@ -408,3 +413,49 @@ and ascending, so the payload is canonical for a given cell set.
 The mask is advisory for rendering and authoritative for nothing else: it never
 adds collision or blocks, and a reader that ignores it produces a correct but
 over-lit world.
+
+## 14. Collision table
+
+`maps/<map-id>/collision.s2coll` optionally records what the map's cells
+collide as. Map metadata references it through the optional `collision` field,
+which sits between `occlusion` and `diagnostics`. A map that omits it collides
+as it always did: every `src2mc:surface` block a full cube.
+
+With the table, a `src2mc:surface` block with no entry is a full cube and one
+with an entry collides as that entry's shape, which may be empty. A
+`src2mc:carrier` block collides as its entry and as nothing without one.
+Carriers are placed by the schematic in cells that hold solid volume but no map
+block; they block no light, cull no faces, and are replaceable.
+
+Shapes come from the same geometry as the surfaces (D17, D18): per cell, the
+volume of the converted brushes and the displacement terrain inside it, rounded
+outward to sixteenths of a block. A piece of volume in a cell without a block
+hangs off the face-adjacent map block it touches most, so a shape may reach one
+cell beyond its own in any direction; a piece with nothing to touch, and every
+brush thinner than the brush-mesh cut-off, gets a carrier instead. Cells that
+hollowing emptied are sealed inside the map and get neither.
+
+Solid props add their volume to the same cells: into a map block's shape, or
+into a carrier's. A `src2mc:prop_root` placed in such a cell collides as the
+cell's entry, as a carrier would, and the schematic then has no carrier there.
+
+The payload is little-endian:
+
+| Field | Type | Value |
+| --- | --- | --- |
+| magic | 8 bytes | `S2COLL\0\0` |
+| version | `u32` | 1 |
+| shape count | `u32` | following shape records |
+
+Each shape record is a `u16` box count followed by that many boxes of six
+`i8` values, `x1 y1 z1 x2 y2 z2`, in sixteenths of the carrying cell. Every box
+has `x1 < x2`, `y1 < y2`, `z1 < z2`, and every value lies in -16..32. Shapes
+are unique and sorted: box by box, each box by its signed bytes, and a shape
+that is a prefix of another first. The empty shape, when used, is therefore
+shape 0.
+
+Then a `u32` section count and the section records, in lexicographic order of
+their map-local 16-block section coordinates: three `i32` values, a `u16` cell
+count of at least 1, and that many cell records of a `u16` local index —
+`(y & 15) << 8 | (z & 15) << 4 | (x & 15)`, strictly ascending — and a `u32`
+shape index. Nothing may follow the last section.
