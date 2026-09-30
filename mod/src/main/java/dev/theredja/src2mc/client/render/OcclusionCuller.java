@@ -16,6 +16,7 @@ import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 import net.neoforged.neoforge.client.GlStateBackup;
 import org.joml.Matrix4f;
+import org.joml.Vector4f;
 import org.lwjgl.opengl.GL;
 import org.lwjgl.opengl.GL11C;
 import org.lwjgl.opengl.GL15C;
@@ -28,13 +29,20 @@ import org.lwjgl.opengl.GL33C;
  */
 final class OcclusionCuller<K> implements AutoCloseable {
     // These deliberately allow a little camera movement before reusing an
-    // answer. The proxy's 0.5-block expansion below keeps that reuse safely
+    // answer. The proxy padding (see queryBounds) keeps that reuse safely
     // biased toward drawing rather than exposing a hidden prop suddenly.
     private static final int MAX_QUERIES_PER_FRAME = 24;
     private static final int QUERY_REFRESH_FRAMES = 16;
-    private static final double MAX_CAMERA_DELTA = 0.25;
+    static final double MAX_CAMERA_DELTA = 0.1;
     private static final double MAX_VIEW_ANGLE_DEGREES = 1.5;
-    private static final double BOUNDS_PADDING = 0.5;
+    // A box partly off screen may have been culled on its on-screen part alone,
+    // so any turn can reveal it; reuse such a result only for an unchanged view.
+    private static final double MAX_VIEW_ANGLE_DEGREES_PARTIAL = 0.05;
+    static final double BOUNDS_PADDING = 0.5;
+    // Occluders closer than this are not trusted to stay put under MAX_CAMERA_DELTA.
+    static final double MIN_OCCLUDER_DISTANCE = 2.0;
+    // Covers the near plane and the camera movement allowed before a re-query.
+    static final double NEAR_MARGIN = 1.0;
 
     private final Map<K, State> states = new HashMap<>();
     private final Measurements measurements = new Measurements();
@@ -58,7 +66,11 @@ final class OcclusionCuller<K> implements AutoCloseable {
         if (!enabled || !supported) return false;
         State state = states.computeIfAbsent(key, ignored -> new State());
         if (!state.occluded) return false;
-        if (!state.view.compatibleWith(view)) {
+        if (cameraInside(queryBounds(bounds, view.position()), view.position())) {
+            state.occluded = false;
+            return false;
+        }
+        if (!state.view.compatibleWith(view, state.fullyOnScreen)) {
             state.occluded = false;
             measurements.current.invalidated++;
             return false;
@@ -76,11 +88,54 @@ final class OcclusionCuller<K> implements AutoCloseable {
         candidates.sort(Comparator.comparingLong(Candidate<K>::triangles).reversed());
         for (Candidate<K> candidate : candidates) {
             State state = states.computeIfAbsent(candidate.key(), ignored -> new State());
-            if (state.pending || (state.lastIssuedFrame >= 0 && frame - state.lastIssuedFrame < QUERY_REFRESH_FRAMES && state.view.compatibleWith(view))) continue;
+            AABB query = queryBounds(candidate.bounds(), view.position());
+            // Inside the proxy only its far walls rasterize, and those sit behind the
+            // room around the camera: zero samples would pass for props next to it.
+            if (cameraInside(query, view.position())) {
+                state.occluded = false;
+                measurements.current.cameraInside++;
+                continue;
+            }
+            if (state.pending || (state.lastIssuedFrame >= 0 && frame - state.lastIssuedFrame < QUERY_REFRESH_FRAMES && state.view.compatibleWith(view, state.fullyOnScreen))) continue;
             if (queriesRemaining <= 0) { measurements.current.budgetSkipped++; continue; }
             queriesRemaining--;
-            issue(state, candidate.bounds().inflate(BOUNDS_PADDING), view, modelView, projection);
+            issue(state, query, view, modelView, projection);
         }
+    }
+
+    /**
+     * The proxy box a query draws for {@code bounds} seen from {@code camera}. After a camera
+     * move of at most δ, an occluder edge at distance d_o shifts by at most δ·d/d_o at distance
+     * d, so padding by MAX_CAMERA_DELTA·d/MIN_OCCLUDER_DISTANCE (d = farthest corner) keeps a
+     * reused answer conservative for every occluder at least MIN_OCCLUDER_DISTANCE away.
+     */
+    static AABB queryBounds(AABB bounds, Vec3 camera) {
+        double dx = Math.max(Math.abs(bounds.minX - camera.x), Math.abs(bounds.maxX - camera.x));
+        double dy = Math.max(Math.abs(bounds.minY - camera.y), Math.abs(bounds.maxY - camera.y));
+        double dz = Math.max(Math.abs(bounds.minZ - camera.z), Math.abs(bounds.maxZ - camera.z));
+        double farthest = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        return bounds.inflate(BOUNDS_PADDING + MAX_CAMERA_DELTA * farthest / MIN_OCCLUDER_DISTANCE);
+    }
+
+    /** Whether {@code camera} is within the query box grown by NEAR_MARGIN; such boxes are never culled. */
+    static boolean cameraInside(AABB query, Vec3 camera) {
+        return camera.x >= query.minX - NEAR_MARGIN && camera.x <= query.maxX + NEAR_MARGIN
+            && camera.y >= query.minY - NEAR_MARGIN && camera.y <= query.maxY + NEAR_MARGIN
+            && camera.z >= query.minZ - NEAR_MARGIN && camera.z <= query.maxZ + NEAR_MARGIN;
+    }
+
+    /** Whether all 8 corners of {@code bounds} are in front of the camera and inside the clip volume's x/y extent. */
+    static boolean fullyOnScreen(AABB bounds, Vec3 camera, Matrix4f modelView, Matrix4f projection) {
+        Matrix4f clip = new Matrix4f(projection).mul(modelView);
+        Vector4f corner = new Vector4f();
+        for (int i = 0; i < 8; i++) {
+            corner.set((float) (((i & 1) == 0 ? bounds.minX : bounds.maxX) - camera.x),
+                (float) (((i & 2) == 0 ? bounds.minY : bounds.maxY) - camera.y),
+                (float) (((i & 4) == 0 ? bounds.minZ : bounds.maxZ) - camera.z), 1.0f);
+            clip.transform(corner);
+            if (!(corner.w > 0.0f) || Math.abs(corner.x) > corner.w || Math.abs(corner.y) > corner.w) return false;
+        }
+        return true;
     }
 
     boolean toggleEnabled() {
@@ -152,6 +207,7 @@ final class OcclusionCuller<K> implements AutoCloseable {
             state.pending = true;
             state.occluded = false;
             state.view = view;
+            state.fullyOnScreen = fullyOnScreen(bounds, view.position(), modelView, projection);
             state.lastIssuedFrame = frame;
             measurements.current.issued++;
         } catch (RuntimeException exception) {
@@ -205,10 +261,12 @@ final class OcclusionCuller<K> implements AutoCloseable {
 
     record Candidate<K>(K key, AABB bounds, long triangles) {}
     record CameraView(Vec3 position, float xRot, float yRot) {
-        boolean compatibleWith(CameraView other) {
+        /** {@code fullyOnScreen}: whether the queried box was entirely on screen from this view. */
+        boolean compatibleWith(CameraView other, boolean fullyOnScreen) {
+            double maxAngle = fullyOnScreen ? MAX_VIEW_ANGLE_DEGREES : MAX_VIEW_ANGLE_DEGREES_PARTIAL;
             return position.distanceToSqr(other.position) <= MAX_CAMERA_DELTA * MAX_CAMERA_DELTA
-                && angleDistance(xRot, other.xRot) <= MAX_VIEW_ANGLE_DEGREES
-                && angleDistance(yRot, other.yRot) <= MAX_VIEW_ANGLE_DEGREES;
+                && angleDistance(xRot, other.xRot) <= maxAngle
+                && angleDistance(yRot, other.yRot) <= maxAngle;
         }
         private static float angleDistance(float left, float right) {
             float delta = Math.abs(left - right) % 360.0f;
@@ -217,14 +275,14 @@ final class OcclusionCuller<K> implements AutoCloseable {
     }
     record Stats(boolean enabled, boolean supported, long pending, int queriesRemaining, Counters last, Counters average, Counters totals) {}
     record Counters(long candidates, long issued, long visible, long occluded, long invalidated,
-                    long budgetSkipped, long rejectedDraws, long rejectedTriangles) {}
+                    long budgetSkipped, long rejectedDraws, long rejectedTriangles, long cameraInside) {}
 
     private static final class Measurements {
         private static final int WINDOW_FRAMES = 120;
         private final CountersMutable current = new CountersMutable();
         private final List<Counters> window = new ArrayList<>();
         private final CountersMutable totals = new CountersMutable();
-        private Counters last = new Counters(0, 0, 0, 0, 0, 0, 0, 0);
+        private Counters last = new Counters(0, 0, 0, 0, 0, 0, 0, 0, 0);
         private boolean started;
 
         void beginFrame() {
@@ -241,26 +299,27 @@ final class OcclusionCuller<K> implements AutoCloseable {
         Counters last() { return last; }
         Counters totals() { return totals.snapshot(); }
         Counters average() {
-            if (window.isEmpty()) return new Counters(0, 0, 0, 0, 0, 0, 0, 0);
+            if (window.isEmpty()) return new Counters(0, 0, 0, 0, 0, 0, 0, 0, 0);
             CountersMutable sum = new CountersMutable();
             for (Counters counters : window) sum.add(counters);
             return sum.divide(window.size());
         }
-        void reset() { current.clear(); window.clear(); totals.clear(); last = new Counters(0, 0, 0, 0, 0, 0, 0, 0); started = false; }
+        void reset() { current.clear(); window.clear(); totals.clear(); last = new Counters(0, 0, 0, 0, 0, 0, 0, 0, 0); started = false; }
     }
 
     private static final class CountersMutable {
-        long candidates, issued, visible, occluded, invalidated, budgetSkipped, rejectedDraws, rejectedTriangles;
-        void add(Counters counters) { candidates += counters.candidates(); issued += counters.issued(); visible += counters.visible(); occluded += counters.occluded(); invalidated += counters.invalidated(); budgetSkipped += counters.budgetSkipped(); rejectedDraws += counters.rejectedDraws(); rejectedTriangles += counters.rejectedTriangles(); }
-        Counters snapshot() { return new Counters(candidates, issued, visible, occluded, invalidated, budgetSkipped, rejectedDraws, rejectedTriangles); }
-        Counters divide(int divisor) { return new Counters(candidates / divisor, issued / divisor, visible / divisor, occluded / divisor, invalidated / divisor, budgetSkipped / divisor, rejectedDraws / divisor, rejectedTriangles / divisor); }
-        void clear() { candidates = issued = visible = occluded = invalidated = budgetSkipped = rejectedDraws = rejectedTriangles = 0; }
+        long candidates, issued, visible, occluded, invalidated, budgetSkipped, rejectedDraws, rejectedTriangles, cameraInside;
+        void add(Counters counters) { candidates += counters.candidates(); issued += counters.issued(); visible += counters.visible(); occluded += counters.occluded(); invalidated += counters.invalidated(); budgetSkipped += counters.budgetSkipped(); rejectedDraws += counters.rejectedDraws(); rejectedTriangles += counters.rejectedTriangles(); cameraInside += counters.cameraInside(); }
+        Counters snapshot() { return new Counters(candidates, issued, visible, occluded, invalidated, budgetSkipped, rejectedDraws, rejectedTriangles, cameraInside); }
+        Counters divide(int divisor) { return new Counters(candidates / divisor, issued / divisor, visible / divisor, occluded / divisor, invalidated / divisor, budgetSkipped / divisor, rejectedDraws / divisor, rejectedTriangles / divisor, cameraInside / divisor); }
+        void clear() { candidates = issued = visible = occluded = invalidated = budgetSkipped = rejectedDraws = rejectedTriangles = cameraInside = 0; }
     }
     private final class State {
         int query;
         boolean pending;
         boolean occluded;
         CameraView view = new CameraView(Vec3.ZERO, Float.NaN, Float.NaN);
+        boolean fullyOnScreen;
         long lastIssuedFrame = -1;
     }
 }

@@ -180,17 +180,35 @@ mod tests {
     #[test]
     fn inverted_displacements_face_the_way_they_wind() {
         let path = "/mnt/games/SteamLibrary/steamapps/common/infra/infra/pak02_dir.vpk:maps/infra_c6_m4_waterplant.bsp";
-        if !Path::new(path.split(".vpk:").next().unwrap()).with_extension("vpk").exists() {
+        if !Path::new(path.split(".vpk:").next().unwrap())
+            .with_extension("vpk")
+            .exists()
+        {
             return;
         }
         let map = Map::load(Path::new(path)).unwrap();
         let surfaces = map.displacement_surfaces();
         for s in &surfaces {
-            let winding: f64 = s.triangles.iter().map(|t| (t.b - t.a).cross(t.c - t.a).dot(s.normal)).sum();
-            assert!(winding > 0.0, "displacement {} winds against its normal", s.index);
+            let winding: f64 = s
+                .triangles
+                .iter()
+                .map(|t| (t.b - t.a).cross(t.c - t.a).dot(s.normal))
+                .sum();
+            assert!(
+                winding > 0.0,
+                "displacement {} winds against its normal",
+                s.index
+            );
         }
-        let ceiling = surfaces.iter().find(|s| s.index == 12).expect("displacement 12");
-        assert!(ceiling.normal.z < -0.99, "the cave ceiling faces down, got {:?}", ceiling.normal);
+        let ceiling = surfaces
+            .iter()
+            .find(|s| s.index == 12)
+            .expect("displacement 12");
+        assert!(
+            ceiling.normal.z < -0.99,
+            "the cave ceiling faces down, got {:?}",
+            ceiling.normal
+        );
     }
 
     #[test]

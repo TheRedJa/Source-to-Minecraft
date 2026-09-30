@@ -2,6 +2,7 @@ package dev.theredja.src2mc.client.render;
 
 import static net.minecraft.commands.Commands.literal;
 
+import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.blaze3d.vertex.VertexBuffer;
 import dev.theredja.src2mc.Src2mc;
 import dev.theredja.src2mc.bundle.AtlasIndex;
@@ -107,6 +108,10 @@ public final class MapSurfaceRenderer {
     /** Neighbour cells tested and dropped for being out of sight, by the last finished build. */
     private static long occlusionTestedLast, occlusionBlockedLast;
     private static boolean pvsCulling = true;
+    /** Whether translucent surfaces and props write depth. Off: vanilla's entity translucent
+     * type writes depth, so whichever translucent layer drew first hid every one behind it --
+     * a glass prop behind a glass surface vanished. Kept as a toggle to compare by eye. */
+    private static boolean translucentDepthWrite = false;
     private static boolean frustumCulling = true;
     /** Shadow-caster cutoff in blocks. The shaderpack's own shadow-distance setting only culls
      * Sodium's terrain, never mod-owned geometry, so without this the whole map is rasterized into
@@ -249,6 +254,9 @@ public final class MapSurfaceRenderer {
         event.getDispatcher().register(literal("src2mc_smooth_light")
             .then(literal("on").executes(context -> setSmoothLighting(context.getSource(), true)))
             .then(literal("off").executes(context -> setSmoothLighting(context.getSource(), false))));
+        event.getDispatcher().register(literal("src2mc_translucent_depth")
+            .then(literal("on").executes(context -> setTranslucentDepthWrite(context.getSource(), true)))
+            .then(literal("off").executes(context -> setTranslucentDepthWrite(context.getSource(), false))));
         event.getDispatcher().register(literal("src2mc_cull")
             .then(literal("pvs").then(literal("on").executes(context -> setPvsCulling(context.getSource(), true)))
                 .then(literal("off").executes(context -> setPvsCulling(context.getSource(), false))))
@@ -285,6 +293,12 @@ public final class MapSurfaceRenderer {
     private static int setPvsCulling(net.minecraft.commands.CommandSourceStack source, boolean value) {
         pvsCulling = value;
         source.sendSuccess(() -> Component.literal("src2mc PVS culling " + (value ? "on" : "off")), false);
+        return 1;
+    }
+
+    private static int setTranslucentDepthWrite(net.minecraft.commands.CommandSourceStack source, boolean value) {
+        translucentDepthWrite = value;
+        source.sendSuccess(() -> Component.literal("src2mc translucent depth write " + (value ? "on" : "off")), false);
         return 1;
     }
 
@@ -632,6 +646,9 @@ public final class MapSurfaceRenderer {
 
     static boolean frustumCulling() { return frustumCulling; }
 
+    /** Shared with {@link PropRenderer}; see {@link #translucentDepthWrite}. */
+    static boolean translucentDepthWrite() { return translucentDepthWrite; }
+
     /** Shared with {@link PropRenderer}: both renderers upload the same way and have to agree. */
     static boolean neutralEntityId() { return neutralEntityId; }
 
@@ -692,7 +709,9 @@ public final class MapSurfaceRenderer {
             if (located == null || located.map().atlas() == null) continue;
             BundleMap map = located.map();
             for (RegionEntry entry : regionEntries(placement, map)) {
-                if (Math.abs(entry.centerSectionX - cameraSectionX) > distance || Math.abs(entry.centerSectionZ - cameraSectionZ) > distance) continue;
+                // Regions span several sections: keep one while any of its sections is in range.
+                if (sectionGap(cameraSectionX, entry.minSectionX, entry.maxSectionX) > distance
+                    || sectionGap(cameraSectionZ, entry.minSectionZ, entry.maxSectionZ) > distance) continue;
                 RegionKey regionKey = entry.key;
                 if (BUILT_REGIONS.containsKey(regionKey)) {
                     BUILT_REGIONS.put(regionKey, frame);
@@ -848,6 +867,9 @@ public final class MapSurfaceRenderer {
             RenderType renderType = translucent ? RenderType.entityTranslucent(texture)
                 : item.getKey().renderClass == BundleMaterial.RenderClass.SOLID ? RenderType.entitySolid(texture) : RenderType.entityCutout(texture);
             renderType.setupRenderState();
+            // entityTranslucent writes depth, so the nearest translucent surface drawn first would
+            // hide translucent geometry behind it; keep the depth test but skip the write.
+            if (translucent && !translucentDepthWrite) RenderSystem.depthMask(false);
             Matrix4f modelView = new Matrix4f(event.getModelViewMatrix()).translate(
                 (float) (mesh.origin.getX() - camera.x),
                 (float) (mesh.origin.getY() - camera.y),
@@ -858,6 +880,7 @@ public final class MapSurfaceRenderer {
                     : item.getKey().renderClass == BundleMaterial.RenderClass.SOLID
                         ? GameRenderer.getRendertypeEntitySolidShader() : GameRenderer.getRendertypeEntityCutoutShader());
             renderType.clearRenderState();
+            if (translucent && !translucentDepthWrite) RenderSystem.depthMask(true);
         }
         VertexBuffer.unbind();
     }
@@ -1251,15 +1274,22 @@ public final class MapSurfaceRenderer {
         ChunkLightTracker.onChunkUnload(chunkLevel, pos);
     }
 
-    /** The placement's regions, with their bounds and centre worked out once rather than per frame. */
+    /** Sections between {@code section} and the nearest section of {@code [min, max]}; 0 inside. */
+    private static int sectionGap(int section, int min, int max) {
+        return section < min ? min - section : section > max ? section - max : 0;
+    }
+
+    /** The placement's regions, with their bounds and section extent worked out once rather than per frame. */
     private static List<RegionEntry> regionEntries(MapPlacement placement, BundleMap map) {
         return PLACEMENT_REGIONS.computeIfAbsent(placement, ignored -> {
             List<RegionEntry> entries = new ArrayList<>();
             regionGroups(map).forEach((coord, group) -> {
-                AABB bounds = regionBounds(placement, group);
-                entries.add(new RegionEntry(new RegionKey(placement, coord), group, bounds,
-                    SectionPos.blockToSectionCoord((bounds.minX + bounds.maxX) * 0.5),
-                    SectionPos.blockToSectionCoord((bounds.minZ + bounds.maxZ) * 0.5)));
+                BlockPos translation = placement.translation();
+                entries.add(new RegionEntry(new RegionKey(placement, coord), group, regionBounds(placement, group),
+                    SectionPos.blockToSectionCoord(translation.getX() + group.minX()),
+                    SectionPos.blockToSectionCoord(translation.getX() + group.maxX() - 1),
+                    SectionPos.blockToSectionCoord(translation.getZ() + group.minZ()),
+                    SectionPos.blockToSectionCoord(translation.getZ() + group.maxZ() - 1)));
             });
             return List.copyOf(entries);
         });
@@ -1287,7 +1317,8 @@ public final class MapSurfaceRenderer {
         return pvs.visible(CameraVisibility.row(), clusters);
     }
 
-    private record RegionEntry(RegionKey key, RegionGroup group, AABB bounds, int centerSectionX, int centerSectionZ) {}
+    private record RegionEntry(RegionKey key, RegionGroup group, AABB bounds,
+                               int minSectionX, int maxSectionX, int minSectionZ, int maxSectionZ) {}
     private record RegionCoord(int x, int y, int z) {}
     private record RegionGroup(List<SurfaceTable.SectionPos> sections, short[] clusters,
                                 int minX, int minY, int minZ, int maxX, int maxY, int maxZ) {}

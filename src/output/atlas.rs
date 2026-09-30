@@ -178,9 +178,6 @@ pub fn build_pages(layout: &Layout, assets: &[ImageAsset]) -> Result<Vec<PageIma
         by_id.len() == assets.len(),
         "duplicate texture image content ID"
     );
-    let mut bases: Vec<RgbaImage> = (0..layout.page_count)
-        .map(|_| RgbaImage::from_pixel(PAGE_SIZE, PAGE_SIZE, Rgba([0, 0, 0, 0])))
-        .collect();
     for region in &layout.regions {
         let source = by_id
             .get(region.content_id.as_str())
@@ -190,34 +187,43 @@ pub fn build_pages(layout: &Layout, assets: &[ImageAsset]) -> Result<Vec<PageIma
                 && region.source.y + region.source.height <= source.height(),
             "atlas source region exceeds image"
         );
-        let page = bases
-            .get_mut(region.page as usize)
-            .ok_or_else(|| anyhow::anyhow!("atlas page index out of range"))?;
-        for dy in -(GUTTER as i64)..i64::from(region.source.height + GUTTER) {
-            for dx in -(GUTTER as i64)..i64::from(region.source.width + GUTTER) {
-                let source_x =
-                    (i64::from(region.source.x) + dx).rem_euclid(i64::from(source.width())) as u32;
-                let source_y =
-                    (i64::from(region.source.y) + dy).rem_euclid(i64::from(source.height())) as u32;
-                let page_x = (i64::from(region.allocation.x) + dx) as u32;
-                let page_y = (i64::from(region.allocation.y) + dy) as u32;
-                page.put_pixel(page_x, page_y, *source.get_pixel(source_x, source_y));
-            }
-        }
+        ensure!(
+            region.page < layout.page_count,
+            "atlas page index out of range"
+        );
     }
-    Ok(bases
-        .into_iter()
-        .map(|base| {
-            let mut mips = vec![base];
-            for level in 1..=MAX_MIP_LEVEL {
-                let size = PAGE_SIZE >> level;
-                mips.push(image::imageops::resize(
-                    &mips[0],
-                    size,
-                    size,
-                    FilterType::Triangle,
-                ));
+    // Pages are independent, and so is each mip of a page, since every level
+    // is resampled from the full-size page: both are built in parallel.
+    use rayon::prelude::*;
+    Ok((0..layout.page_count)
+        .into_par_iter()
+        .map(|page_index| {
+            let mut page = RgbaImage::from_pixel(PAGE_SIZE, PAGE_SIZE, Rgba([0, 0, 0, 0]));
+            for region in layout.regions.iter().filter(|r| r.page == page_index) {
+                let source = by_id[region.content_id.as_str()];
+                for dy in -(GUTTER as i64)..i64::from(region.source.height + GUTTER) {
+                    for dx in -(GUTTER as i64)..i64::from(region.source.width + GUTTER) {
+                        let source_x = (i64::from(region.source.x) + dx)
+                            .rem_euclid(i64::from(source.width()))
+                            as u32;
+                        let source_y = (i64::from(region.source.y) + dy)
+                            .rem_euclid(i64::from(source.height()))
+                            as u32;
+                        let page_x = (i64::from(region.allocation.x) + dx) as u32;
+                        let page_y = (i64::from(region.allocation.y) + dy) as u32;
+                        page.put_pixel(page_x, page_y, *source.get_pixel(source_x, source_y));
+                    }
+                }
             }
+            let smaller: Vec<RgbaImage> = (1..=MAX_MIP_LEVEL)
+                .into_par_iter()
+                .map(|level| {
+                    let size = PAGE_SIZE >> level;
+                    image::imageops::resize(&page, size, size, FilterType::Triangle)
+                })
+                .collect();
+            let mut mips = vec![page];
+            mips.extend(smaller);
             PageImages { mips }
         })
         .collect())

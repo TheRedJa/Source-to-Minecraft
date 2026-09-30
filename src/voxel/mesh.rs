@@ -103,6 +103,50 @@ pub fn triangle_overlaps_voxel(tri: &Triangle, voxel: IVec3) -> bool {
     true
 }
 
+/// Call `visit` for every voxel in `lo..=hi` (inclusive, per axis) that the
+/// triangle's plane passes close enough to for [`triangle_overlaps_voxel`] to
+/// accept it.
+///
+/// A triangle's bounding box can be enormous where the triangle is not: a
+/// slanted face across a large prop fills its box's diagonal and nothing else,
+/// and testing every voxel of the box made that cost the cube of its size.
+/// Along the axis the plane faces most, each column of voxels meets the plane
+/// in a short run, so only that run is visited. The run is solved from the
+/// overlap test's own plane condition and widened by a voxel each way, so
+/// every voxel the full test could accept is still offered to it.
+pub fn plane_candidates(tri: &Triangle, lo: IVec3, hi: IVec3, mut visit: impl FnMut(IVec3)) {
+    let normal = tri.normal();
+    let magnitudes = [normal.x.abs(), normal.y.abs(), normal.z.abs()];
+    let d = (0..3)
+        .max_by(|&i, &j| magnitudes[i].total_cmp(&magnitudes[j]))
+        .unwrap_or(2);
+    let (u, v) = ((d + 1) % 3, (d + 2) % 3);
+    let n = [normal.x, normal.y, normal.z];
+    if !(n[d].abs() > 0.0) || !n.iter().all(|c| c.is_finite()) {
+        return;
+    }
+    let radius = 0.5 * (magnitudes[0] + magnitudes[1] + magnitudes[2]);
+    let offset = normal.dot(tri.a);
+    for a in lo[u]..=hi[u] {
+        for b in lo[v]..=hi[v] {
+            // The overlap test's plane condition, |n . (a - centre)| <= radius,
+            // solved for the centre's coordinate along `d`.
+            let rest = offset - n[u] * (a as f64 + 0.5) - n[v] * (b as f64 + 0.5);
+            let (p, q) = ((rest - radius) / n[d], (rest + radius) / n[d]);
+            let (from, to) = (p.min(q) - 0.5, p.max(q) - 0.5);
+            let first = ((from.floor() as i64) - 1).max(i64::from(lo[d]));
+            let last = ((to.ceil() as i64) + 1).min(i64::from(hi[d]));
+            for c in first..=last {
+                let mut voxel = [0; 3];
+                voxel[u] = a;
+                voxel[v] = b;
+                voxel[d] = c as i32;
+                visit(voxel);
+            }
+        }
+    }
+}
+
 fn min_max(a: f64, b: f64, c: f64) -> (f64, f64) {
     (a.min(b).min(c), a.max(b).max(c))
 }
@@ -129,16 +173,11 @@ pub fn voxelize_triangle(tri: &Triangle, mut emit: impl FnMut(IVec3)) {
         bounds.max.z.floor() as i64,
     ];
 
-    for x in min[0]..=max[0] {
-        for y in min[1]..=max[1] {
-            for z in min[2]..=max[2] {
-                let voxel = [x as i32, y as i32, z as i32];
-                if triangle_overlaps_voxel(tri, voxel) {
-                    emit(voxel);
-                }
-            }
+    plane_candidates(tri, min.map(|m| m as i32), max.map(|m| m as i32), |voxel| {
+        if triangle_overlaps_voxel(tri, voxel) {
+            emit(voxel);
         }
-    }
+    });
 }
 
 /// The bounds of the part of `tri` that lies inside `voxel`, or `None` if it
@@ -219,6 +258,61 @@ fn keep(polygon: &[Vec3], axis: usize, at: f64, above: bool) -> Vec<Vec3> {
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    /// Walking only the plane's slab must find exactly the voxels a scan of
+    /// the whole bounding box finds, for flat, steep and slanted triangles.
+    #[test]
+    fn plane_candidates_miss_nothing_the_full_scan_finds() {
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % 20_000) as f64 / 100.0 - 100.0
+        };
+        let mut shapes: Vec<Triangle> = (0..300)
+            .map(|_| {
+                Triangle::new(
+                    Vec3::new(next(), next(), next()),
+                    Vec3::new(next(), next(), next()),
+                    Vec3::new(next(), next(), next()),
+                )
+            })
+            .collect();
+        // Axis-aligned and grid-aligned ones, where rounding bites.
+        shapes.push(Triangle::new(
+            Vec3::new(0.0, 4.0, 0.0),
+            Vec3::new(30.0, 4.0, 0.0),
+            Vec3::new(0.0, 4.0, 30.0),
+        ));
+        shapes.push(Triangle::new(
+            Vec3::new(0.5, 0.0, 0.0),
+            Vec3::new(0.5, 25.0, 0.0),
+            Vec3::new(0.5, 0.0, 25.0),
+        ));
+        for tri in shapes.iter().filter(|t| !t.is_degenerate()) {
+            let bounds = tri.bounds();
+            let lo = [0, 1, 2].map(|a| bounds.min.axis(a).floor() as i32);
+            let hi = [0, 1, 2].map(|a| bounds.max.axis(a).floor() as i32);
+            let mut full = HashSet::new();
+            for x in lo[0]..=hi[0] {
+                for y in lo[1]..=hi[1] {
+                    for z in lo[2]..=hi[2] {
+                        if triangle_overlaps_voxel(tri, [x, y, z]) {
+                            full.insert([x, y, z]);
+                        }
+                    }
+                }
+            }
+            let mut slab = HashSet::new();
+            plane_candidates(tri, lo, hi, |voxel| {
+                if triangle_overlaps_voxel(tri, voxel) {
+                    slab.insert(voxel);
+                }
+            });
+            assert_eq!(slab, full, "{tri:?}");
+        }
+    }
 
     fn voxels(tri: &Triangle) -> HashSet<IVec3> {
         let mut out = HashSet::new();

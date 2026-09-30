@@ -1363,6 +1363,7 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
     let texture_ids = assets.pack.ids();
     let resolver = Resolver::with_textures(config, &materials, &texture_ids)?;
 
+    crate::timing::mark("convert: read assets");
     let entity_models = entity_models(map, config, &transform);
 
     // Gather every brush first so the voxelization itself parallelizes cleanly.
@@ -1387,6 +1388,7 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
     let (solids, brush_meshes, occluders, thin_solids) =
         split_brush_meshes(map, config, &transform, &origins, solids);
 
+    crate::timing::mark("convert: gather and split brushes");
     // Continuous brush geometry, retained so a prop's overlap with the grid
     // can be told apart from overlap that was already in the source map.
     let block_solids: Vec<BlockSolid> = solids
@@ -1420,11 +1422,13 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
         }
     }
 
+    crate::timing::mark("convert: brush index");
     let tiles = tile_sets(map, &materials, &resolver, &assets.pack, &palette);
     let (grid, mut masks, mut face_candidates) = voxelize_solids(
         &solids, map, config, &resolver, &transform, &origins, &tiles, &palette, &skipped,
     );
 
+    crate::timing::mark("convert: voxelize brushes");
     // Brush entities configured as `separate` get their own grid each, so a
     // door is a schematic you can place where your mechanism needs it rather
     // than a slab sealing the doorway it should open.
@@ -1531,6 +1535,7 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
     }
     let displacements_skipped = displacements_skipped.into_inner();
 
+    crate::timing::mark("convert: separate entities and displacements");
     // How far each modelled prop has to move to meet the floor. Measured here,
     // against the world as brushes and terrain left it and before any prop has
     // been added to it, so props cannot end up standing on each other.
@@ -1672,6 +1677,7 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
     };
     grid.merge(voxelized);
     let grid = grid;
+    crate::timing::mark("convert: settle, collision shells, props, hollowing");
 
     // Shapes are fitted last, after hollowing: the mask grid outlives the
     // brushes precisely so this can happen here, on the voxels that survived.
@@ -1685,6 +1691,7 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
     };
     let visible_surfaces = face_candidates.visible(&grid, &masks, config.shapes.enabled);
 
+    crate::timing::mark("convert: shapes and visible faces");
     // Props drawn as blocks rather than as entities. A prop's block may only
     // take a cell that is air, since taking one of the map's own would punch a
     // hole in whatever the prop stands against, and taking another prop's
@@ -1921,6 +1928,7 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
         }
         None => Vec::new(),
     };
+    crate::timing::mark("convert: bake, barriers, exact surface fragments");
     let collision = config.output.exact_surfaces.then(|| {
         let skip_sky = config.contents.skip_sky;
         let converted: Vec<&BlockSolid> = solids
@@ -1977,6 +1985,7 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
             terrain,
         })
     });
+    crate::timing::mark("convert: collision table");
     drop(before_hollow);
     Ok(Conversion {
         stats: Stats {

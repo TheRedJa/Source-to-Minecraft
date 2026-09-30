@@ -1,6 +1,7 @@
 # src2mc implementation handoff
 
-Updated: 2026-09-28 (Europe/Berlin), DEV-0.11.0 (collision, off-thread mesh builds, $nocull, inverted displacements; committed a716988)
+Updated: 2026-09-30 (Europe/Berlin), DEV-0.13.0 (render culling fixes on top of
+DEV-0.12.0 prop skins and fast export)
 
 This document records the active implementation state and the empirical context
 needed to continue the work in a new session. `AGENTS.md` contains mandatory
@@ -8,8 +9,62 @@ working rules. Durable requirements and design authority remain in
 `docs/mod-requirements.md`, `docs/decisions.md`, `docs/format.md`, and
 `mod/IMPLEMENTATION_PLAN.md`.
 
-**Current task:** none open. The last two rendering fixes are done and
-user-confirmed in game (2026-09-28):
+**Render culling fixes (DEV-0.13.0):** user-confirmed in game 2026-09-30: no
+flicker, no pop-in, frame times steady at 20-22 ms. A review of the
+visibility code found seven ways visible geometry could be hidden:
+- GPU occlusion queries culled a prop batch whenever the camera stood inside its
+  box: only the box's far walls rasterize, and they sit behind the room. This is
+  the "props flicker and vanish while walking, never while flying" the user saw.
+  Batches around the camera are now never queried or culled.
+- Query results were reused over 0.25 blocks of movement with a fixed 0.5-block
+  pad, which parallax near a door frame easily exceeds. Now 0.1 blocks and a pad
+  that grows with distance; a box partly off screen is invalidated by any turn.
+- Translucent props were occlusion-queried at `AFTER_PARTICLES` against glass,
+  water, mobs and particles; translucent draws no longer query.
+- Vanilla's entity translucent type writes depth, so the first translucent layer
+  hid all translucent geometry behind it. Depth write is now off for
+  translucent surfaces and props (`/src2mc_translucent_depth on|off` to compare).
+- The PVS cluster was looked up at the camera block's integer corner, not the
+  eye, so near doorways the neighbouring cluster's PVS was used (and on
+  grid-aligned planes the lookup failed open). It now uses the eye position.
+- Prop triangles lying exactly on a 16-block section plane were dropped.
+- Surface regions were range-tested by their centre, leaving up to two sections
+  of map missing at the render-distance edge; now by their nearest section.
+
+**Export speed (DEV-0.12.0):** all 10 test maps now export in 48 s wall time
+together (3 at a time), down from about 19 minutes; `sp_a3_end` alone went from
+1130 s to about 24-40 s and `escape_02` from 537 s to 6-8 s. Every changed
+stage produces byte-identical bundle entries (same fingerprints). Set
+`SRC2MC_TIMINGS=1` to print per-stage times (`src/timing.rs`). What was slow:
+- Prop collision shells tested every sixteenth-block in each triangle's
+  bounding box, which is cubic in size for slanted triangles.
+  `voxel::mesh::plane_candidates` now walks only the plane's slab (also used
+  by `voxelize_triangle`), and large props split their triangles across
+  threads.
+- Textures were decoded, resampled and PNG-encoded one by one;
+  `extract_materials` now records the requests in a first pass, produces them
+  in parallel, and assigns in a second pass.
+- Atlas pages and their mips are built in parallel, atlas PNGs encoded in
+  parallel, and PNG ZIP entries are stored instead of deflated again (bundle
+  about 3 % larger).
+
+**Prop skins (DEV-0.12.0):** user-confirmed in game 2026-09-28.
+The converter always drew skin family 0, so every prop placed with another skin
+wore the default texture: furnace's rusted `watertreatment_tank_002` (skin 1)
+came out clean white. About a third of INFRA's static props use a skin other
+than 0 (1758 of 5149 in waterplant, 2784 of 8977 in furnace). The static prop
+record's `m_Skin` (offset 32, every version since 4) and the entity `skin` key
+are now read; `Models::get_skin` swaps each part's material for the family's
+and falls back to skin 0 for a skin the model lacks, as Source does. No format
+change: a skinned prop selects a model reference with the same mesh and its own
+material slots (`docs/format.md` section 6). Mod unchanged.
+
+Open follow-up: `$detail` textures (a second, finer grime/rust layer, e.g.
+`detail/detail_rust_002` on the rusted tank) are still ignored. They tile at
+their own `$detailscale`, so they need either a bigger baked texture or a
+second texture in the mod renderer. Decide after the user sees skins.
+
+Earlier rendering fixes, user-confirmed in game (2026-09-28):
 - Inverted displacements (DEV-0.11.0): Hammer can invert a displacement,
   mirroring it through its base plane. That reverses the winding, and Source
   culls by winding. The converter used to force every displacement to face its

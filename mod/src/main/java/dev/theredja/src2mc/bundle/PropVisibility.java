@@ -5,7 +5,7 @@ import java.util.Map;
 /** Validated Source PVS data. Camera lookup walks exported BSP planes: leaf
  * AABBs are deliberately not used because conservative boxes can overlap. */
 public final class PropVisibility {
-    private static final float PLANE_EPSILON = 0.001f;
+    private static final double PLANE_EPSILON = 0.001;
     private final int clusterCount;
     private final Node[] nodes;
     private final int root;
@@ -22,9 +22,10 @@ public final class PropVisibility {
 
     public byte[] row(int cluster) { return cluster < 0 || cluster >= clusterCount ? null : rows[cluster]; }
 
-    /** Exact point-leaf traversal. Points on a split fail open rather than
-     * selecting an arbitrary side and incorrectly rejecting visible props. */
-    public int clusterAt(int x, int y, int z) {
+    /** Exact point-leaf traversal in continuous map-local block coordinates (the camera's eye,
+     * not its block corner). Points on a split fail open rather than selecting an arbitrary
+     * side and incorrectly rejecting visible props. */
+    public int clusterAt(double x, double y, double z) {
         int cursor = root;
         for (int steps = 0; steps <= nodes.length; steps++) {
             if (cursor < 0) {
@@ -34,9 +35,9 @@ public final class PropVisibility {
             }
             if (cursor >= nodes.length) return -1;
             Node node = nodes[cursor];
-            float distance = node.nx * x + node.ny * y + node.nz * z - node.dist;
-            if (!Float.isFinite(distance) || Math.abs(distance) <= PLANE_EPSILON) return -1;
-            cursor = node.children[distance > 0.0f ? 0 : 1];
+            double distance = node.nx * x + node.ny * y + node.nz * z - node.dist;
+            if (!Double.isFinite(distance) || Math.abs(distance) <= PLANE_EPSILON) return -1;
+            cursor = node.children[distance > 0.0 ? 0 : 1];
         }
         return -1;
     }

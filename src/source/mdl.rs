@@ -56,6 +56,11 @@ pub struct Model {
     pub parts: Vec<Part>,
     /// Bounds in model space, from the model's own header.
     pub bounds: Aabb,
+    /// The material every part wears in each of the model's skin families,
+    /// parallel to `parts`. Family 0 is what `parts` already say; a prop picks
+    /// another with its `skin`, which is how one pipe or tank model comes clean,
+    /// painted or rusted.
+    pub skins: Vec<Vec<String>>,
 }
 
 impl Model {
@@ -124,6 +129,7 @@ const VTX_SUFFIXES: [&str; 4] = [".dx90.vtx", ".dx80.vtx", ".vtx", ".sw.vtx"];
 pub struct Models<'a> {
     vfs: &'a Vfs,
     cache: HashMap<String, Option<Arc<Model>>>,
+    skinned: HashMap<(String, usize), Arc<Model>>,
 }
 
 impl<'a> Models<'a> {
@@ -131,6 +137,7 @@ impl<'a> Models<'a> {
         Models {
             vfs,
             cache: HashMap::new(),
+            skinned: HashMap::new(),
         }
     }
 
@@ -144,6 +151,28 @@ impl<'a> Models<'a> {
         let loaded = self.load(&key).map(Arc::new);
         self.cache.insert(key, loaded.clone());
         loaded
+    }
+
+    /// The model at `path` wearing skin family `skin`.
+    ///
+    /// Source draws a skin the model does not have as the default one, and so
+    /// does this. The geometry is the same whichever skin is worn; only each
+    /// part's material changes.
+    pub fn get_skin(&mut self, path: &str, skin: i32) -> Option<Arc<Model>> {
+        let base = self.get(path)?;
+        let skin = usize::try_from(skin).unwrap_or(0);
+        if skin == 0 || skin >= base.skins.len() || base.skins[skin] == base.skins[0] {
+            return Some(base);
+        }
+        let key = (path.to_ascii_lowercase().replace('\\', "/"), skin);
+        let model = self.skinned.entry(key).or_insert_with(|| {
+            let mut model = Model::clone(&base);
+            for (part, material) in model.parts.iter_mut().zip(&base.skins[skin]) {
+                part.material = material.clone();
+            }
+            Arc::new(model)
+        });
+        Some(model.clone())
     }
 
     /// How many distinct models have been asked for, and how many resolved.
@@ -195,14 +224,29 @@ impl<'a> Models<'a> {
             Vec3::new(t.x as f64, t.y as f64, t.z as f64).normalized()
         };
 
-        // Part order is format identity: HashMap iteration made identical
-        // Source models produce different mesh content IDs across processes.
-        let mut parts: BTreeMap<String, Geometry> = BTreeMap::new();
+        // Meshes are grouped by the material they wear in every skin family,
+        // default first: two meshes that share a material in one skin may not
+        // in another. Part order is format identity: HashMap iteration made
+        // identical Source models produce different mesh content IDs across
+        // processes.
+        let families: Vec<vmdl::SkinTable> = model.skin_tables().collect();
+        let mut parts: BTreeMap<Vec<String>, Geometry> = BTreeMap::new();
         let vertices = model.vertices();
 
         for mesh in model.meshes() {
-            let material = self.material_of(&model, mesh.material_index());
-            let (triangles, normals, uvs) = parts.entry(material).or_default();
+            let reference = mesh.material_index();
+            let materials = families
+                .iter()
+                .map(|family| {
+                    // A model without a skin table indexes its textures
+                    // directly, which is what family 0 is for every model.
+                    let texture = family
+                        .texture_index(reference)
+                        .unwrap_or(reference.max(0) as usize);
+                    self.material_of(&model, texture)
+                })
+                .collect();
+            let (triangles, normals, uvs) = parts.entry(materials).or_default();
             for strip in mesh.vertex_strip_indices() {
                 let indices: Vec<usize> = strip.collect();
                 for tri in indices.chunks_exact(3) {
@@ -229,18 +273,27 @@ impl<'a> Models<'a> {
             bounds.extend(Vec3::new(corner.x as f64, corner.y as f64, corner.z as f64));
         }
 
+        let skins = (0..families.len())
+            .map(|family| {
+                parts
+                    .keys()
+                    .map(|materials| materials[family].clone())
+                    .collect()
+            })
+            .collect();
         Model {
             parts: parts
                 .into_iter()
-                .map(|(material, (triangles, normals, uvs))| Part {
+                .map(|(mut materials, (triangles, normals, uvs))| Part {
                     uv_per_unit: uv_rate(&triangles, &uvs),
                     triangles,
                     normals,
                     uvs,
-                    material,
+                    material: materials.swap_remove(0),
                 })
                 .collect(),
             bounds,
+            skins,
         }
     }
 
@@ -251,8 +304,8 @@ impl<'a> Models<'a> {
     /// and only trying them tells you which. Whichever has a `.vmt` on the
     /// search path wins; if none does, the first is still returned so the
     /// material shows up as unresolved rather than vanishing.
-    fn material_of(&self, model: &vmdl::Model, index: i32) -> String {
-        let Some(info) = model.textures().get(index.max(0) as usize) else {
+    fn material_of(&self, model: &vmdl::Model, texture: usize) -> String {
+        let Some(info) = model.textures().get(texture) else {
             return String::new();
         };
         let name = info.name.trim_start_matches('/').to_ascii_lowercase();
@@ -429,6 +482,42 @@ mod tests {
                 part.material
             );
         }
+    }
+
+    /// INFRA's furnace places `watertreatment_tank_002` with skin 1, a rusted
+    /// texture; skin 0 is clean white paint. A skin the model lacks falls back
+    /// to the default, as Source draws it.
+    #[test]
+    fn a_skin_swaps_the_materials_and_keeps_the_geometry() {
+        let map = Path::new(
+            "/mnt/games/SteamLibrary/steamapps/common/infra/infra/pak02_dir.vpk:maps/infra_c4_m2_furnace.bsp",
+        );
+        if !Path::new("/mnt/games/SteamLibrary/steamapps/common/infra/infra/pak02_dir.vpk").exists()
+        {
+            return;
+        }
+        let map = crate::bsp::Map::load(map).unwrap();
+        let vfs = Vfs::for_map(&map.path, &[] as &[PathBuf]);
+        let mut models = Models::new(&vfs);
+        let path = "models/props_watertreatment/watertreatment_tank_002.mdl";
+        let clean = models.get(path).expect("the tank model");
+        let rusted = models.get_skin(path, 1).unwrap();
+        let tank = "models/props_watertreatment/watertreatment_tank_002";
+        assert!(clean.parts.iter().any(|p| p.material == tank));
+        assert!(
+            rusted
+                .parts
+                .iter()
+                .any(|p| p.material == format!("{tank}_skin1"))
+        );
+        assert!(rusted.parts.iter().all(|p| p.material != tank));
+        assert_eq!(clean.parts.len(), rusted.parts.len());
+        for (a, b) in clean.parts.iter().zip(&rusted.parts) {
+            assert_eq!(a.triangles, b.triangles);
+        }
+        assert!(Arc::ptr_eq(&models.get_skin(path, 99).unwrap(), &clean));
+        assert!(Arc::ptr_eq(&models.get_skin(path, -1).unwrap(), &clean));
+        assert!(Arc::ptr_eq(&models.get_skin(path, 1).unwrap(), &rusted));
     }
 
     #[test]

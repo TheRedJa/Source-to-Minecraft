@@ -15,6 +15,9 @@ Duplicate names are invalid after exact UTF-8 comparison.
 
 `manifest.json` is the only bootstrap entry and is reserved. Directory entries
 are unnecessary. Readers must use names, never ZIP entry order.
+Entries may be stored or deflated; the converter stores PNG entries, which are
+compressed already, and deflates the rest. Content IDs and the fingerprint
+cover entry bytes, not the ZIP encoding.
 
 ## 2. Canonical payloads
 
@@ -195,7 +198,10 @@ Model bytes live at `meshes/<content-id>.s2mesh`.
 Multiple model references may name the same content ID when their Source-model
 provenance or map-local material-slot arrays differ. References are uniquely
 sorted by `(content_id, source_model, materials)`; prop placement records select
-the reference index. The mesh payload still occurs only once.
+the reference index. The mesh payload still occurs only once. This is how a
+Source skin family is carried: props of one model wearing different skins share
+the mesh and each select a reference whose `materials` are that skin's. A skin
+the model does not have is exported as the default skin, as Source draws it.
 
 `maps/<map-id>/diagnostics.json` has format `src2mc-diagnostics`, version 1,
 and a canonically sorted `messages` array. Each message has severity `info`,

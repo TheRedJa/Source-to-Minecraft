@@ -312,7 +312,8 @@ mod tests {
 
     #[test]
     fn nocull_is_read_as_a_flag() {
-        let vmt = parse(r#""VertexlitGeneric" { "$basetexture" "a/b" "$alphatest" 1 "$nocull" 1 }"#);
+        let vmt =
+            parse(r#""VertexlitGeneric" { "$basetexture" "a/b" "$alphatest" 1 "$nocull" 1 }"#);
         assert!(vmt.flag("$nocull"));
         assert!(!parse(r#""x" { "$basetexture" "a/b" }"#).flag("$nocull"));
     }
