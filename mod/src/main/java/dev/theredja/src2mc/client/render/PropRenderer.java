@@ -147,7 +147,7 @@ public final class PropRenderer {
         lines.add(Component.literal("[src2mc] Prop renderer").withStyle(ChatFormatting.AQUA, ChatFormatting.BOLD));
         lines.add(statusLine("Status", renderingEnabled ? "ON" : "OFF", renderingEnabled ? ChatFormatting.GREEN : ChatFormatting.RED)
             .append(detail("  Roots " + active + "/" + ROOTS.size() + "  Batches " + AGGREGATES.size() + "  Built " + BUILT_PROPS.size())));
-        lines.add(statusLine("Render (last frame)", last.drawCalls() + " draws  " + formatMillions(last.triangles()) + " triangles  " + formatMs(last.renderMs()) + " ms", ChatFormatting.YELLOW)
+        lines.add(statusLine("Render (last frame)", last.drawCalls() + " draws  " + formatMillions(last.triangles()) + " triangles  " + formatMs(last.renderMs()), ChatFormatting.YELLOW)
             .append(detail("  PVS " + (CameraVisibility.row() != null ? "cluster " + CameraVisibility.cluster() + ", " + last.pvsRejected() + " rejected" : "off")
                 + "  shaderpack=" + (IrisCompat.shaderPackInUse() ? "on" : "off") + " shadow-pass/frame=" + shadowPassCallsLastFrame
                 + "  shadow draw set=" + shadowDrawnLast + "/" + shadowConsideredLast + " (too far " + shadowRejectedDistanceLast + ")")));
@@ -158,7 +158,22 @@ public final class PropRenderer {
                 + "  |  Queries " + occlusion.last().issued() + " issued, " + occlusion.pending() + " pending, " + occlusion.last().cameraInside() + " skipped (camera inside)")));
         lines.add(statusLine("120-frame average", occlusion.average().rejectedDraws() + " occlusion-rejected draws/frame", ChatFormatting.GOLD)
             .append(detail("  " + formatMillions(occlusion.average().rejectedTriangles()) + " triangles/frame saved"
-                + "  |  " + average.drawCalls() + " draws, " + formatMillions(average.triangles()) + " triangles, " + formatMs(average.renderMs()) + " ms render")));
+                + "  |  " + average.drawCalls() + " draws, " + formatMillions(average.triangles()) + " triangles, " + formatMs(average.renderMs()) + " render")));
+        DrawStats.Frame surfaces = MapSurfaceRenderer.frameStats();
+        lines.add(statusLine("Surfaces (last frame)", surfaces.draws() + " draws  " + formatMillions(surfaces.triangles()) + " triangles  "
+                + formatMs(surfaces.cpuMs()) + " CPU", ChatFormatting.YELLOW)
+            .append(detail("  avg " + String.format(java.util.Locale.ROOT, "%.0f", surfaces.averageDraws()) + " draws, " + formatMs(surfaces.averageCpuMs())
+                + "  |  frustum-rejected " + surfaces.frustumRejected() + ", PVS-rejected regions " + surfaces.pvsRejectedRegions()
+                + ", state switches " + surfaces.stateSwitches() + ", shadow " + formatMillions(surfaces.shadowTriangles()) + " triangles"
+                + (MapSurfaceRenderer.sortedDraws() ? "" : "  (draw order UNSORTED)")
+                + "  |  indexed " + (MapSurfaceRenderer.indexedMeshes() ? "on" : "off") + ", uploaded vertices "
+                + (PackedVertices.soupVertices == 0 ? "-" : String.format(java.util.Locale.ROOT, "%.0f%%", 100.0 * PackedVertices.uploadedVertices / PackedVertices.soupVertices))
+                + " of triangle corners")));
+        lines.add(statusLine("GPU time (120-frame avg)", GpuTimer.supported() ? "surfaces " + gpuMs(GpuTimer.Phase.SURFACES_OPAQUE)
+                + " + " + gpuMs(GpuTimer.Phase.SURFACES_TRANSLUCENT) + ", props " + gpuMs(GpuTimer.Phase.PROPS_OPAQUE) + " + " + gpuMs(GpuTimer.Phase.PROPS_TRANSLUCENT)
+                : "unsupported", ChatFormatting.GOLD)
+            .append(detail("  (opaque + translucent)  |  shadow pass: surfaces " + gpuMs(GpuTimer.Phase.SURFACES_SHADOW)
+                + ", props " + gpuMs(GpuTimer.Phase.PROPS_SHADOW) + "  |  prop root scan " + formatMs(average.rootScanMs()) + " avg")));
         lines.add(statusLine("Memory", "Props " + formatBytes(propVbo) + "  |  Atlas " + formatBytes(atlas.residentVramBytes()), ChatFormatting.LIGHT_PURPLE)
             .append(detail("  Meshes " + runtimeMeshes.ready() + " ready, " + runtimeMeshes.pending() + " loading")));
         lines.add(statusLine("Builds", REGISTERING.size() + " registering, " + SECTION_BUILDS.size() + " sections building", ChatFormatting.YELLOW)
@@ -189,7 +204,10 @@ public final class PropRenderer {
         shadowPassCallsSinceMainPass++;
         Minecraft minecraft = Minecraft.getInstance();
         if (minecraft.level == null || generationSequence < 0) return;
-        if (renderingEnabled) draw(event, Src2mc.bundles().active(), translucent, true);
+        if (!renderingEnabled) return;
+        GpuTimer.begin(GpuTimer.Phase.PROPS_SHADOW);
+        draw(event, Src2mc.bundles().active(), translucent, true);
+        GpuTimer.end(GpuTimer.Phase.PROPS_SHADOW);
     }
 
     private static void renderOpaque(RenderLevelStageEvent event) {
@@ -224,11 +242,17 @@ public final class PropRenderer {
         dispatchSectionBuilds(generation, minecraft);
         CameraVisibility.resolve(generation, minecraft);
         OCCLUSION.beginFrame(frame);
-        if (renderingEnabled) draw(event, generation, false, false);
+        if (!renderingEnabled) return;
+        GpuTimer.begin(GpuTimer.Phase.PROPS_OPAQUE);
+        draw(event, generation, false, false);
+        GpuTimer.end(GpuTimer.Phase.PROPS_OPAQUE);
     }
 
     private static void renderTranslucent(RenderLevelStageEvent event) {
-        if (Minecraft.getInstance().level != null && generationSequence >= 0 && renderingEnabled) draw(event, Src2mc.bundles().active(), true, false);
+        if (Minecraft.getInstance().level == null || generationSequence < 0 || !renderingEnabled) return;
+        GpuTimer.begin(GpuTimer.Phase.PROPS_TRANSLUCENT);
+        draw(event, Src2mc.bundles().active(), true, false);
+        GpuTimer.end(GpuTimer.Phase.PROPS_TRANSLUCENT);
     }
 
     /** @return the number of roots inspected, or -1 when this frame skipped the periodic recheck. */
@@ -481,6 +505,7 @@ public final class PropRenderer {
                 }
             }
         }
+        for (PackedVertices vertices : result.values()) vertices.index();
         return result;
     }
 
@@ -553,12 +578,12 @@ public final class PropRenderer {
     private static int floorSection(double coordinate) { return (int) Math.floor(coordinate / 16.0); }
 
     private static Mesh upload(SectionInput input, BlockPos origin, PackedVertices vertices) {
-        var uploaded = vertices.upload(MapSurfaceRenderer.neutralEntityId());
+        var uploaded = vertices.upload(MapSurfaceRenderer.neutralEntityId(), MapSurfaceRenderer.indexedMeshes());
         double[] b = vertices.bounds();
         AABB bounds = new AABB(b[0], b[1], b[2], b[3], b[4], b[5]).move(origin.getX(), origin.getY(), origin.getZ()).inflate(0.01);
         Contributor first = input.contributors.isEmpty() ? null : input.contributors.get(0);
         return new Mesh(first == null ? null : first.source.bundle(), first == null ? null : first.source.map().atlas(), uploaded.buffer(),
-            origin, bounds, (long) vertices.vertices() * 36L, vertices.triangles());
+            origin, bounds, uploaded.bytes(), vertices.triangles());
     }
 
     /** One sample per vertex, along the vertex's own normal. One value for the whole triangle is
@@ -632,8 +657,10 @@ public final class PropRenderer {
         if (shadowPass) shadowDrawn += visible.size();
         if (!shadowPass && !translucent) OCCLUSION.issue(queryCandidates, view, event.getModelViewMatrix(), event.getProjectionMatrix());
         if (translucent) visible.sort(Comparator.<Map.Entry<AggregateKey, Mesh>>comparingDouble(item -> -distanceSquared(item.getValue().bounds, camera)));
-        else visible.sort(Comparator.<Map.Entry<AggregateKey, Mesh>>comparingInt(item -> item.getKey().renderClass().ordinal())
-            .thenComparingInt(item -> item.getKey().page()));
+        // Nearest first within a render-state group, so the depth test rejects hidden pixels early.
+        else if (MapSurfaceRenderer.sortedDraws()) visible.sort(Comparator.<Map.Entry<AggregateKey, Mesh>>comparingInt(item -> item.getKey().renderClass().ordinal())
+            .thenComparingInt(item -> item.getKey().page())
+            .thenComparingDouble(item -> MapSurfaceRenderer.nearestDistanceSquared(item.getValue().bounds, camera)));
         int drawCalls = 0;
         long triangles = 0;
         RenderType activeType = null;
@@ -683,6 +710,7 @@ public final class PropRenderer {
     private static double distanceSquared(AABB bounds, net.minecraft.world.phys.Vec3 camera) { double x = bounds.getCenter().x - camera.x, y = bounds.getCenter().y - camera.y, z = bounds.getCenter().z - camera.z; return x * x + y * y + z * z; }
     private static long estimatedVboBytes() { return AGGREGATES.values().stream().mapToLong(mesh -> mesh.estimatedVboBytes).sum(); }
     private static String formatBytes(long bytes) { return String.format(java.util.Locale.ROOT, "%.1f MiB", bytes / (1024.0 * 1024.0)); }
+    private static String gpuMs(GpuTimer.Phase phase) { double ms = GpuTimer.averageMs(phase); return ms < 0 ? "-" : formatMs(ms); }
     private static String formatMs(double millis) { return String.format(java.util.Locale.ROOT, "%.2f ms", millis); }
     private static String formatMillions(long value) { return String.format(java.util.Locale.ROOT, "%.2fM", value / 1_000_000.0); }
     private static MutableComponent statusLine(String label, String value, ChatFormatting valueColor) {

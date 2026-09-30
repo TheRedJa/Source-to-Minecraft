@@ -112,6 +112,15 @@ public final class MapSurfaceRenderer {
      * type writes depth, so whichever translucent layer drew first hid every one behind it --
      * a glass prop behind a glass surface vanished. Kept as a toggle to compare by eye. */
     private static boolean translucentDepthWrite = false;
+    /** Whether opaque surfaces and props are drawn grouped by render state and nearest first, or in
+     * whatever order they are stored; a toggle so the frame-time effect can be compared. */
+    private static boolean sortedDraws = true;
+    /** Whether meshes go up as distinct vertices plus an index buffer rather than three fresh
+     * vertices per triangle; a toggle because Iris's per-triangle attributes are then shared. */
+    private static boolean indexedMeshes = true;
+    /** Draw-side counters for the main pass, latched each frame; see {@link #frameStats}. */
+    private static final DrawStats STATS = new DrawStats();
+    private static DrawStats.Frame lastStats = DrawStats.Frame.EMPTY;
     private static boolean frustumCulling = true;
     /** Shadow-caster cutoff in blocks. The shaderpack's own shadow-distance setting only culls
      * Sodium's terrain, never mod-owned geometry, so without this the whole map is rasterized into
@@ -257,6 +266,12 @@ public final class MapSurfaceRenderer {
         event.getDispatcher().register(literal("src2mc_translucent_depth")
             .then(literal("on").executes(context -> setTranslucentDepthWrite(context.getSource(), true)))
             .then(literal("off").executes(context -> setTranslucentDepthWrite(context.getSource(), false))));
+        event.getDispatcher().register(literal("src2mc_indexed")
+            .then(literal("on").executes(context -> setIndexedMeshes(context.getSource(), true)))
+            .then(literal("off").executes(context -> setIndexedMeshes(context.getSource(), false))));
+        event.getDispatcher().register(literal("src2mc_draw_order")
+            .then(literal("sorted").executes(context -> setSortedDraws(context.getSource(), true)))
+            .then(literal("unsorted").executes(context -> setSortedDraws(context.getSource(), false))));
         event.getDispatcher().register(literal("src2mc_cull")
             .then(literal("pvs").then(literal("on").executes(context -> setPvsCulling(context.getSource(), true)))
                 .then(literal("off").executes(context -> setPvsCulling(context.getSource(), false))))
@@ -299,6 +314,21 @@ public final class MapSurfaceRenderer {
     private static int setTranslucentDepthWrite(net.minecraft.commands.CommandSourceStack source, boolean value) {
         translucentDepthWrite = value;
         source.sendSuccess(() -> Component.literal("src2mc translucent depth write " + (value ? "on" : "off")), false);
+        return 1;
+    }
+
+    /** Rebuilds everything, since the layout is chosen when a mesh is uploaded. */
+    private static int setIndexedMeshes(net.minecraft.commands.CommandSourceStack source, boolean value) {
+        indexedMeshes = value;
+        PackedVertices.soupVertices = 0; PackedVertices.uploadedVertices = 0;
+        rebuildMeshes(source);
+        source.sendSuccess(() -> Component.literal("src2mc indexed meshes " + (value ? "on" : "off")), false);
+        return 1;
+    }
+
+    private static int setSortedDraws(net.minecraft.commands.CommandSourceStack source, boolean value) {
+        sortedDraws = value;
+        source.sendSuccess(() -> Component.literal("src2mc opaque draw order " + (value ? "sorted (state groups, nearest first)" : "unsorted")), false);
         return 1;
     }
 
@@ -649,6 +679,15 @@ public final class MapSurfaceRenderer {
     /** Shared with {@link PropRenderer}; see {@link #translucentDepthWrite}. */
     static boolean translucentDepthWrite() { return translucentDepthWrite; }
 
+    /** Shared with {@link PropRenderer}; see {@link #sortedDraws}. */
+    static boolean sortedDraws() { return sortedDraws; }
+
+    /** Shared with {@link PropRenderer}; see {@link #indexedMeshes}. */
+    static boolean indexedMeshes() { return indexedMeshes; }
+
+    /** The surface renderer's last finished main-pass frame. */
+    static DrawStats.Frame frameStats() { return lastStats; }
+
     /** Shared with {@link PropRenderer}: both renderers upload the same way and have to agree. */
     static boolean neutralEntityId() { return neutralEntityId; }
 
@@ -668,7 +707,9 @@ public final class MapSurfaceRenderer {
         shadowPassCallsSinceMainPass++;
         Minecraft minecraft = Minecraft.getInstance();
         if (minecraft.level == null || generationSequence < 0) return;
+        GpuTimer.begin(GpuTimer.Phase.SURFACES_SHADOW);
         draw(event, Src2mc.bundles().active(), translucent, true);
+        GpuTimer.end(GpuTimer.Phase.SURFACES_SHADOW);
     }
 
     private static void renderOpaque(RenderLevelStageEvent event) {
@@ -688,6 +729,8 @@ public final class MapSurfaceRenderer {
             placementSnapshot = placements;
         }
         frame++;
+        lastStats = STATS.latch(pvsRejectedRegions);
+        GpuTimer.endFrame();
         // PropRenderer draws later in this same event and shares this frame's copies.
         WorldSnapshot.SHARED.newFrame();
         PAGES.pump(frame);
@@ -732,7 +775,9 @@ public final class MapSurfaceRenderer {
         PAGES.pump(frame);
         PAGES.drainReadyPages();
 
+        GpuTimer.begin(GpuTimer.Phase.SURFACES_OPAQUE);
         draw(event, generation, false, false);
+        GpuTimer.end(GpuTimer.Phase.SURFACES_OPAQUE);
     }
 
     private record BuildCandidate(BundleManifest bundle, BundleMap map, RegionEntry entry, double distanceSquared) {}
@@ -834,42 +879,72 @@ public final class MapSurfaceRenderer {
     private static void renderTranslucent(RenderLevelStageEvent event) {
         Minecraft minecraft = Minecraft.getInstance();
         if (minecraft.level == null || generationSequence < 0) return;
+        GpuTimer.begin(GpuTimer.Phase.SURFACES_TRANSLUCENT);
         draw(event, Src2mc.bundles().active(), true, false);
+        GpuTimer.end(GpuTimer.Phase.SURFACES_TRANSLUCENT);
     }
 
     private static void draw(RenderLevelStageEvent event, BundleGeneration generation, boolean translucent, boolean shadowPass) {
+        long started = System.nanoTime();
         var camera = event.getCamera().getPosition();
-        var drawItems = MESHES.entrySet().stream()
-            .filter(item -> {
-                if (!shadowPass) return item.getValue().lastVisibleFrame == frame;
-                shadowConsidered++;
-                if (BUILT_REGIONS.containsKey(item.getKey().region)) return true;
-                shadowRejectedUnbuilt++;
-                return false;
-            })
-            .filter(item -> (item.getKey().renderClass == BundleMaterial.RenderClass.TRANSLUCENT) == translucent)
-            // No frustum test in the shadow pass: the frustum there is the sun's, and rejecting a
-            // mesh only keeps it out of the shadow map, which shows up as sunlight leaking through
-            // sealed geometry rather than as a hole the player can see.
-            .filter(item -> {
-                if (!shadowPass) return !frustumCulling || event.getFrustum().isVisible(item.getValue().bounds);
-                if (withinShadowDistance(item.getValue().bounds, camera)) return true;
-                shadowRejectedDistance++;
-                return false;
-            })
-            .sorted(translucent ? Comparator.<Map.Entry<MeshKey, Mesh>>comparingDouble(item -> -distanceSquared(item.getValue().bounds, camera)) : (left, right) -> 0)
-            .toList();
-        if (shadowPass) shadowDrawn += drawItems.size();
-        for (var item : drawItems) {
+        List<DrawItem> drawItems = new ArrayList<>();
+        for (var item : MESHES.entrySet()) {
+            MeshKey key = item.getKey();
             Mesh mesh = item.getValue();
-            ResourceLocation texture = PAGES.request(generation.sequence(), mesh.bundle, mesh.atlas, item.getKey().page, frame)
-                .orElseGet(PAGES::placeholderTexture);
-            RenderType renderType = translucent ? RenderType.entityTranslucent(texture)
-                : item.getKey().renderClass == BundleMaterial.RenderClass.SOLID ? RenderType.entitySolid(texture) : RenderType.entityCutout(texture);
-            renderType.setupRenderState();
-            // entityTranslucent writes depth, so the nearest translucent surface drawn first would
-            // hide translucent geometry behind it; keep the depth test but skip the write.
-            if (translucent && !translucentDepthWrite) RenderSystem.depthMask(false);
+            if ((key.renderClass == BundleMaterial.RenderClass.TRANSLUCENT) != translucent) continue;
+            if (shadowPass) {
+                shadowConsidered++;
+                if (!BUILT_REGIONS.containsKey(key.region)) { shadowRejectedUnbuilt++; continue; }
+                // No frustum test in the shadow pass: the frustum there is the sun's, and rejecting a
+                // mesh only keeps it out of the shadow map, which shows up as sunlight leaking through
+                // sealed geometry rather than as a hole the player can see.
+                if (!withinShadowDistance(mesh.bounds, camera)) { shadowRejectedDistance++; continue; }
+            } else {
+                if (mesh.lastVisibleFrame != frame) continue;
+                if (frustumCulling && !event.getFrustum().isVisible(mesh.bounds)) { STATS.frustumRejected++; continue; }
+            }
+            drawItems.add(new DrawItem(key, mesh, nearestDistanceSquared(mesh.bounds, camera)));
+        }
+        if (translucent) {
+            drawItems.sort(Comparator.comparingDouble(item -> -distanceSquared(item.mesh.bounds, camera)));
+        } else if (sortedDraws) {
+            // Grouped by render state so consecutive meshes share one setup, and nearest first within
+            // a group so the depth test rejects hidden pixels before the (shaderpack's) fragment
+            // shader runs on them.
+            drawItems.sort(Comparator.<DrawItem>comparingInt(item -> item.key.renderClass.ordinal())
+                .thenComparing(item -> item.mesh.bundle.fingerprint())
+                .thenComparingInt(item -> item.key.page)
+                .thenComparingDouble(DrawItem::distanceSquared));
+        }
+        if (shadowPass) shadowDrawn += drawItems.size();
+        boolean suppressDepthWrite = translucent && !translucentDepthWrite;
+        RenderType activeType = null;
+        Mesh activeMesh = null;
+        BundleMaterial.RenderClass activeClass = null;
+        int activePage = -1;
+        long triangles = 0;
+        for (DrawItem item : drawItems) {
+            Mesh mesh = item.mesh;
+            MeshKey key = item.key;
+            if (activeType == null || key.renderClass != activeClass || key.page != activePage
+                || mesh.atlas != activeMesh.atlas || !mesh.bundle.fingerprint().equals(activeMesh.bundle.fingerprint())) {
+                if (activeType != null) {
+                    activeType.clearRenderState();
+                    if (suppressDepthWrite) RenderSystem.depthMask(true);
+                }
+                ResourceLocation texture = PAGES.request(generation.sequence(), mesh.bundle, mesh.atlas, key.page, frame)
+                    .orElseGet(PAGES::placeholderTexture);
+                activeType = translucent ? RenderType.entityTranslucent(texture)
+                    : key.renderClass == BundleMaterial.RenderClass.SOLID ? RenderType.entitySolid(texture) : RenderType.entityCutout(texture);
+                activeType.setupRenderState();
+                // entityTranslucent writes depth, so the nearest translucent surface drawn first would
+                // hide translucent geometry behind it; keep the depth test but skip the write.
+                if (suppressDepthWrite) RenderSystem.depthMask(false);
+                activeMesh = mesh;
+                activeClass = key.renderClass;
+                activePage = key.page;
+                if (!shadowPass) STATS.stateSwitches++;
+            }
             Matrix4f modelView = new Matrix4f(event.getModelViewMatrix()).translate(
                 (float) (mesh.origin.getX() - camera.x),
                 (float) (mesh.origin.getY() - camera.y),
@@ -877,12 +952,32 @@ public final class MapSurfaceRenderer {
             mesh.buffer.bind();
             mesh.buffer.drawWithShader(modelView, event.getProjectionMatrix(),
                 translucent ? GameRenderer.getRendertypeEntityTranslucentShader()
-                    : item.getKey().renderClass == BundleMaterial.RenderClass.SOLID
+                    : key.renderClass == BundleMaterial.RenderClass.SOLID
                         ? GameRenderer.getRendertypeEntitySolidShader() : GameRenderer.getRendertypeEntityCutoutShader());
-            renderType.clearRenderState();
-            if (translucent && !translucentDepthWrite) RenderSystem.depthMask(true);
+            triangles += mesh.triangles;
+        }
+        if (activeType != null) {
+            activeType.clearRenderState();
+            if (suppressDepthWrite) RenderSystem.depthMask(true);
         }
         VertexBuffer.unbind();
+        if (shadowPass) {
+            STATS.shadowTriangles += triangles;
+        } else {
+            STATS.draws += drawItems.size();
+            STATS.triangles += triangles;
+            STATS.cpuNanos += System.nanoTime() - started;
+        }
+    }
+
+    private record DrawItem(MeshKey key, Mesh mesh, double distanceSquared) {}
+
+    /** Squared distance from the camera to the nearest point of {@code bounds}; 0 inside. */
+    static double nearestDistanceSquared(AABB bounds, net.minecraft.world.phys.Vec3 camera) {
+        double dx = Math.max(0, Math.max(bounds.minX - camera.x, camera.x - bounds.maxX));
+        double dy = Math.max(0, Math.max(bounds.minY - camera.y, camera.y - bounds.maxY));
+        double dz = Math.max(0, Math.max(bounds.minZ - camera.z, camera.z - bounds.maxZ));
+        return dx * dx + dy * dy + dz * dz;
     }
 
     private static void prefetchNearMeshes(BundleGeneration generation) {
@@ -982,6 +1077,7 @@ public final class MapSurfaceRenderer {
             }
         }
         if (occlusion != null) { result.occlusionTested = occlusion.tested; result.occlusionBlocked = occlusion.blocked; }
+        for (PackedVertices vertices : result.meshes.values()) vertices.index();
         return result;
     }
 
@@ -1044,8 +1140,12 @@ public final class MapSurfaceRenderer {
             return true;
         });
         build.meshes.forEach((pageClass, vertices) -> {
-            var uploaded = vertices.upload(neutralEntityId);
-            Mesh mesh = new Mesh(input.bundle, input.map.atlas(), uploaded.buffer(), origin, bounds, frame,
+            var uploaded = vertices.upload(neutralEntityId, indexedMeshes);
+            // The mesh's own vertices, not the whole region: a page class often fills a corner of it.
+            double[] b = vertices.bounds();
+            AABB meshBounds = b == null ? bounds
+                : new AABB(b[0], b[1], b[2], b[3], b[4], b[5]).move(origin.getX(), origin.getY(), origin.getZ()).inflate(0.01);
+            Mesh mesh = new Mesh(input.bundle, input.map.atlas(), uploaded.buffer(), origin, meshBounds, vertices.triangles(), frame,
                 input.bakeEpoch, input.bakeCovered, build.skyMin, build.skyMax, uploaded.vertexSize(), IrisCompat.shaderPackInUse());
             MESHES.put(new MeshKey(regionKey, pageClass.page, pageClass.renderClass), mesh);
             Mesh old = meshes.put(pageClass, mesh);
@@ -1327,15 +1427,16 @@ public final class MapSurfaceRenderer {
     private record PageClass(int page, BundleMaterial.RenderClass renderClass) {}
     private static final class Mesh implements AutoCloseable {
         final BundleManifest bundle; final AtlasIndex atlas; final VertexBuffer buffer; final BlockPos origin; final AABB bounds;
+        final long triangles;
         /** The light this mesh froze in, and where that light came from. */
         final long bakeEpoch; final boolean bakeCovered; final int skyMin; final int skyMax;
         /** The stride the buffer actually went to the GPU with, and whether a pack was in use
          * then: 36 is vanilla NEW_ENTITY, anything larger is Iris's extended entity format. */
         final int vertexSize; final boolean builtWithShaders;
         long lastVisibleFrame;
-        Mesh(BundleManifest bundle, AtlasIndex atlas, VertexBuffer buffer, BlockPos origin, AABB bounds, long frame,
+        Mesh(BundleManifest bundle, AtlasIndex atlas, VertexBuffer buffer, BlockPos origin, AABB bounds, long triangles, long frame,
              long bakeEpoch, boolean bakeCovered, int skyMin, int skyMax, int vertexSize, boolean builtWithShaders) {
-            this.bundle = bundle; this.atlas = atlas; this.buffer = buffer; this.origin = origin; this.bounds = bounds; this.lastVisibleFrame = frame;
+            this.bundle = bundle; this.atlas = atlas; this.buffer = buffer; this.origin = origin; this.bounds = bounds; this.triangles = triangles; this.lastVisibleFrame = frame;
             this.bakeEpoch = bakeEpoch; this.bakeCovered = bakeCovered; this.skyMin = skyMin; this.skyMax = skyMax;
             this.vertexSize = vertexSize; this.builtWithShaders = builtWithShaders;
         }

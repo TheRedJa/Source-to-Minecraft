@@ -1,13 +1,41 @@
 # src2mc implementation handoff
 
-Updated: 2026-09-30 (Europe/Berlin), DEV-0.13.0 (render culling fixes on top of
-DEV-0.12.0 prop skins and fast export)
+Updated: 2026-09-30 (Europe/Berlin), DEV-0.14.0 (render measurement and draw
+order; uncommitted)
 
 This document records the active implementation state and the empirical context
 needed to continue the work in a new session. `AGENTS.md` contains mandatory
 working rules. Durable requirements and design authority remain in
 `docs/mod-requirements.md`, `docs/decisions.md`, `docs/format.md`, and
 `mod/IMPLEMENTATION_PLAN.md`.
+
+**Render measurement, draw order, indexed meshes (DEV-0.14.0):**
+- `/src2mc_prop_status` (and its overlay) now has a surface line (draws,
+  triangles, CPU ms, frustum/PVS rejections, state switches, shadow triangles)
+  and a GPU line: GL_TIME_ELAPSED per phase (surfaces and props, opaque and
+  translucent, and the shadow pass), 120-frame averages (`GpuTimer`). The prop
+  root scan's average cost is shown too.
+- Surface meshes are frustum-tested with their own vertex bounds, not the whole
+  64-block region box.
+- Opaque surfaces and props are drawn grouped by render state and nearest first
+  inside a group (early depth rejection); surfaces no longer set up and clear
+  render state per mesh. `/src2mc_draw_order sorted|unsorted` to A/B.
+- First numbers (INFRA, Photon, 2026-09-30): frame 20 ms; GPU surfaces 1.2 ms
+  opaque, props 6.1 ms opaque + 0.5 translucent, shadow pass surfaces 0.9 ms and
+  props 6.8 ms. About 15 ms of the 20 are ours, almost all props. Sorted versus
+  unsorted draw order made no difference, and the shadow pass (cheap fragments)
+  costs as much as the main pass, so props are vertex-bound, not fill-bound.
+- Hence indexed meshes (`/src2mc_indexed on|off`, default on, rebuilds all):
+  `PackedVertices.index()` finds distinct vertices on the worker; upload still
+  writes by triangle (Iris fills its extra attributes per triangle), then copies
+  each distinct vertex's first occurrence and uploads a real index buffer. The
+  status line shows uploaded vertices as a share of triangle corners. Shared
+  vertices keep their first triangle's Iris tangent and mid-texcoord; user saw
+  no visual change.
+- Indexed result, user-measured 2026-09-30 at the same spot: frame 20 ms to
+  14-16 ms (15 avg). GPU props 6.1 to 4.1 ms, prop shadow 6.8 to 4.7 ms,
+  surfaces 1.2 to 1.0 ms, surface shadow 0.9 to 0.6 ms; prop VRAM 721 to
+  335 MiB; 41% of triangle corners uploaded. Next lever: the prop shadow pass.
 
 **Render culling fixes (DEV-0.13.0):** user-confirmed in game 2026-09-30: no
 flicker, no pop-in, frame times steady at 20-22 ms. A review of the
