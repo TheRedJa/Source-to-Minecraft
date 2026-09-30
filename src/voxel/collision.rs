@@ -702,6 +702,32 @@ pub fn compute(sources: &Sources) -> CellCollision {
 /// sixteenth thick, which is solid to walk into from any side and keeps a
 /// railing's gaps and a catwalk's grating open where the mesh has them.
 pub fn shell_volume(triangles: &[[Vec3; 3]]) -> HashMap<IVec3, SubCells> {
+    // A big prop is thousands of triangles; chunks of them fill cells in
+    // parallel and the cells are unioned, which is order-independent.
+    triangles
+        .par_chunks(256)
+        .map(shell_volume_serial)
+        .reduce(HashMap::new, |mut a, b| {
+            if a.len() < b.len() {
+                return merge_cells(b, a);
+            }
+            merge_cells(std::mem::take(&mut a), b)
+        })
+}
+
+fn merge_cells(
+    mut into: HashMap<IVec3, SubCells>,
+    from: HashMap<IVec3, SubCells>,
+) -> HashMap<IVec3, SubCells> {
+    for (cell, bits) in from {
+        into.entry(cell)
+            .or_insert_with(SubCells::empty)
+            .union(&bits);
+    }
+    into
+}
+
+fn shell_volume_serial(triangles: &[[Vec3; 3]]) -> HashMap<IVec3, SubCells> {
     let scale = f64::from(STEPS);
     let mut out: HashMap<IVec3, SubCells> = HashMap::new();
     for [a, b, c] in triangles {
@@ -716,25 +742,21 @@ pub fn shell_volume(triangles: &[[Vec3; 3]]) -> HashMap<IVec3, SubCells> {
         let lo: [i32; 3] = std::array::from_fn(|i| (bounds.min.axis(i) + EPSILON).floor() as i32);
         let hi: [i32; 3] =
             std::array::from_fn(|i| ((bounds.max.axis(i) - EPSILON).floor() as i32).max(lo[i]));
-        for x in lo[0]..=hi[0] {
-            for y in lo[1]..=hi[1] {
-                for z in lo[2]..=hi[2] {
-                    if !crate::voxel::mesh::triangle_overlaps_voxel(&fine, [x, y, z]) {
-                        continue;
-                    }
-                    let cell = [
-                        x.div_euclid(STEPS),
-                        y.div_euclid(STEPS),
-                        z.div_euclid(STEPS),
-                    ];
-                    out.entry(cell).or_insert_with(SubCells::empty).set(
-                        x.rem_euclid(STEPS),
-                        y.rem_euclid(STEPS),
-                        z.rem_euclid(STEPS),
-                    );
-                }
+        crate::voxel::mesh::plane_candidates(&fine, lo, hi, |[x, y, z]| {
+            if !crate::voxel::mesh::triangle_overlaps_voxel(&fine, [x, y, z]) {
+                return;
             }
-        }
+            let cell = [
+                x.div_euclid(STEPS),
+                y.div_euclid(STEPS),
+                z.div_euclid(STEPS),
+            ];
+            out.entry(cell).or_insert_with(SubCells::empty).set(
+                x.rem_euclid(STEPS),
+                y.rem_euclid(STEPS),
+                z.rem_euclid(STEPS),
+            );
+        });
     }
     out
 }

@@ -128,7 +128,7 @@ pub fn report(map: &Map, config: &crate::config::Config) -> TextureReport {
         let mut models = crate::source::mdl::Models::new(&vfs);
         let mut seen: Vec<String> = Vec::new();
         for prop in crate::bsp::props::extract(map) {
-            let Some(model) = models.get(&prop.model) else {
+            let Some(model) = models.get_skin(&prop.model, prop.skin) else {
                 continue;
             };
             for part in &model.parts {

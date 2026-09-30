@@ -79,11 +79,13 @@ pub fn from_conversion(
         .bounds()
         .context("mod export produced an empty map")?;
     let extracted = crate::source::extract::extract_mod_props(map, config);
+    crate::timing::mark("export: load prop models");
     let mut collision = conversion.collision.clone();
     let (mut solid_props, mut prop_cells) = (0, 0);
     if let Some(collision) = collision.as_mut() {
         (solid_props, prop_cells) = add_prop_collision(config, conversion, &extracted, collision);
     }
+    crate::timing::mark("export: prop collision");
     // Carriers are blocks too, and may sit a cell outside the grid: the anchor
     // layer below the map must stay free of them.
     for cell in collision.iter().flat_map(|c| &c.carriers) {
@@ -121,6 +123,7 @@ pub fn from_conversion(
     if pvs_index.is_some() {
         insert_surface_sections(&conversion.fragments, &mut pvs_sections);
     }
+    crate::timing::mark("export: PVS index");
     // Model UVs are normalized sheet coordinates. Preserve enough pixels for
     // the largest world-space use of each sheet; otherwise model-only
     // materials never enter the atlas and every prop silently becomes a
@@ -139,6 +142,7 @@ pub fn from_conversion(
     }
     let (mut materials, textures, face_material_ids, prop_bucket_ids) =
         extract_materials(map, config, &prop_texture_spans, &conversion.fragments);
+    crate::timing::mark("export: materials and textures");
     let faces = conversion
         .fragments
         .iter()
@@ -155,9 +159,11 @@ pub fn from_conversion(
                 ids.entry(m.source_material.clone()).or_insert(i as u32);
                 ids
             });
-    let mut model_by_path: BTreeMap<String, (String, Vec<u32>, Vec<u8>)> = BTreeMap::new();
+    // Keyed by skin as well: one mesh, but each skin its own material slots.
+    let mut model_by_path: BTreeMap<(String, i32), (String, Vec<u32>, Vec<u8>)> = BTreeMap::new();
     for item in &extracted {
-        if model_by_path.contains_key(&item.prop.model) {
+        let key = (item.prop.model.clone(), item.prop.skin);
+        if model_by_path.contains_key(&key) {
             continue;
         }
         let (mesh, slots) = crate::output::mesh::from_source_model(&item.model, UNITS_PER_BLOCK)?;
@@ -186,8 +192,9 @@ pub fn from_conversion(
             .collect::<Vec<_>>();
         let bytes = crate::output::mesh::encode(&mesh)?;
         let id = bundle::content_id(&bytes);
-        model_by_path.insert(item.prop.model.clone(), (id, slot_ids, bytes));
+        model_by_path.insert(key, (id, slot_ids, bytes));
     }
+    crate::timing::mark("export: prop meshes");
     // Props go exactly where the map puts them. They used to be settled onto
     // the voxel floor and nudged out of voxel walls, which undid the grid's
     // rounding while surfaces were snapped to it; now surfaces are exact, the
@@ -229,7 +236,8 @@ pub fn from_conversion(
             cell_max[axis] = cell_max[axis].max(root_cell[axis]);
             cell_min[axis] = cell_min[axis].min(root_cell[axis]);
         }
-        let (model_content_id, slots, _) = &model_by_path[&item.prop.model];
+        let (model_content_id, slots, _) =
+            &model_by_path[&(item.prop.model.clone(), item.prop.skin)];
         let origin = conversion.transform.to_block_space(item.prop.origin);
         props.push(Prop {
             source_ordinal: item.source_ordinal,
@@ -307,9 +315,10 @@ pub fn from_conversion(
             context,
         });
     }
+    crate::timing::mark("export: prop roots and diagnostics");
     let models = model_by_path
         .into_iter()
-        .map(|(source_model, (_, materials, bytes))| ModelAsset {
+        .map(|((source_model, _), (_, materials, bytes))| ModelAsset {
             source_model,
             bytes,
             materials,
@@ -364,6 +373,7 @@ pub fn from_conversion(
         }
         None => None,
     };
+    crate::timing::mark("export: PVS and collision encoding");
     let occlusion = (!light_blockers.is_empty())
         .then(|| crate::output::occlusion::encode(&light_blockers))
         .transpose()
@@ -426,6 +436,7 @@ fn add_prop_collision(
             Some(shell_volume(&triangles))
         })
         .collect();
+    crate::timing::mark("  prop collision: shell volumes");
     let solid = volumes.len();
     let mut cells: std::collections::HashMap<IVec3, SubCells> = std::collections::HashMap::new();
     for volume in volumes {
@@ -436,7 +447,9 @@ fn add_prop_collision(
                 .union(&bits);
         }
     }
+    crate::timing::mark("  prop collision: merge");
     let added = crate::voxel::collision::add_props(collision, &conversion.grid, cells);
+    crate::timing::mark("  prop collision: add to table");
     (solid, added)
 }
 
@@ -480,9 +493,77 @@ fn extract_materials(
     Vec<u32>,
     BTreeMap<String, u32>,
 ) {
+    use rayon::prelude::*;
     let vfs = crate::source::vfs::Vfs::for_map(&map.path, &config.materials.game_dir_paths());
     let resolver = crate::source::vmt::Materials::new(&vfs, Some(&map.bsp.pack));
     let mut decoder = crate::source::vtf::Textures::new(&vfs, config.materials.texture_size);
+    // Decoding, resampling and encoding every texture is most of the work, and
+    // which textures are wanted does not depend on whether any of them decode.
+    // So a first pass only records the requests, they are all produced in
+    // parallel, and the real pass reads the results.
+    let mut requests: BTreeSet<TextureRequest> = BTreeSet::new();
+    let _ = assign_materials(
+        map,
+        prop_texture_spans,
+        surfaces,
+        &resolver,
+        &mut decoder,
+        &mut |request| {
+            requests.insert(request);
+            None
+        },
+    );
+    let produced: BTreeMap<TextureRequest, Option<(Vec<u8>, image::RgbaImage)>> = requests
+        .into_par_iter()
+        .map(|request| {
+            let image = decoder
+                .resized(&request.texture, request.output, request.alpha_test)
+                .and_then(|mut image| {
+                    if request.opaque {
+                        crate::source::vtf::force_opaque(&mut image);
+                    }
+                    let bytes = crate::source::vtf::to_png(&image).ok()?;
+                    Some((bytes, image))
+                });
+            (request, image)
+        })
+        .collect();
+    assign_materials(
+        map,
+        prop_texture_spans,
+        surfaces,
+        &resolver,
+        &mut decoder,
+        &mut |request| produced.get(&request).cloned().flatten(),
+    )
+}
+
+/// One texture as a material needs it: the file, the size, and how its alpha
+/// is treated.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct TextureRequest {
+    texture: String,
+    output: [u32; 2],
+    alpha_test: bool,
+    opaque: bool,
+}
+
+/// Give every map and prop material its reference and texture, taking each
+/// texture's PNG bytes and image from `produce`.
+#[allow(clippy::type_complexity)]
+fn assign_materials(
+    map: &crate::bsp::Map,
+    prop_texture_spans: &BTreeMap<String, f64>,
+    surfaces: &[crate::voxel::fragments::Fragment],
+    resolver: &crate::source::vmt::Materials,
+    decoder: &mut crate::source::vtf::Textures,
+    produce: &mut dyn FnMut(TextureRequest) -> Option<(Vec<u8>, image::RgbaImage)>,
+) -> (
+    Vec<metadata::MaterialReference>,
+    Vec<TextureAsset>,
+    Vec<u32>,
+    BTreeMap<String, u32>,
+) {
     let mut assets_by_id = BTreeMap::new();
     let face_rates = per_face_rates(surfaces);
     let mut faces_by_material: Vec<Vec<usize>> = vec![Vec::new(); map.materials().len()];
@@ -561,17 +642,12 @@ fn extract_materials(
         let mut assigned: BTreeSet<usize> = BTreeSet::new();
         let mut first_bucket_material_index: Option<u32> = None;
         for (output, contribs) in buckets {
-            let Some(mut image) = decoder.resized(
-                &material_assets.base_texture,
+            let Some((bytes, image)) = produce(TextureRequest {
+                texture: material_assets.base_texture.clone(),
                 output,
-                material_assets.alpha_test,
-            ) else {
-                continue;
-            };
-            if !material_assets.alpha_test && !material_assets.translucent {
-                crate::source::vtf::force_opaque(&mut image);
-            }
-            let Ok(bytes) = crate::source::vtf::to_png(&image) else {
+                alpha_test: material_assets.alpha_test,
+                opaque: !material_assets.alpha_test && !material_assets.translucent,
+            }) else {
                 continue;
             };
             let content_id = bundle::content_id(&bytes);
@@ -653,18 +729,12 @@ fn extract_materials(
             materials.push(reference);
             continue;
         };
-        let Some(mut image) = decoder.resized(
-            &material_assets.base_texture,
-            decision.output,
-            material_assets.alpha_test,
-        ) else {
-            materials.push(reference);
-            continue;
-        };
-        if !material_assets.alpha_test && !material_assets.translucent {
-            crate::source::vtf::force_opaque(&mut image);
-        }
-        let Ok(bytes) = crate::source::vtf::to_png(&image) else {
+        let Some((bytes, image)) = produce(TextureRequest {
+            texture: material_assets.base_texture.clone(),
+            output: decision.output,
+            alpha_test: material_assets.alpha_test,
+            opaque: !material_assets.alpha_test && !material_assets.translucent,
+        }) else {
             materials.push(reference);
             continue;
         };
@@ -785,6 +855,7 @@ pub fn write_campaign(
         }
     }
     let atlas_path = (!atlas_assets.is_empty()).then_some("atlas.json".to_string());
+    crate::timing::mark("  write: gather textures");
     if atlas_path.is_some() {
         let logical = atlas_assets
             .iter()
@@ -800,14 +871,31 @@ pub fn write_campaign(
             .map(|(content_id, image)| atlas::ImageAsset { content_id, image })
             .collect::<Vec<_>>();
         let pages = atlas::build_pages(&layout, &images)?;
-        let mut page_meta = Vec::with_capacity(pages.len());
-        for (page, images) in pages.into_iter().enumerate() {
-            let mut mips = Vec::with_capacity(images.mips.len());
-            for (level, image) in images.mips.into_iter().enumerate() {
-                let width = image.width();
-                let height = image.height();
-                let content_id =
-                    archive.add_content("atlas", "png", crate::source::vtf::to_png(&image)?)?;
+        crate::timing::mark("  write: pack atlas pages");
+        // Encoded in parallel, added in page and level order.
+        use rayon::prelude::*;
+        let encoded: Vec<Vec<Result<(u32, u32, Vec<u8>)>>> = pages
+            .par_iter()
+            .map(|images| {
+                images
+                    .mips
+                    .par_iter()
+                    .map(|image| {
+                        Ok((
+                            image.width(),
+                            image.height(),
+                            crate::source::vtf::to_png(image)?,
+                        ))
+                    })
+                    .collect()
+            })
+            .collect();
+        let mut page_meta = Vec::with_capacity(encoded.len());
+        for (page, images) in encoded.into_iter().enumerate() {
+            let mut mips = Vec::with_capacity(images.len());
+            for (level, image) in images.into_iter().enumerate() {
+                let (width, height, png) = image?;
+                let content_id = archive.add_content("atlas", "png", png)?;
                 mips.push(metadata::AtlasMip {
                     level: level as u8,
                     content_id,
@@ -858,6 +946,7 @@ pub fn write_campaign(
         )?;
     }
 
+    crate::timing::mark("  write: encode atlas PNGs");
     for map in maps {
         bundle::validate_id(&map.map_id, "map")?;
         let prefix = format!("maps/{}", map.map_id);
@@ -1016,12 +1105,14 @@ pub fn write_campaign(
         )?;
         schematic_outputs.push(schematic_path);
     }
+    crate::timing::mark("  write: map tables and schematics");
     archive.add(
         metadata::CAMPAIGN_PATH,
         metadata::Campaign::with_atlas(campaign_id, atlas_path, campaign_maps)?.encode()?,
     )?;
     let bundle_path = out.join(format!("{campaign_id}.src2mc"));
     let manifest = archive.write(&bundle_path, campaign_id)?;
+    crate::timing::mark("  write: zip bundle");
     Ok(WrittenCampaign {
         bundle: bundle_path,
         schematics: schematic_outputs,

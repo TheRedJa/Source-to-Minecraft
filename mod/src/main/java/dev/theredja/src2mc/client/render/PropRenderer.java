@@ -2,6 +2,7 @@ package dev.theredja.src2mc.client.render;
 
 import static net.minecraft.commands.Commands.literal;
 
+import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.blaze3d.vertex.VertexBuffer;
 import dev.theredja.src2mc.Src2mc;
 import dev.theredja.src2mc.bundle.AtlasIndex;
@@ -154,7 +155,7 @@ public final class PropRenderer {
         ChatFormatting occlusionColor = !occlusion.enabled() ? ChatFormatting.RED : occlusion.supported() ? ChatFormatting.GREEN : ChatFormatting.RED;
         lines.add(statusLine("GPU occlusion", occlusionState, occlusionColor)
             .append(detail("  Last: " + occlusion.last().rejectedDraws() + " draws rejected, " + formatMillions(occlusion.last().rejectedTriangles()) + " triangles saved"
-                + "  |  Queries " + occlusion.last().issued() + " issued, " + occlusion.pending() + " pending")));
+                + "  |  Queries " + occlusion.last().issued() + " issued, " + occlusion.pending() + " pending, " + occlusion.last().cameraInside() + " skipped (camera inside)")));
         lines.add(statusLine("120-frame average", occlusion.average().rejectedDraws() + " occlusion-rejected draws/frame", ChatFormatting.GOLD)
             .append(detail("  " + formatMillions(occlusion.average().rejectedTriangles()) + " triangles/frame saved"
                 + "  |  " + average.drawCalls() + " draws, " + formatMillions(average.triangles()) + " triangles, " + formatMs(average.renderMs()) + " ms render")));
@@ -542,7 +543,8 @@ public final class PropRenderer {
         double maxY = Math.max(triangle.a().y(), Math.max(triangle.b().y(), triangle.c().y()));
         double maxZ = Math.max(triangle.a().z(), Math.max(triangle.b().z(), triangle.c().z()));
         int fromX = floorSection(minX), fromY = floorSection(minY), fromZ = floorSection(minZ);
-        int toX = floorSection(maxX - 1.0e-8), toY = floorSection(maxY - 1.0e-8), toZ = floorSection(maxZ - 1.0e-8);
+        // Clamped so a triangle lying exactly on a section plane still lands in one section.
+        int toX = Math.max(fromX, floorSection(maxX - 1.0e-8)), toY = Math.max(fromY, floorSection(maxY - 1.0e-8)), toZ = Math.max(fromZ, floorSection(maxZ - 1.0e-8));
         List<Section> result = new ArrayList<>();
         for (int x = fromX; x <= toX; x++) for (int y = fromY; y <= toY; y++) for (int z = fromZ; z <= toZ; z++) result.add(new Section(x, y, z));
         return result;
@@ -619,20 +621,24 @@ public final class PropRenderer {
                 shadowConsidered++;
                 if (!MapSurfaceRenderer.withinShadowDistance(mesh.bounds, camera)) { shadowRejectedDistance++; continue; }
             } else if (MapSurfaceRenderer.frustumCulling() && !event.getFrustum().isVisible(mesh.bounds)) continue;
-            if (!shadowPass) {
+            // Translucent props draw at AFTER_PARTICLES, when the depth buffer already holds glass,
+            // water, entities and particles; a query there would cull props behind any of them.
+            if (!shadowPass && !translucent) {
                 queryCandidates.add(new OcclusionCuller.Candidate<>(key, mesh.bounds, mesh.triangles));
                 if (OCCLUSION.shouldCull(key, mesh.bounds, view, mesh.triangles)) continue;
             }
             visible.add(Map.entry(key, mesh));
         }
         if (shadowPass) shadowDrawn += visible.size();
-        if (!shadowPass) OCCLUSION.issue(queryCandidates, view, event.getModelViewMatrix(), event.getProjectionMatrix());
+        if (!shadowPass && !translucent) OCCLUSION.issue(queryCandidates, view, event.getModelViewMatrix(), event.getProjectionMatrix());
         if (translucent) visible.sort(Comparator.<Map.Entry<AggregateKey, Mesh>>comparingDouble(item -> -distanceSquared(item.getValue().bounds, camera)));
         else visible.sort(Comparator.<Map.Entry<AggregateKey, Mesh>>comparingInt(item -> item.getKey().renderClass().ordinal())
             .thenComparingInt(item -> item.getKey().page()));
         int drawCalls = 0;
         long triangles = 0;
         RenderType activeType = null;
+        // entityTranslucent writes depth, which would reject a translucent prop behind another translucent layer.
+        boolean suppressDepthWrite = translucent && !MapSurfaceRenderer.translucentDepthWrite();
         BundleMaterial.RenderClass activeClass = null;
         int activePage = -1;
         String activeFingerprint = null;
@@ -643,10 +649,14 @@ public final class PropRenderer {
             // Consecutive aggregates sharing bundle, atlas, page, and class reuse one render state.
             if (activeType == null || key.renderClass() != activeClass || key.page() != activePage
                 || !activeFingerprint.equals(mesh.bundle.fingerprint()) || activeAtlas != mesh.atlas) {
-                if (activeType != null) activeType.clearRenderState();
+                if (activeType != null) {
+                    activeType.clearRenderState();
+                    if (suppressDepthWrite) RenderSystem.depthMask(true);
+                }
                 var texture = MapSurfaceRenderer.atlasPages().request(generation.sequence(), mesh.bundle, mesh.atlas, key.page(), frame).orElseGet(MapSurfaceRenderer.atlasPages()::placeholderTexture);
                 activeType = translucent ? RenderType.entityTranslucent(texture) : key.renderClass() == BundleMaterial.RenderClass.SOLID ? RenderType.entitySolid(texture) : RenderType.entityCutout(texture);
                 activeType.setupRenderState();
+                if (suppressDepthWrite) RenderSystem.depthMask(false);
                 activeClass = key.renderClass();
                 activePage = key.page();
                 activeFingerprint = mesh.bundle.fingerprint();
@@ -658,7 +668,10 @@ public final class PropRenderer {
             drawCalls++;
             triangles += mesh.triangles;
         }
-        if (activeType != null) activeType.clearRenderState();
+        if (activeType != null) {
+            activeType.clearRenderState();
+            if (suppressDepthWrite) RenderSystem.depthMask(true);
+        }
         VertexBuffer.unbind();
         PERF.add(PropRenderPerf.M_VISIBLE_AGGREGATES, drawCalls);
         PERF.add(PropRenderPerf.M_DRAW_CALLS, drawCalls);

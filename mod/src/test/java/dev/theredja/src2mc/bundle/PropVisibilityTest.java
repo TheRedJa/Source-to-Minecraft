@@ -38,6 +38,23 @@ final class PropVisibilityTest {
     }
 
     @Test
+    void clusterAtResolvesTheTruePositionNotTheBlockCorner() {
+        PropVisibility.Node[] nodes = {new PropVisibility.Node(1, 0, 0, 16.5f, new int[]{-2, -1})};
+        var table = new PropVisibility(2, nodes, 0, new byte[][]{{1}, {2}}, Map.of());
+        // Both points share the block corner x=16, but lie on opposite sides of the plane.
+        assertEquals(0, table.clusterAt(16.2, 3.7, 0.4));
+        assertEquals(1, table.clusterAt(16.8, 3.7, 0.4));
+    }
+
+    @Test
+    void clusterAtFailsOpenOnASplitPlane() {
+        var table = table();
+        assertEquals(-1, table.clusterAt(15.5, 0, 0));
+        assertEquals(-1, table.clusterAt(15.5005, 0, 0));
+        assertEquals(-1, table.clusterAt(8, 15.5, 8));
+    }
+
+    @Test
     void visibleFailsOpenForMissingSectionsAndEmptySets() {
         var table = table();
         byte[] row = table.row(1);

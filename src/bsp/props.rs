@@ -25,6 +25,8 @@ pub struct Prop {
     pub classname: String,
     /// Source's `solid`: [`SOLID_NONE`], [`SOLID_BBOX`] or [`SOLID_VPHYSICS`].
     pub solid: u8,
+    /// The model's skin family to wear; 0 is the default.
+    pub skin: i32,
 }
 
 /// Not solid at all; the player walks through it in the game.
@@ -98,6 +100,7 @@ pub fn extract(map: &crate::bsp::Map) -> Vec<Prop> {
                 scale: f64::from(prop.scale),
                 classname: "prop_static".to_string(),
                 solid: prop.solid,
+                skin: prop.skin,
             })
         })
         .collect()
@@ -127,6 +130,7 @@ pub fn extract_entities(bsp: &vbsp::Bsp) -> Vec<Prop> {
             let mut classname = String::new();
             // The engine's default for every model entity that leaves it out.
             let mut solid = SOLID_VPHYSICS;
+            let mut skin = 0;
             for (key, value) in raw.properties() {
                 match key {
                     "model" => model = Some(value.to_string()),
@@ -134,6 +138,7 @@ pub fn extract_entities(bsp: &vbsp::Bsp) -> Vec<Prop> {
                     "origin" => origin = triple(value),
                     "angles" => angles = triple(value).unwrap_or([0.0; 3]),
                     "solid" => solid = value.trim().parse().unwrap_or(SOLID_VPHYSICS),
+                    "skin" => skin = value.trim().parse().unwrap_or(0),
                     // Two spellings, one meaning; whichever is present wins.
                     "uniformscale" | "modelscale" => {
                         scale = value.parse().ok().filter(|s| *s > 0.0).unwrap_or(1.0)
@@ -153,6 +158,7 @@ pub fn extract_entities(bsp: &vbsp::Bsp) -> Vec<Prop> {
                 scale,
                 classname,
                 solid,
+                skin,
             })
         })
         .collect()
@@ -177,6 +183,7 @@ mod tests {
             scale: 1.0,
             classname: "prop_static".into(),
             solid: SOLID_VPHYSICS,
+            skin: 0,
         }
     }
 

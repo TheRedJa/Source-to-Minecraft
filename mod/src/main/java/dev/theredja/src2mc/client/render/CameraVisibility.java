@@ -10,7 +10,8 @@ import net.minecraft.core.BlockPos;
 
 /**
  * Resolves which map placement the camera is currently inside and that
- * placement's PVS row/cluster, once per camera block move. Shared by every
+ * placement's PVS row/cluster. The placement is looked up once per camera block move; the
+ * cluster is walked from the eye's exact position whenever it moves. Shared by every
  * mod-owned renderer that wants to reject sections/props/faces the current
  * BSP leaf can't see; the resolution itself is placement-level, not tied to
  * props or surfaces specifically.
@@ -27,31 +28,45 @@ final class CameraVisibility {
     private static int cameraX = Integer.MIN_VALUE;
     private static int cameraY = Integer.MIN_VALUE;
     private static int cameraZ = Integer.MIN_VALUE;
+    /** Placement and table for the cached camera block; the cluster is re-resolved from the eye. */
+    private static MapPlacement blockPlacement;
+    private static PropVisibility blockTable;
+    private static double eyeX = Double.NaN;
+    private static double eyeY = Double.NaN;
+    private static double eyeZ = Double.NaN;
 
     private CameraVisibility() {}
 
     static void resolve(BundleGeneration generation, Minecraft minecraft) {
         var camera = minecraft.gameRenderer.getMainCamera().getPosition();
+        if (camera.x == eyeX && camera.y == eyeY && camera.z == eyeZ) return;
+        eyeX = camera.x; eyeY = camera.y; eyeZ = camera.z;
         BlockPos cameraBlock = BlockPos.containing(camera.x, camera.y, camera.z);
-        if (cameraBlock.getX() == cameraX && cameraBlock.getY() == cameraY && cameraBlock.getZ() == cameraZ) return;
-        cameraX = cameraBlock.getX(); cameraY = cameraBlock.getY(); cameraZ = cameraBlock.getZ();
+        if (cameraBlock.getX() != cameraX || cameraBlock.getY() != cameraY || cameraBlock.getZ() != cameraZ) {
+            cameraX = cameraBlock.getX(); cameraY = cameraBlock.getY(); cameraZ = cameraBlock.getZ();
+            blockPlacement = PlacementNetwork.clientIndex(minecraft.level.dimension().location()).at(cameraBlock).orElse(null);
+            BundleMap map = blockPlacement == null ? null
+                : generation.findMap(blockPlacement.campaignId(), blockPlacement.mapId()).orElse(null);
+            blockTable = map == null ? null : map.pvs();
+        }
         table = null; placement = null; row = null; cluster = -1;
-        var resolvedPlacement = PlacementNetwork.clientIndex(minecraft.level.dimension().location()).at(cameraBlock).orElse(null);
-        if (resolvedPlacement == null) return;
-        BundleMap map = generation.findMap(resolvedPlacement.campaignId(), resolvedPlacement.mapId()).orElse(null);
-        PropVisibility resolvedTable = map == null ? null : map.pvs();
-        if (resolvedTable == null) return;
-        BlockPos local = resolvedPlacement.toLocal(cameraBlock);
-        int resolvedCluster = resolvedTable.clusterAt(local.getX(), local.getY(), local.getZ());
+        if (blockPlacement == null || blockTable == null) return;
+        // BSP planes are in continuous map-local block coordinates, so walk the tree with the
+        // eye itself: the block corner can sit in a neighbouring leaf or exactly on a plane.
+        BlockPos translation = blockPlacement.translation();
+        int resolvedCluster = blockTable.clusterAt(camera.x - translation.getX(),
+            camera.y - translation.getY(), camera.z - translation.getZ());
         if (resolvedCluster < 0) return;
-        byte[] resolvedRow = resolvedTable.row(resolvedCluster);
+        byte[] resolvedRow = blockTable.row(resolvedCluster);
         if (resolvedRow == null) return;
-        table = resolvedTable; placement = resolvedPlacement; row = resolvedRow; cluster = resolvedCluster;
+        table = blockTable; placement = blockPlacement; row = resolvedRow; cluster = resolvedCluster;
     }
 
     static void reset() {
         table = null; placement = null; row = null; cluster = -1;
         cameraX = Integer.MIN_VALUE; cameraY = Integer.MIN_VALUE; cameraZ = Integer.MIN_VALUE;
+        blockPlacement = null; blockTable = null;
+        eyeX = Double.NaN; eyeY = Double.NaN; eyeZ = Double.NaN;
     }
 
     static PropVisibility table() { return table; }

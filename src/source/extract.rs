@@ -134,7 +134,7 @@ pub fn extract_mod_props(map: &Map, config: &Config) -> Vec<ModProp> {
             {
                 return None;
             }
-            let model = models.get(&prop.model)?;
+            let model = models.get_skin(&prop.model, prop.skin)?;
             let size = model.bounds.size() * prop.scale;
             let longest = size.x.max(size.y).max(size.z);
             if longest < config.props.min_size
@@ -404,7 +404,7 @@ pub fn layouts(map: &Map, config: &Config) -> std::collections::BTreeMap<String,
             {
                 continue;
             }
-            let Some(model) = models.get(&prop.model) else {
+            let Some(model) = models.get_skin(&prop.model, prop.skin) else {
                 continue;
             };
             for part in &model.parts {
@@ -551,7 +551,7 @@ fn place_props(
             assets.stats.props_skipped += 1;
             continue;
         }
-        let Some(model) = models.get(&prop.model) else {
+        let Some(model) = models.get_skin(&prop.model, prop.skin) else {
             assets.stats.props_skipped += 1;
             continue;
         };

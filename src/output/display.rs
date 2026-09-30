@@ -370,6 +370,7 @@ mod tests {
             scale: 1.0,
             classname: "prop_static".into(),
             solid: crate::bsp::props::SOLID_VPHYSICS,
+            skin: 0,
         }
     }
 

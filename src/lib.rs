@@ -9,6 +9,7 @@ pub mod inventory;
 pub mod output;
 pub mod palette;
 pub mod source;
+pub mod timing;
 pub mod voxel;
 
 /// Minecraft 1.21.1. Written into every schematic so WorldEdit can convert

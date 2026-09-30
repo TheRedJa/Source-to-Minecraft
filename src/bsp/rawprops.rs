@@ -41,6 +41,8 @@ const PROP_TYPE: usize = 24;
 /// `m_Solid`, the byte before the flags, in every version since 4.
 const SOLID: usize = 30;
 const FLAGS: usize = 31;
+/// `m_Skin`, the model's skin family, right after the flags since version 4.
+const SKIN: usize = 32;
 /// The shortest record any version has: version 4.
 const MIN_STRIDE: usize = 56;
 /// Longer than any known version's record. Version 11 is 80 bytes; the limit
@@ -62,6 +64,8 @@ pub struct RawProp {
     pub solid: u8,
     /// Uniform scale, or 1.0 for the versions that do not carry one.
     pub scale: f32,
+    /// Which of the model's skin families the prop wears; 0 is the default.
+    pub skin: i32,
 }
 
 /// `STATIC_PROP_NO_DRAW`: the compiler kept the prop for its collision and
@@ -201,6 +205,7 @@ fn parse(lump: &[u8], version: u16) -> Result<StaticProps> {
             angles: read_vec(record, ANGLES),
             flags: record[FLAGS],
             solid: record[SOLID],
+            skin: i32::from_le_bytes(record[SKIN..SKIN + 4].try_into().unwrap()),
             scale: match scale_at {
                 Some(at) => f32::from_le_bytes(record[at..at + 4].try_into().unwrap()),
                 None => 1.0,
@@ -352,6 +357,18 @@ mod tests {
         let props = static_props(&bsp(9, 76, &["models/a.mdl"], &records)).unwrap();
         assert_eq!(props.stride, 76);
         assert_eq!(props.props.len(), 1);
+    }
+
+    /// The skin sits right after the flags in every version, so the same
+    /// offset is read whatever the stride.
+    #[test]
+    fn the_skin_is_read_after_the_flags() {
+        for (version, stride) in [(4, 56), (10, 76), (11, 80)] {
+            let mut r = record(stride, [0.0; 3], [0.0; 3], 0, 0);
+            r[32..36].copy_from_slice(&3i32.to_le_bytes());
+            let props = static_props(&bsp(version, stride, &["models/a.mdl"], &[r])).unwrap();
+            assert_eq!(props.props[0].skin, 3, "version {version}");
+        }
     }
 
     #[test]

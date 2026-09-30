@@ -372,11 +372,13 @@ fn mod_export(maps: &[PathBuf], common: &Common, campaign: &str, out: &Path) -> 
     config.scale.units_per_block = src2mc::output::mod_export::UNITS_PER_BLOCK;
     let mut exports = Vec::with_capacity(maps.len());
     for path in maps {
+        src2mc::timing::mark("start");
         let map = load(path)?;
         eprintln!(
             "converting {} for mod export at 32 units/block...",
             map.name
         );
+        src2mc::timing::mark("load map");
         // World geometry and real model props are separate in the new format;
         // do not let the legacy converter voxelize props into the surface grid.
         let mut surface_config = config.clone();
@@ -390,6 +392,7 @@ fn mod_export(maps: &[PathBuf], common: &Common, campaign: &str, out: &Path) -> 
         )?);
     }
     let written = src2mc::output::mod_export::write_campaign(out, campaign, exports)?;
+    src2mc::timing::mark("write bundle and schematics");
     eprintln!(
         "wrote {} and {} schematic(s); fingerprint {}",
         written.bundle.display(),
