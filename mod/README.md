@@ -1,18 +1,20 @@
 # src2mc NeoForge mod
 
-The format, bundle loading, placement lookup, and mod-owned surface renderer
-through Phase 4 are implemented and have passed real-map visual testing. Phase 5
-static prop rendering is functional and under large-map performance work; root
-lifecycle and missing-material handling remain incomplete. The mod registers
-fixed generic world content plus `/src2mc status`, `validate`, `reload`, and
-`reconcile`; client diagnostics include `/src2mc_render_status` and
-`/src2mc_prop_status`. Bundles load by themselves in the background during game
-startup, so `/src2mc reload` is only needed for a bundle that changed on disk —
-see [`docs/bundle-loading.md`](docs/bundle-loading.md). Surface rendering uses
-mod-owned paged textures rather than Minecraft's block atlas; what a shaderpack
-does to the buffers it uploads is in
-[`docs/iris-compat.md`](docs/iris-compat.md). Collision comes in
-Phase 6.
+The companion mod that draws converted Source maps: bundle loading and
+validation, mod-native placement (`/src2mc place <map>`), exact per-cell surface
+rendering on mod-owned paged textures, static prop rendering, sub-block
+collision for map geometry and props, smooth lighting with a client sky-light
+bake, and Source PVS, frustum, GPU-occlusion and shadow-pass culling. What it
+does and how to use it is in the [root README](../README.md#the-companion-mod).
+
+The mod registers fixed generic world content plus `/src2mc status`, `validate`,
+`reload`, `reconcile` and `place`; client diagnostics include
+`/src2mc_render_status`, `/src2mc_prop_status` and
+`/src2mc_prop_overlay_toggle`. Bundles load by themselves in the background
+during game startup, so `/src2mc reload` is only needed for a bundle that
+changed on disk — see [`docs/bundle-loading.md`](docs/bundle-loading.md). What
+a shaderpack does to the buffers the mod uploads is in
+[`docs/iris-compat.md`](docs/iris-compat.md).
 
 The current implementation state, test paths, verified behavior, known defects,
 and next work are recorded in [`../SESSION_HANDOFF.md`](../SESSION_HANDOFF.md).
@@ -24,15 +26,20 @@ requirements, architecture decisions and phased implementation sequence are:
 - [`../docs/decisions.md`](../docs/decisions.md)
 - [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md)
 
-The version-1 writer, converter `mod export` command, and Phase 2 mod-side
-reader are implemented. The old surface-pool bundle format is
-explicitly retired in [`../docs/format.md`](../docs/format.md).
+The old surface-pool bundle format is explicitly retired in
+[`../docs/format.md`](../docs/format.md).
 
 Export one or several maps from the repository root with:
 
 ```sh
 cargo run -- mod export --campaign hl2 --out out path/to/map1.bsp path/to/map2.bsp
 ```
+
+Textures are kept at up to 16 texels per block by default. `--quality full`
+keeps every texture at its original resolution, at a much larger bundle and
+texture memory cost (INFRA's furnace: 36 MB and 1 atlas page by default,
+1.1 GB and 49 pages at full quality). Raise `textureVramBudgetBytes` and
+`textureRamBudgetBytes` in the mod config if pages fail to load.
 
 ## Requirements
 
@@ -48,7 +55,8 @@ From this directory:
 ./gradlew build
 ```
 
-The development JAR is written to `build/libs/`.
+The development JAR is written to `build/libs/src2mc-<VERSION>.jar`; the
+version comes from the repository's root `VERSION` file.
 
 Run the JVM unit tests with:
 
@@ -62,10 +70,10 @@ Run the JVM unit tests with:
 ./gradlew runClient
 ```
 
-The client uses `runs/client/` as its game directory. Create a new single-player
-world there for the Phase 0 smoke test; the mod should load and make no changes.
-This run intentionally contains only NeoForge and src2mc. It is not a
-compatibility test for a real modpack.
+The client uses `runs/client/` as its game directory, with bundles in
+`runs/client/config/src2mc/bundles/` and schematics in
+`runs/client/config/src2mc/schematics/`. Its mods folder holds the test pack
+(Sodium, Iris, Create and others) the mod is checked against.
 
 Exact target versions and the testing arrangement for Sodium, Lithium, Create,
 Create: Aeronautics, and Sable belong in
