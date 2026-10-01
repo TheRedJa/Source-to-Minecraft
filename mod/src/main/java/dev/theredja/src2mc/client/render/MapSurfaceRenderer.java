@@ -122,6 +122,10 @@ public final class MapSurfaceRenderer {
     private static final DrawStats STATS = new DrawStats();
     private static DrawStats.Frame lastStats = DrawStats.Frame.EMPTY;
     private static boolean frustumCulling = true;
+    /** Whether shadow-pass draws are tested against Iris's own shadow frustum. */
+    private static boolean shadowCulling = true;
+    /** Shadow-pass meshes rejected by that frustum, accumulated and latched like the others. */
+    private static long shadowRejectedFrustum, shadowRejectedFrustumLast;
     /** Shadow-caster cutoff in blocks. The shaderpack's own shadow-distance setting only culls
      * Sodium's terrain, never mod-owned geometry, so without this the whole map is rasterized into
      * the shadow map every frame. */
@@ -276,7 +280,9 @@ public final class MapSurfaceRenderer {
             .then(literal("pvs").then(literal("on").executes(context -> setPvsCulling(context.getSource(), true)))
                 .then(literal("off").executes(context -> setPvsCulling(context.getSource(), false))))
             .then(literal("frustum").then(literal("on").executes(context -> setFrustumCulling(context.getSource(), true)))
-                .then(literal("off").executes(context -> setFrustumCulling(context.getSource(), false)))));
+                .then(literal("off").executes(context -> setFrustumCulling(context.getSource(), false))))
+            .then(literal("shadow").then(literal("on").executes(context -> setShadowCulling(context.getSource(), true)))
+                .then(literal("off").executes(context -> setShadowCulling(context.getSource(), false)))));
     }
 
     private static int setShadowDistance(net.minecraft.commands.CommandSourceStack source, double blocks) {
@@ -335,6 +341,13 @@ public final class MapSurfaceRenderer {
     private static int setFrustumCulling(net.minecraft.commands.CommandSourceStack source, boolean value) {
         frustumCulling = value;
         source.sendSuccess(() -> Component.literal("src2mc frustum culling " + (value ? "on" : "off")), false);
+        return 1;
+    }
+
+    private static int setShadowCulling(net.minecraft.commands.CommandSourceStack source, boolean value) {
+        shadowCulling = value;
+        source.sendSuccess(() -> Component.literal("src2mc shadow-pass frustum culling " + (value ? "on" : "off")
+            + (IrisCompat.shadowFrustum() == null && value ? " (no Iris shadow frustum yet; draws everything until one exists)" : "")), false);
         return 1;
     }
 
@@ -426,7 +439,8 @@ public final class MapSurfaceRenderer {
             + ", shaderpack=" + (IrisCompat.shaderPackInUse() ? "on" : "off")
             + ", shadow-pass invocations/frame=" + shadowPassCallsLastFrame + " (stages " + SHADOW_STAGES_SEEN + ")"
             + ", shadow draw set=" + shadowDrawnLast + "/" + shadowConsideredLast
-            + " (unbuilt " + shadowRejectedUnbuiltLast + ", too far " + shadowRejectedDistanceLast + ")"
+            + " (unbuilt " + shadowRejectedUnbuiltLast + ", too far " + shadowRejectedDistanceLast
+            + ", outside shadow frustum " + shadowRejectedFrustumLast + ")"
             + ", " + lightProvenance()
             + ", " + vertexFormats()
             + ", opaque stage=" + opaqueStage + ", shadow distance=" + shadowDistance
@@ -676,6 +690,17 @@ public final class MapSurfaceRenderer {
 
     static boolean frustumCulling() { return frustumCulling; }
 
+    /**
+     * The frustum to test shadow casters with, or null to draw every caster in range. Only Iris's
+     * own shadow frustum: the frustum in the shadow pass's stage events is the player's, and
+     * culling with it dropped casters behind the player, so sunlight leaked through sealed rooms.
+     */
+    static net.minecraft.client.renderer.culling.Frustum shadowFrustum() {
+        return shadowCulling ? IrisCompat.shadowFrustum() : null;
+    }
+
+    static long shadowRejectedFrustumLast() { return shadowRejectedFrustumLast; }
+
     /** Shared with {@link PropRenderer}; see {@link #translucentDepthWrite}. */
     static boolean translucentDepthWrite() { return translucentDepthWrite; }
 
@@ -718,6 +743,7 @@ public final class MapSurfaceRenderer {
         shadowConsideredLast = shadowConsidered; shadowRejectedUnbuiltLast = shadowRejectedUnbuilt;
         shadowRejectedDistanceLast = shadowRejectedDistance; shadowDrawnLast = shadowDrawn;
         shadowConsidered = 0; shadowRejectedUnbuilt = 0; shadowRejectedDistance = 0; shadowDrawn = 0;
+        shadowRejectedFrustumLast = shadowRejectedFrustum; shadowRejectedFrustum = 0;
         Minecraft minecraft = Minecraft.getInstance();
         if (minecraft.level == null) { clear(); return; }
         BundleGeneration generation = Src2mc.bundles().active();
@@ -888,6 +914,7 @@ public final class MapSurfaceRenderer {
         long started = System.nanoTime();
         var camera = event.getCamera().getPosition();
         List<DrawItem> drawItems = new ArrayList<>();
+        var casterFrustum = shadowPass ? shadowFrustum() : null;
         for (var item : MESHES.entrySet()) {
             MeshKey key = item.getKey();
             Mesh mesh = item.getValue();
@@ -895,10 +922,9 @@ public final class MapSurfaceRenderer {
             if (shadowPass) {
                 shadowConsidered++;
                 if (!BUILT_REGIONS.containsKey(key.region)) { shadowRejectedUnbuilt++; continue; }
-                // No frustum test in the shadow pass: the frustum there is the sun's, and rejecting a
-                // mesh only keeps it out of the shadow map, which shows up as sunlight leaking through
-                // sealed geometry rather than as a hole the player can see.
                 if (!withinShadowDistance(mesh.bounds, camera)) { shadowRejectedDistance++; continue; }
+                // Never the event's frustum here; see shadowFrustum().
+                if (casterFrustum != null && !casterFrustum.isVisible(mesh.bounds)) { shadowRejectedFrustum++; continue; }
             } else {
                 if (mesh.lastVisibleFrame != frame) continue;
                 if (frustumCulling && !event.getFrustum().isVisible(mesh.bounds)) { STATS.frustumRejected++; continue; }

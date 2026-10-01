@@ -97,8 +97,8 @@ public final class PropRenderer {
     private static long shadowPassCallsSinceMainPass;
     private static long shadowPassCallsLastFrame;
     /** Shadow-pass draw-set accounting, latched by the next main pass. */
-    private static long shadowConsidered, shadowRejectedDistance, shadowDrawn;
-    private static long shadowConsideredLast, shadowRejectedDistanceLast, shadowDrawnLast;
+    private static long shadowConsidered, shadowRejectedDistance, shadowRejectedFrustum, shadowDrawn;
+    private static long shadowConsideredLast, shadowRejectedDistanceLast, shadowRejectedFrustumLast, shadowDrawnLast;
 
     private PropRenderer() {}
 
@@ -150,7 +150,8 @@ public final class PropRenderer {
         lines.add(statusLine("Render (last frame)", last.drawCalls() + " draws  " + formatMillions(last.triangles()) + " triangles  " + formatMs(last.renderMs()), ChatFormatting.YELLOW)
             .append(detail("  PVS " + (CameraVisibility.row() != null ? "cluster " + CameraVisibility.cluster() + ", " + last.pvsRejected() + " rejected" : "off")
                 + "  shaderpack=" + (IrisCompat.shaderPackInUse() ? "on" : "off") + " shadow-pass/frame=" + shadowPassCallsLastFrame
-                + "  shadow draw set=" + shadowDrawnLast + "/" + shadowConsideredLast + " (too far " + shadowRejectedDistanceLast + ")")));
+                + "  shadow draw set=" + shadowDrawnLast + "/" + shadowConsideredLast + " (too far " + shadowRejectedDistanceLast
+                + ", outside shadow frustum " + shadowRejectedFrustumLast + (MapSurfaceRenderer.shadowFrustum() == null ? ", shadow culling off" : "") + ")")));
         String occlusionState = !occlusion.enabled() ? "OFF" : occlusion.supported() ? "ON" : "UNSUPPORTED";
         ChatFormatting occlusionColor = !occlusion.enabled() ? ChatFormatting.RED : occlusion.supported() ? ChatFormatting.GREEN : ChatFormatting.RED;
         lines.add(statusLine("GPU occlusion", occlusionState, occlusionColor)
@@ -173,7 +174,7 @@ public final class PropRenderer {
                 + " + " + gpuMs(GpuTimer.Phase.SURFACES_TRANSLUCENT) + ", props " + gpuMs(GpuTimer.Phase.PROPS_OPAQUE) + " + " + gpuMs(GpuTimer.Phase.PROPS_TRANSLUCENT)
                 : "unsupported", ChatFormatting.GOLD)
             .append(detail("  (opaque + translucent)  |  shadow pass: surfaces " + gpuMs(GpuTimer.Phase.SURFACES_SHADOW)
-                + ", props " + gpuMs(GpuTimer.Phase.PROPS_SHADOW) + "  |  prop root scan " + formatMs(average.rootScanMs()) + " avg")));
+                + ", props " + gpuMs(GpuTimer.Phase.PROPS_SHADOW) + " (surfaces outside shadow frustum " + MapSurfaceRenderer.shadowRejectedFrustumLast() + ")  |  prop root scan " + formatMs(average.rootScanMs()) + " avg")));
         lines.add(statusLine("Memory", "Props " + formatBytes(propVbo) + "  |  Atlas " + formatBytes(atlas.residentVramBytes()), ChatFormatting.LIGHT_PURPLE)
             .append(detail("  Meshes " + runtimeMeshes.ready() + " ready, " + runtimeMeshes.pending() + " loading")));
         lines.add(statusLine("Builds", REGISTERING.size() + " registering, " + SECTION_BUILDS.size() + " sections building", ChatFormatting.YELLOW)
@@ -214,8 +215,8 @@ public final class PropRenderer {
         shadowPassCallsLastFrame = shadowPassCallsSinceMainPass;
         shadowPassCallsSinceMainPass = 0;
         shadowConsideredLast = shadowConsidered; shadowRejectedDistanceLast = shadowRejectedDistance;
-        shadowDrawnLast = shadowDrawn;
-        shadowConsidered = 0; shadowRejectedDistance = 0; shadowDrawn = 0;
+        shadowDrawnLast = shadowDrawn; shadowRejectedFrustumLast = shadowRejectedFrustum;
+        shadowConsidered = 0; shadowRejectedDistance = 0; shadowRejectedFrustum = 0; shadowDrawn = 0;
         Minecraft minecraft = Minecraft.getInstance();
         if (minecraft.level == null) { clear(); return; }
         BundleGeneration generation = Src2mc.bundles().active();
@@ -632,6 +633,7 @@ public final class PropRenderer {
         List<Map.Entry<AggregateKey, Mesh>> visible = new ArrayList<>();
         List<OcclusionCuller.Candidate<AggregateKey>> queryCandidates = new ArrayList<>();
         OcclusionCuller.CameraView view = new OcclusionCuller.CameraView(camera, event.getCamera().getXRot(), event.getCamera().getYRot());
+        var casterFrustum = shadowPass ? MapSurfaceRenderer.shadowFrustum() : null;
         for (AggregateKey key : AGGREGATES.keys()) {
             Mesh mesh = AGGREGATES.value(key);
             if (mesh == null || (key.renderClass() == BundleMaterial.RenderClass.TRANSLUCENT) != translucent) continue;
@@ -645,6 +647,7 @@ public final class PropRenderer {
             if (shadowPass) {
                 shadowConsidered++;
                 if (!MapSurfaceRenderer.withinShadowDistance(mesh.bounds, camera)) { shadowRejectedDistance++; continue; }
+                if (casterFrustum != null && !casterFrustum.isVisible(mesh.bounds)) { shadowRejectedFrustum++; continue; }
             } else if (MapSurfaceRenderer.frustumCulling() && !event.getFrustum().isVisible(mesh.bounds)) continue;
             // Translucent props draw at AFTER_PARTICLES, when the depth buffer already holds glass,
             // water, entities and particles; a query there would cull props behind any of them.
@@ -765,8 +768,8 @@ public final class PropRenderer {
         CameraVisibility.reset();
         level = null; generationSequence = -1; placementSnapshot = List.of(); frame = 0; nearbyProps = 0; nearbyUnbuilt = 0; buildsLastFrame = 0;
         shadowPassCallsSinceMainPass = 0; shadowPassCallsLastFrame = 0;
-        shadowConsidered = 0; shadowRejectedDistance = 0; shadowDrawn = 0;
-        shadowConsideredLast = 0; shadowRejectedDistanceLast = 0; shadowDrawnLast = 0;
+        shadowConsidered = 0; shadowRejectedDistance = 0; shadowRejectedFrustum = 0; shadowDrawn = 0;
+        shadowConsideredLast = 0; shadowRejectedDistanceLast = 0; shadowRejectedFrustumLast = 0; shadowDrawnLast = 0;
     }
 
     /** Forgets every registration and section rebuild in flight; their workers finish unobserved. */
