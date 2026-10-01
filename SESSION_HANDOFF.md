@@ -1,7 +1,21 @@
 # src2mc implementation handoff
 
-Updated: 2026-09-30 (Europe/Berlin), DEV-0.14.0 (render measurement and draw
-order; uncommitted)
+Updated: 2026-10-01 (Europe/Berlin), DEV-0.15.0 (shadow-pass culling;
+uncommitted)
+
+Test shaderpack: **Complementary Reimagined** (Iris 1.8.14). Earlier notes and
+the DEV-0.14.0 commit message say Photon by mistake.
+
+**Shadow-pass culling (DEV-0.15.0):** user-confirmed 2026-10-01: 60 to 67 fps
+with it on, frame times as stable as before, no shadow or render faults. surfaces and props
+drawn in the Iris shadow pass are now tested against Iris's own shadow frustum
+(`ShadowRenderer.FRUSTUM`, read reflectively in `IrisCompat`; the advanced
+shadow-culling frustum Iris uses for shadow terrain). The frustum in the
+shadow pass's stage events is the player's culling frustum (NeoForge passes
+`LevelRenderer.getFrustum()` from `renderSectionLayer`), which is why an earlier
+shadow frustum test dropped casters behind the player and leaked sunlight.
+`/src2mc_cull shadow on|off` to compare; the status lines count meshes outside
+the shadow frustum. If Iris's field is missing, everything in range is drawn.
 
 This document records the active implementation state and the empirical context
 needed to continue the work in a new session. `AGENTS.md` contains mandatory
@@ -20,7 +34,7 @@ working rules. Durable requirements and design authority remain in
 - Opaque surfaces and props are drawn grouped by render state and nearest first
   inside a group (early depth rejection); surfaces no longer set up and clear
   render state per mesh. `/src2mc_draw_order sorted|unsorted` to A/B.
-- First numbers (INFRA, Photon, 2026-09-30): frame 20 ms; GPU surfaces 1.2 ms
+- First numbers (INFRA, Complementary Reimagined, 2026-09-30): frame 20 ms; GPU surfaces 1.2 ms
   opaque, props 6.1 ms opaque + 0.5 translucent, shadow pass surfaces 0.9 ms and
   props 6.8 ms. About 15 ms of the 20 are ours, almost all props. Sorted versus
   unsorted draw order made no difference, and the shadow pass (cheap fragments)

@@ -27,6 +27,13 @@ final class IrisCompat {
     private static final MethodHandle GET_ENTITY;
     private static final MethodHandle GET_BLOCK_ENTITY;
     private static final MethodHandle GET_ITEM;
+    /**
+     * {@code ShadowRenderer.FRUSTUM}: the frustum Iris culls shadow terrain with, set and prepared
+     * at the start of every shadow pass. The stage events NeoForge fires inside the shadow pass
+     * carry the player's culling frustum instead, which rejects casters behind the player whose
+     * shadows still fall into view. Not part of the v0 API.
+     */
+    private static final java.lang.reflect.Field SHADOW_FRUSTUM;
 
     static {
         MethodHandle getInstance = null, isShaderPackInUse = null, isRenderingShadowPass = null;
@@ -58,6 +65,14 @@ final class IrisCompat {
             captured = null; setEntity = null; setBlockEntity = null; setItem = null;
             getEntity = null; getBlockEntity = null; getItem = null;
         }
+        java.lang.reflect.Field shadowFrustum = null;
+        try {
+            shadowFrustum = Class.forName("net.irisshaders.iris.shadows.ShadowRenderer").getField("FRUSTUM");
+            if (!net.minecraft.client.renderer.culling.Frustum.class.isAssignableFrom(shadowFrustum.getType())) shadowFrustum = null;
+        } catch (ReflectiveOperationException | LinkageError ignored) {
+            shadowFrustum = null;
+        }
+        SHADOW_FRUSTUM = shadowFrustum;
         CAPTURED_STATE = captured;
         SET_ENTITY = setEntity; SET_BLOCK_ENTITY = setBlockEntity; SET_ITEM = setItem;
         GET_ENTITY = getEntity; GET_BLOCK_ENTITY = getBlockEntity; GET_ITEM = getItem;
@@ -121,6 +136,16 @@ final class IrisCompat {
             return instance != null && (boolean) IS_SHADER_PACK_IN_USE.invoke(instance);
         } catch (Throwable ignored) {
             return false;
+        }
+    }
+
+    /** Iris's shadow-pass culling frustum, in world coordinates; null when unavailable. */
+    static net.minecraft.client.renderer.culling.Frustum shadowFrustum() {
+        if (SHADOW_FRUSTUM == null) return null;
+        try {
+            return (net.minecraft.client.renderer.culling.Frustum) SHADOW_FRUSTUM.get(null);
+        } catch (ReflectiveOperationException | RuntimeException ignored) {
+            return null;
         }
     }
 
