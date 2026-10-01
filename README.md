@@ -1,15 +1,112 @@
 # src2mc
 
-Convert Source Engine maps (`.bsp`) into Minecraft 1.21.1 schematics, so that
-recreating a game's geometry does not start with days of manual blocking-out.
+Convert Source Engine maps (`.bsp`) into Minecraft 1.21.1, so that recreating a
+game's geometry does not start with days of manual blocking-out.
 
-Built for recreating **Entropy: Zero** and **Entropy: Zero 2**, and tested
-against every stock map in both, plus Half-Life 2. Portal, Portal 2 and INFRA
-convert as well.
+Built for recreating the Half-Life 2 universe (Half-Life 2, **Entropy: Zero**
+and **Entropy: Zero 2**). Portal, Portal 2 and INFRA convert as well, and are
+the current in-game test maps.
 
-## Status
+There are two ways to get a map into Minecraft:
 
-Working today:
+- **The companion mod (current).** `src2mc mod export` writes one campaign
+  bundle plus one schematic per map, and the NeoForge mod in [`mod/`](mod/)
+  draws the map's exact Source geometry, real textures and real prop meshes on
+  top of ordinary, editable blocks. This is where development happens.
+- **Plain schematics (legacy).** `src2mc convert` and `batch` voxelize a map into
+  vanilla blocks, or into KubeJS-generated textured blocks, with no mod needed
+  beyond WorldEdit. Still working, documented further down, but no longer
+  extended.
+
+## The companion mod
+
+### What it does
+
+- **Exact surfaces on editable blocks.** Every brush face is clipped into the
+  block cell it lies in and drawn at its true Source position, so walls, door
+  frames and low ceilings sit exactly where they do in the game instead of
+  snapping to half blocks. The blocks underneath stay ordinary blocks: break one
+  and the geometry it owns disappears with it, place blocks and build as usual.
+- **Real textures** on mod-owned 4096-pixel atlas pages with mip levels, kept
+  apart from Minecraft's block atlas. By default a texture keeps up to 16 texels
+  per block; `--quality full` keeps every texture at its original Source
+  resolution. Fences and grates stay see-through with distance, and `$nocull`
+  materials are drawn from both sides.
+- **Every prop, as its real mesh**, at its exact Source origin and angle, with
+  its skin (the rusted or dirty variant the map chose) and every material
+  slot. Props are merged into per-section batches, so millions of triangles
+  cost a few hundred draw calls.
+- **Sub-block collision** for map geometry and props, in sixteenths of a block:
+  you walk on the floor you see, under the ceiling you see, and along railings
+  rather than invisible cubes.
+- **Lighting** from Minecraft's own light, sampled smoothly per vertex, with a
+  client-side sky-light bake and an occlusion mask so thin ceilings and walls
+  that hold no block still cast shade.
+- **Fast rendering.** Source's own visibility data (PVS), frustum culling, GPU
+  occlusion queries for props, indexed vertex buffers, nearest-first draw order,
+  and shadow-pass culling under shaderpacks. Meshes build on worker threads, so
+  a world with several large maps loads in a second or two.
+- **Shaderpacks** through Iris, tested with Complementary Reimagined: surfaces
+  and props land in the shadow map and the gbuffers like terrain does.
+
+### Usage
+
+```sh
+# One bundle for a whole campaign, one schematic per map. Fixed scale:
+# 32 Source units per block.
+src2mc mod export --campaign infra -o out/ maps/infra_c4_m2_furnace.bsp
+
+# Maps inside a VPK work too.
+src2mc mod export --campaign infra -o out/ \
+    infra/pak02_dir.vpk:maps/infra_c4_m2_furnace.bsp
+
+# Every texture at its original resolution: sharper up close, but far larger
+# bundles and much more texture memory (the furnace goes from 36 MB and one
+# atlas page to 1.1 GB and 49).
+src2mc mod export --campaign infra -o out/ --quality full maps/infra_c4_m2_furnace.bsp
+
+# Print how long each export stage took.
+SRC2MC_TIMINGS=1 src2mc mod export ...
+```
+
+In a NeoForge 1.21.1 instance with the mod installed:
+
+1. Copy the `.src2mc` bundle into `config/src2mc/bundles/` and the `.schem`
+   files into `config/src2mc/schematics/`. Bundles load in the background at
+   startup; `/src2mc reload` picks up one that changed on disk.
+2. Stand where the map's anchor should go and run `/src2mc place <map>` (the
+   map id, e.g. `infra_c4_m2_furnace`). Placement is
+   mod-native and tick-budgeted rather than a WorldEdit paste, and fails loudly
+   if the map does not fit the world's build height. Tall maps need a dimension
+   type with more height (see [Scale and world height](#scale-and-world-height)).
+
+Useful client commands: `/src2mc_prop_overlay_toggle` (live render, GPU-time
+and culling counters), `/src2mc_render_status`, `/src2mc_debug_face`, and
+`/src2mc_cull pvs|frustum|shadow on|off`, `/src2mc_mipmaps on|off`,
+`/src2mc_indexed on|off` and `/src2mc_draw_order sorted|unsorted` for A/B
+comparisons.
+
+Building the mod and running its development client is described in
+[`mod/README.md`](mod/README.md). The bundle format is specified in
+[`docs/format.md`](docs/format.md), the design in
+[`docs/decisions.md`](docs/decisions.md), and the current state of the work in
+[`SESSION_HANDOFF.md`](SESSION_HANDOFF.md).
+
+### Why a mod
+
+The converter grew from stone WorldEdit schematics, through colour-matched
+vanilla blocks, to KubeJS blocks with real multi-block textures and real prop
+meshes. That proved the visual approach, but it does not scale to a campaign:
+Half-Life 2 alone produced more than 9 GB of generated pack data and pushed the
+vanilla block texture atlas to roughly 16k x 16k, which can prevent Minecraft
+from starting on weaker GPUs. Blocks also force every surface onto a half-block
+grid, which is invisible in a big hall and ruins a 64-unit corridor. The mod
+loads deduplicated campaign data through its own bounded texture backend and
+draws exact geometry, while maps stay ordinary, editable blocks.
+
+## Plain schematics (legacy)
+
+Working:
 
 - Loads Source BSP v19/20/21, and v22 as used by INFRA's branch, from a file or
   from inside a VPK — some games ship no loose maps at all.
@@ -45,7 +142,7 @@ Working today:
 
 Not implemented yet: Entropy: Zero 2's MapBase-specific entities.
 
-## Usage
+### Usage
 
 ```sh
 # What does this map contain, and what will converting it cost?
@@ -114,7 +211,7 @@ relative to wherever you are standing, so if you move between tiles they end up
 scattered at different positions and heights. `-a` skips air so tiles do not
 erase their neighbours.
 
-## Scale and world height
+### Scale and world height
 
 The default is 32 Source units per block, two Hammer grid squares: the 72-unit
 player becomes 2.25 blocks, close to vanilla Minecraft proportions.
@@ -128,7 +225,7 @@ problem: a datapack `dimension_type` allows up to 4064 blocks
 Nothing is ever clamped or rescaled to fit; `inspect` reports the exact `min_y`
 and `height` a map needs.
 
-## Terrain, doors and whole campaigns
+### Terrain, doors and whole campaigns
 
 **Displacements** are Source's terrain: a brush face subdivided into a grid of
 displaced vertices. They are a heightfield rather than a solid, so they are
@@ -286,7 +383,7 @@ there is nothing to dig out before pasting. This matters because WorldEdit drops
 out-of-range blocks *silently*: without it you paste a tall map, walk in, and
 find the top missing with no error anywhere.
 
-## Materials
+### Materials
 
 Every surface gets its block from the material on the brush side that voxel is
 nearest to. Two things decide it, in order.
@@ -337,7 +434,7 @@ src2mc convert map.bsp --palette-set stone,concrete -o out/
 src2mc convert map.bsp --no-builtin-rules -o out/
 ```
 
-## Real textures, as real blocks
+### Real textures, as real blocks
 
 By default a wall becomes the vanilla block closest to its average colour. With
 `--textures kubejs` it becomes the actual Half-Life 2 concrete.
@@ -377,7 +474,7 @@ alpha-tested texture is re-thresholded when downsampled — averaging a grate's
 alpha to 16x16 otherwise makes every texel part-transparent, which cutout
 rendering draws as a solid block.
 
-### One texture, many blocks
+#### One texture, many blocks
 
 A Source wall texture is not sized for one block. A 512-pixel concrete texture
 at Hammer's default scale of 0.25 covers 2048 units of wall, which at 16 units
@@ -438,7 +535,7 @@ Turn the whole thing off with `[materials] tile_textures = false`.
 On `d1_trainstation_02` this is 198 materials registering about 20k blocks and
 11 MB of 16x16 PNGs, with no measurable conversion cost.
 
-## Sub-block detail
+### Sub-block detail
 
 A block is a 1 m cube, so at 16 units/block every 8-unit step and kerb rounds
 away. `[shapes] enabled` fits half-height and stepped geometry to **slabs and
@@ -507,33 +604,15 @@ Five things worth knowing if you work on this code:
   Missing any of those finds nothing at all: before the parser handled them,
   E:Z2 resolved 0 of 127 materials rather than 125.
 
-## Why there is a companion mod
-
-The long-term goal is to recreate the Half-Life 2 universe in Minecraft without
-spending the available creative time manually blocking out geometry that
-already exists in the Source maps.
-
-The converter grew from stone WorldEdit schematics, through colour-matched
-vanilla blocks, to KubeJS blocks with real multi-block textures and real prop
-meshes. That proves the visual approach, but it does not scale to a campaign:
-Half-Life 2 alone produces more than 9 GB of generated pack data and pushes the
-vanilla block texture atlas to roughly 16k x 16k, which can prevent Minecraft
-from starting on weaker GPUs.
-
-[`mod/`](mod/) is a cleanly restarted NeoForge companion mod intended to load
-deduplicated campaign data through its own bounded texture backend while maps
-remain ordinary WorldEdit schematics. The discarded prototype format is not a
-compatibility target. See the current
-[`requirements`](docs/mod-requirements.md),
-[`architecture decisions`](docs/decisions.md), and
-[`implementation plan`](mod/IMPLEMENTATION_PLAN.md).
-
 ## Building
 
 ```sh
 cargo build --release
 cargo test --release
 ```
+
+The mod builds separately with Gradle from `mod/`; see
+[`mod/README.md`](mod/README.md).
 
 Tests that need real maps look for an Entropy: Zero install and skip themselves
 when it is absent.

@@ -16,11 +16,26 @@ pub struct ResolutionDecision {
     pub resampled: bool,
 }
 
+/// How much of each source texture's resolution an export keeps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TextureQuality {
+    /// Up to [`TEXELS_PER_BLOCK`] texels per projected block, never more than
+    /// the source has.
+    #[default]
+    Default,
+    /// The source texture's own resolution, untouched. Only a texture wider or
+    /// taller than [`PAGE_SIZE`], which the client accepts as the largest
+    /// output axis, is scaled down to fit, keeping its aspect ratio.
+    Full,
+}
+
 /// Retain up to 16 output texels per projected block, without inventing detail
-/// by enlarging an image beyond its Source dimensions.
+/// by enlarging an image beyond its Source dimensions; or, at
+/// [`TextureQuality::Full`], the source resolution itself.
 pub fn analyze_resolution(
     original: [u32; 2],
     blocks_spanned: [f64; 2],
+    quality: TextureQuality,
 ) -> Result<ResolutionDecision> {
     ensure!(
         original[0] > 0 && original[1] > 0,
@@ -30,12 +45,25 @@ pub fn analyze_resolution(
         blocks_spanned.iter().all(|v| v.is_finite() && *v > 0.0),
         "texture projection span must be finite and positive"
     );
-    let output = std::array::from_fn(|axis| {
-        let required = (blocks_spanned[axis] * TEXELS_PER_BLOCK)
-            .round()
-            .clamp(1.0, f64::from(u32::MAX)) as u32;
-        required.min(original[axis])
-    });
+    let output = match quality {
+        TextureQuality::Default => std::array::from_fn(|axis| {
+            let required = (blocks_spanned[axis] * TEXELS_PER_BLOCK)
+                .round()
+                .clamp(1.0, f64::from(u32::MAX)) as u32;
+            required.min(original[axis])
+        }),
+        TextureQuality::Full => {
+            let largest = original[0].max(original[1]);
+            if largest <= PAGE_SIZE {
+                original
+            } else {
+                let scale = f64::from(PAGE_SIZE) / f64::from(largest);
+                std::array::from_fn(|axis| {
+                    ((f64::from(original[axis]) * scale).round() as u32).clamp(1, PAGE_SIZE)
+                })
+            }
+        }
+    };
     Ok(ResolutionDecision {
         original,
         output,
@@ -215,19 +243,94 @@ pub fn build_pages(layout: &Layout, assets: &[ImageAsset]) -> Result<Vec<PageIma
                     }
                 }
             }
-            let smaller: Vec<RgbaImage> = (1..=MAX_MIP_LEVEL)
+            let mut smaller: Vec<RgbaImage> = (1..=MAX_MIP_LEVEL)
                 .into_par_iter()
                 .map(|level| {
                     let size = PAGE_SIZE >> level;
                     image::imageops::resize(&page, size, size, FilterType::Triangle)
                 })
                 .collect();
+            for region in layout.regions.iter().filter(|r| r.page == page_index) {
+                if let Some(coverage) = cutout_coverage(by_id[region.content_id.as_str()], region) {
+                    for (index, mip) in smaller.iter_mut().enumerate() {
+                        keep_cutout_coverage(mip, region, index as u32 + 1, coverage);
+                    }
+                }
+            }
             let mut mips = vec![page];
             mips.extend(smaller);
             PageImages { mips }
         })
         .collect())
 }
+
+/// The share of opaque texels in a region of a cut-out texture, or `None`
+/// when the region is not cut-out: cut-out textures leave the converter with
+/// alpha already binarized, so any other alpha value means blended or opaque.
+fn cutout_coverage(source: &RgbaImage, region: &Region) -> Option<f64> {
+    let mut opaque = 0u64;
+    let mut clear = 0u64;
+    for y in region.source.y..region.source.y + region.source.height {
+        for x in region.source.x..region.source.x + region.source.width {
+            match source.get_pixel(x, y).0[3] {
+                255 => opaque += 1,
+                0 => clear += 1,
+                _ => return None,
+            }
+        }
+    }
+    (clear > 0).then(|| opaque as f64 / (opaque + clear) as f64)
+}
+
+/// Re-binarizes a cut-out region's alpha in one mip, keeping its level-0 share
+/// of opaque texels.
+///
+/// Averaging alpha leaves the holes of a fence or grate half opaque in every
+/// smaller mip, and the cut-out shader only drops texels below one tenth, so a
+/// mesh fence turned solid with distance. Keeping the same share opaque, as at
+/// full size, keeps it see-through. The gutter takes the region's cutoff.
+fn keep_cutout_coverage(mip: &mut RgbaImage, region: &Region, level: u32, coverage: f64) {
+    let rect = |r: &Rect, margin: u32| {
+        let x0 = r.x.saturating_sub(margin) >> level;
+        let y0 = r.y.saturating_sub(margin) >> level;
+        let x1 = ((r.x + r.width + margin) >> level).min(mip.width());
+        let y1 = ((r.y + r.height + margin) >> level).min(mip.height());
+        (x0, y0, x1, y1)
+    };
+    // Ties are common -- a regular mesh averages to the same alpha everywhere --
+    // so an ordered-dither rank breaks them, spreading the kept texels evenly.
+    let key = |mip: &RgbaImage, x: u32, y: u32| {
+        u32::from(mip.get_pixel(x, y).0[3]) * 16 + 15 - BAYER_4[(y % 4) as usize][(x % 4) as usize]
+    };
+    let (x0, y0, x1, y1) = rect(&region.allocation, 0);
+    let mut keys: Vec<u32> = Vec::new();
+    for y in y0..y1 {
+        for x in x0..x1 {
+            keys.push(key(mip, x, y));
+        }
+    }
+    if keys.is_empty() {
+        return;
+    }
+    keys.sort_unstable();
+    let total = keys.len();
+    let want = (coverage * total as f64).round() as usize;
+    let cutoff = if want == 0 {
+        u32::MAX
+    } else {
+        keys[total - want.min(total)]
+    };
+    let (x0, y0, x1, y1) = rect(&region.allocation, GUTTER);
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let opaque = key(mip, x, y) >= cutoff;
+            mip.get_pixel_mut(x, y).0[3] = if opaque { 255 } else { 0 };
+        }
+    }
+}
+
+/// 4x4 ordered-dither ranks.
+const BAYER_4: [[u32; 4]; 4] = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
 
 fn align(value: u32, alignment: u32) -> u32 {
     value.div_ceil(alignment) * alignment
@@ -292,7 +395,7 @@ mod tests {
     #[test]
     fn resolution_targets_sixteen_texels_per_projected_block() {
         assert_eq!(
-            analyze_resolution([512, 256], [4.0, 2.0]).unwrap(),
+            analyze_resolution([512, 256], [4.0, 2.0], TextureQuality::Default).unwrap(),
             ResolutionDecision {
                 original: [512, 256],
                 output: [64, 32],
@@ -300,10 +403,12 @@ mod tests {
             }
         );
         assert_eq!(
-            analyze_resolution([8, 8], [4.0, 4.0]).unwrap().output,
+            analyze_resolution([8, 8], [4.0, 4.0], TextureQuality::Default)
+                .unwrap()
+                .output,
             [8, 8]
         );
-        assert!(analyze_resolution([1, 1], [f64::NAN, 1.0]).is_err());
+        assert!(analyze_resolution([1, 1], [f64::NAN, 1.0], TextureQuality::Default).is_err());
     }
 
     #[test]
@@ -312,8 +417,89 @@ mod tests {
         // resolved to its owning material, a 1024 texture repeats across four
         // Minecraft blocks and therefore needs a 64 pixel export.
         assert_eq!(
-            analyze_resolution([1024, 1024], [4.0, 4.0]).unwrap().output,
+            analyze_resolution([1024, 1024], [4.0, 4.0], TextureQuality::Default)
+                .unwrap()
+                .output,
             [64, 64]
         );
+    }
+
+    #[test]
+    fn full_quality_keeps_the_source_resolution() {
+        let decision = analyze_resolution([1024, 512], [4.0, 2.0], TextureQuality::Full).unwrap();
+        assert_eq!(decision.output, [1024, 512]);
+        assert!(!decision.resampled);
+        // However small the projection, nothing is shrunk.
+        assert_eq!(
+            analyze_resolution([2048, 2048], [0.25, 0.25], TextureQuality::Full)
+                .unwrap()
+                .output,
+            [2048, 2048]
+        );
+    }
+
+    #[test]
+    fn full_quality_fits_oversized_textures_to_a_page() {
+        assert_eq!(
+            analyze_resolution([8192, 2048], [1.0, 1.0], TextureQuality::Full)
+                .unwrap()
+                .output,
+            [4096, 1024]
+        );
+    }
+
+    fn page_mips(image: RgbaImage) -> (Layout, Vec<PageImages>) {
+        let layout = pack(&[texture("t", image.width(), image.height())]).unwrap();
+        let pages = build_pages(
+            &layout,
+            &[ImageAsset {
+                content_id: "t".into(),
+                image,
+            }],
+        )
+        .unwrap();
+        (layout, pages)
+    }
+
+    fn region_alphas(layout: &Layout, mip: &RgbaImage, level: u32) -> Vec<u8> {
+        let a = layout.regions[0].allocation;
+        let mut out = Vec::new();
+        for y in (a.y >> level)..((a.y + a.height) >> level) {
+            for x in (a.x >> level)..((a.x + a.width) >> level) {
+                out.push(mip.get_pixel(x, y).0[3]);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn cutout_mips_keep_their_holes() {
+        // A fine mesh: one opaque texel in four. Averaged, every mip texel would be
+        // a quarter opaque and pass the cut-out shader's one-tenth test as solid.
+        let image = RgbaImage::from_fn(64, 64, |x, y| {
+            Rgba([
+                200,
+                200,
+                200,
+                if x % 2 == 0 && y % 2 == 0 { 255 } else { 0 },
+            ])
+        });
+        let (layout, pages) = page_mips(image);
+        for level in 1..=u32::from(MAX_MIP_LEVEL) {
+            let alphas = region_alphas(&layout, &pages[0].mips[level as usize], level);
+            assert!(alphas.iter().all(|&a| a == 0 || a == 255), "level {level}");
+            let opaque = alphas.iter().filter(|&&a| a == 255).count() as f64 / alphas.len() as f64;
+            assert!((opaque - 0.25).abs() < 0.1, "level {level}: {opaque}");
+        }
+    }
+
+    #[test]
+    fn blended_and_opaque_mips_are_left_averaged() {
+        let image = RgbaImage::from_fn(64, 64, |x, _| {
+            Rgba([10, 10, 10, if x % 2 == 0 { 255 } else { 128 }])
+        });
+        let (layout, pages) = page_mips(image);
+        let alphas = region_alphas(&layout, &pages[0].mips[1], 1);
+        assert!(alphas.iter().all(|&a| a > 128 && a < 255));
     }
 }

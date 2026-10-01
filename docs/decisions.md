@@ -106,11 +106,16 @@ visual test; it is not silently substituted during implementation.
 
 Each physical texture-region allocation lies wholly on one page. Logical
 textures retain the resolution required for 16 output texels per projected
-world block. A logical image larger than one page's usable area is partitioned
+world block. `mod export --quality full` instead keeps every texture at its
+original Source resolution (only an image larger than 4096 on an axis, the
+client's output limit, is scaled to fit with its aspect ratio kept); this is
+an export choice, not a format change, and costs far more atlas pages. A logical image larger than one page's usable area is partitioned
 losslessly into page-contained regions; geometry selects the appropriate
 region, so the image is neither squeezed nor downsampled to fit. Each region
 has a 16-pixel base-level extruded gutter and the converter generates mip levels
-0 through 4. The gutter therefore remains at least one texel through the final
+0 through 4. A cut-out region's alpha is re-binarized in each smaller
+level, keeping its full-size share of opaque texels, so fences and grates keep
+their holes with distance instead of averaging to solid. The gutter therefore remains at least one texel through the final
 mip and allocations are aligned to mip boundaries, preventing adjacent atlas
 content from bleeding under filtering.
 

@@ -69,6 +69,7 @@ pub fn from_conversion(
     map: &crate::bsp::Map,
     config: &crate::config::Config,
     conversion: &crate::convert::Conversion,
+    quality: atlas::TextureQuality,
 ) -> Result<MapExport> {
     ensure!(
         conversion.transform.units_per_block() == UNITS_PER_BLOCK,
@@ -140,8 +141,13 @@ pub fn from_conversion(
             }
         }
     }
-    let (mut materials, textures, face_material_ids, prop_bucket_ids) =
-        extract_materials(map, config, &prop_texture_spans, &conversion.fragments);
+    let (mut materials, textures, face_material_ids, prop_bucket_ids) = extract_materials(
+        map,
+        config,
+        &prop_texture_spans,
+        &conversion.fragments,
+        quality,
+    );
     crate::timing::mark("export: materials and textures");
     let faces = conversion
         .fragments
@@ -465,11 +471,12 @@ enum Contrib {
 /// texture and nobody is forced onto another use's worst-case size.
 fn bucket_by_output(
     original: [u32; 2],
+    quality: atlas::TextureQuality,
     contributions: impl IntoIterator<Item = (Contrib, [f64; 2])>,
 ) -> BTreeMap<[u32; 2], Vec<Contrib>> {
     let mut buckets: BTreeMap<[u32; 2], Vec<Contrib>> = BTreeMap::new();
     for (contrib, blocks_spanned) in contributions {
-        if let Ok(decision) = atlas::analyze_resolution(original, blocks_spanned) {
+        if let Ok(decision) = atlas::analyze_resolution(original, blocks_spanned, quality) {
             buckets.entry(decision.output).or_default().push(contrib);
         }
     }
@@ -487,6 +494,7 @@ fn extract_materials(
     config: &crate::config::Config,
     prop_texture_spans: &BTreeMap<String, f64>,
     surfaces: &[crate::voxel::fragments::Fragment],
+    quality: atlas::TextureQuality,
 ) -> (
     Vec<metadata::MaterialReference>,
     Vec<TextureAsset>,
@@ -508,6 +516,7 @@ fn extract_materials(
         surfaces,
         &resolver,
         &mut decoder,
+        quality,
         &mut |request| {
             requests.insert(request);
             None
@@ -534,6 +543,7 @@ fn extract_materials(
         surfaces,
         &resolver,
         &mut decoder,
+        quality,
         &mut |request| produced.get(&request).cloned().flatten(),
     )
 }
@@ -557,6 +567,7 @@ fn assign_materials(
     surfaces: &[crate::voxel::fragments::Fragment],
     resolver: &crate::source::vmt::Materials,
     decoder: &mut crate::source::vtf::Textures,
+    quality: atlas::TextureQuality,
     produce: &mut dyn FnMut(TextureRequest) -> Option<(Vec<u8>, image::RgbaImage)>,
 ) -> (
     Vec<metadata::MaterialReference>,
@@ -629,7 +640,7 @@ fn assign_materials(
         if let Some(prop) = prop_span {
             contributions.push((Contrib::Prop, [prop; 2]));
         }
-        let buckets = bucket_by_output(header.size, contributions);
+        let buckets = bucket_by_output(header.size, quality, contributions);
         if buckets.is_empty() {
             materials.push(reference_template);
             assign_material(
@@ -725,7 +736,8 @@ fn assign_materials(
             continue;
         };
         reference.reflectivity = header.reflectivity;
-        let Ok(decision) = atlas::analyze_resolution(header.size, [*blocks_spanned; 2]) else {
+        let Ok(decision) = atlas::analyze_resolution(header.size, [*blocks_spanned; 2], quality)
+        else {
             materials.push(reference);
             continue;
         };
@@ -1308,6 +1320,7 @@ mod tests {
     fn bucket_by_output_groups_contributions_sharing_a_resolution() {
         let buckets = bucket_by_output(
             [1024, 1024],
+            atlas::TextureQuality::Default,
             [
                 (Contrib::Face(0), [4.0, 4.0]),
                 (Contrib::Face(1), [4.0, 4.0]),
@@ -1325,6 +1338,7 @@ mod tests {
     fn bucket_by_output_clamps_to_original_and_ignores_bad_contributions() {
         let buckets = bucket_by_output(
             [32, 32],
+            atlas::TextureQuality::Default,
             [
                 (Contrib::Face(0), [64.0, 64.0]),
                 (Contrib::Face(1), [f64::NAN, 1.0]),
@@ -1336,7 +1350,7 @@ mod tests {
 
     #[test]
     fn bucket_by_output_of_no_contributions_is_empty() {
-        assert!(bucket_by_output([32, 32], Vec::new()).is_empty());
+        assert!(bucket_by_output([32, 32], atlas::TextureQuality::Default, Vec::new()).is_empty());
     }
 
     #[test]

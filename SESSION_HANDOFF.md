@@ -1,10 +1,44 @@
 # src2mc implementation handoff
 
-Updated: 2026-10-01 (Europe/Berlin), DEV-0.15.0 (shadow-pass culling;
-uncommitted)
+Updated: 2026-10-01 (Europe/Berlin), DEV-0.16.0 (full-quality texture export,
+atlas mipmaps, cut-out mips, README rewrite)
 
 Test shaderpack: **Complementary Reimagined** (Iris 1.8.14). Earlier notes and
 the DEV-0.14.0 commit message say Photon by mistake.
+
+**Atlas mipmaps were never used (fixed in DEV-0.16.0, user-confirmed):**
+the entity render types' texture shard calls `setFilter(false, false)` on every
+`setupRenderState`, so atlas pages were sampled GL_NEAREST with no mips, although
+the converter ships mips 0-4 and `MipTexture` enabled them once. Distant
+surfaces shimmered; at full texture quality it became heavy noise, visible even
+standing still (Complementary's TAA jitter re-samples every frame). Both
+renderers now call `MapSurfaceRenderer.applyAtlasFilter` (NEAREST_MIPMAP_LINEAR,
+like terrain) right after each state setup; `/src2mc_mipmaps on|off` to compare.
+User-confirmed 2026-10-01: "on almost all blocks and props it looks amazing".
+Full quality ran at a stable 23 fps on the furnace, so the user went back to
+default quality; deeper mips for full quality (gutter 2^levels, a format
+change) were not pursued.
+
+**Cut-out mips (DEV-0.16.0):** user-confirmed fixed 2026-10-01. with mips in use, mesh
+fences, grates and windows turned solid with distance: averaged alpha left the
+holes partly opaque and the cut-out shader only drops alpha below 0.1.
+`atlas::build_pages` now re-binarizes every cut-out region (recognised by its
+already-binary alpha with some holes) in mips 1-4, keeping the level-0 share of
+opaque texels, with a 4x4 ordered-dither rank breaking ties (a regular mesh
+averages to one alpha everywhere). All 10 test bundles re-exported at default
+quality, validated and installed.
+
+**Full-quality textures (DEV-0.16.0, awaiting in-game check):**
+`mod export --quality full` keeps every texture at its original Source
+resolution (`atlas::TextureQuality::Full` in `analyze_resolution`; only an axis
+over 4096, the client's output limit, is scaled down with the aspect kept).
+No flag means the old 16 texels per block, byte-identical to before (furnace
+bundle compared). Furnace at full: 1.1 GB bundle, 49 atlas pages, 442 textures
+(default: 36 MB, 1 page, 725 textures; fewer textures because every use of a
+material now shares one size). Not a format change. At ~89 MiB VRAM per
+resident page, the client's 2 GiB texture budgets hold ~22 pages; residency
+goes over budget rather than drop pages in view, but the budgets may need
+raising for full-quality campaigns.
 
 **Shadow-pass culling (DEV-0.15.0):** user-confirmed 2026-10-01: 60 to 67 fps
 with it on, frame times as stable as before, no shadow or render faults. surfaces and props

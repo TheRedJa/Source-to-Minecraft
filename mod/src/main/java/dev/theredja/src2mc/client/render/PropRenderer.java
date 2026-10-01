@@ -686,6 +686,7 @@ public final class PropRenderer {
                 var texture = MapSurfaceRenderer.atlasPages().request(generation.sequence(), mesh.bundle, mesh.atlas, key.page(), frame).orElseGet(MapSurfaceRenderer.atlasPages()::placeholderTexture);
                 activeType = translucent ? RenderType.entityTranslucent(texture) : key.renderClass() == BundleMaterial.RenderClass.SOLID ? RenderType.entitySolid(texture) : RenderType.entityCutout(texture);
                 activeType.setupRenderState();
+                MapSurfaceRenderer.applyAtlasFilter(texture);
                 if (suppressDepthWrite) RenderSystem.depthMask(false);
                 activeClass = key.renderClass();
                 activePage = key.page();

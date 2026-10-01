@@ -153,7 +153,17 @@ enum ModCommand {
         campaign: String,
         #[arg(short, long, default_value = "out")]
         out: PathBuf,
+        /// Texture resolution: `default` keeps up to 16 texels per block,
+        /// `full` keeps every texture at its original Source resolution.
+        #[arg(long, value_enum, default_value_t = Quality::Default)]
+        quality: Quality,
     },
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum Quality {
+    Default,
+    Full,
 }
 
 /// Flags shared by `convert` and `batch`.
@@ -361,7 +371,17 @@ fn load(path: &Path) -> Result<Map> {
     Map::load(path).with_context(|| format!("loading map {}", path.display()))
 }
 
-fn mod_export(maps: &[PathBuf], common: &Common, campaign: &str, out: &Path) -> Result<()> {
+fn mod_export(
+    maps: &[PathBuf],
+    common: &Common,
+    campaign: &str,
+    out: &Path,
+    quality: Quality,
+) -> Result<()> {
+    let quality = match quality {
+        Quality::Default => src2mc::output::atlas::TextureQuality::Default,
+        Quality::Full => src2mc::output::atlas::TextureQuality::Full,
+    };
     if let Some(units) = common.units_per_block {
         anyhow::ensure!(
             units == src2mc::output::mod_export::UNITS_PER_BLOCK,
@@ -389,6 +409,7 @@ fn mod_export(maps: &[PathBuf], common: &Common, campaign: &str, out: &Path) -> 
             &map,
             &config,
             &conversion,
+            quality,
         )?);
     }
     let written = src2mc::output::mod_export::write_campaign(out, campaign, exports)?;
@@ -780,7 +801,8 @@ fn main() -> Result<()> {
                 common,
                 campaign,
                 out,
-            } => mod_export(&maps, &common, &campaign, &out)?,
+                quality,
+            } => mod_export(&maps, &common, &campaign, &out, quality)?,
         },
         Command::Maps { vpk } => {
             let maps = src2mc::bsp::maps_in_vpk(&vpk)?;

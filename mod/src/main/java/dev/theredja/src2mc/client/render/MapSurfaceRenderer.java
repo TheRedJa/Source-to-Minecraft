@@ -118,6 +118,11 @@ public final class MapSurfaceRenderer {
     /** Whether meshes go up as distinct vertices plus an index buffer rather than three fresh
      * vertices per triangle; a toggle because Iris's per-triangle attributes are then shared. */
     private static boolean indexedMeshes = true;
+    /** Whether atlas pages are sampled through their mip levels. The entity render types turn
+     * mipmapping off every time they are set up (their texture shard says mipmap=false), so the
+     * converter's mips 1-4 went unused and distant surfaces sampled the full page: shimmering
+     * noise, and far worse at full texture quality. A toggle to compare. */
+    private static boolean atlasMipmaps = true;
     /** Draw-side counters for the main pass, latched each frame; see {@link #frameStats}. */
     private static final DrawStats STATS = new DrawStats();
     private static DrawStats.Frame lastStats = DrawStats.Frame.EMPTY;
@@ -270,6 +275,9 @@ public final class MapSurfaceRenderer {
         event.getDispatcher().register(literal("src2mc_translucent_depth")
             .then(literal("on").executes(context -> setTranslucentDepthWrite(context.getSource(), true)))
             .then(literal("off").executes(context -> setTranslucentDepthWrite(context.getSource(), false))));
+        event.getDispatcher().register(literal("src2mc_mipmaps")
+            .then(literal("on").executes(context -> setAtlasMipmaps(context.getSource(), true)))
+            .then(literal("off").executes(context -> setAtlasMipmaps(context.getSource(), false))));
         event.getDispatcher().register(literal("src2mc_indexed")
             .then(literal("on").executes(context -> setIndexedMeshes(context.getSource(), true)))
             .then(literal("off").executes(context -> setIndexedMeshes(context.getSource(), false))));
@@ -321,6 +329,20 @@ public final class MapSurfaceRenderer {
         translucentDepthWrite = value;
         source.sendSuccess(() -> Component.literal("src2mc translucent depth write " + (value ? "on" : "off")), false);
         return 1;
+    }
+
+    private static int setAtlasMipmaps(net.minecraft.commands.CommandSourceStack source, boolean value) {
+        atlasMipmaps = value;
+        source.sendSuccess(() -> Component.literal("src2mc atlas mipmaps " + (value ? "on" : "off (vanilla entity sampling)")), false);
+        return 1;
+    }
+
+    /**
+     * Re-enables mipmapping on an atlas page right after its render type was set up, which had
+     * just turned it off. Nearest within a level and linear between levels, as vanilla terrain.
+     */
+    static void applyAtlasFilter(ResourceLocation texture) {
+        if (atlasMipmaps) Minecraft.getInstance().getTextureManager().getTexture(texture).setFilter(false, true);
     }
 
     /** Rebuilds everything, since the layout is chosen when a mesh is uploaded. */
@@ -963,6 +985,7 @@ public final class MapSurfaceRenderer {
                 activeType = translucent ? RenderType.entityTranslucent(texture)
                     : key.renderClass == BundleMaterial.RenderClass.SOLID ? RenderType.entitySolid(texture) : RenderType.entityCutout(texture);
                 activeType.setupRenderState();
+                applyAtlasFilter(texture);
                 // entityTranslucent writes depth, so the nearest translucent surface drawn first would
                 // hide translucent geometry behind it; keep the depth test but skip the write.
                 if (suppressDepthWrite) RenderSystem.depthMask(false);
