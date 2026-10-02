@@ -4,13 +4,14 @@ The companion mod that draws converted Source maps: bundle loading and
 validation, mod-native placement (`/src2mc place <map>`), exact per-cell surface
 rendering on mod-owned paged textures, static prop rendering, sub-block
 collision for map geometry and props, smooth lighting with a client sky-light
-bake, and Source PVS, frustum, GPU-occlusion and shadow-pass culling. What it
-does and how to use it is in the [root README](../README.md#the-companion-mod).
+bake, Source PVS, frustum, GPU-occlusion and shadow-pass culling, and the
+map's sound: soundscapes, ambient sounds and per-surface footsteps and impacts.
+What it does and how to use it is in the [root README](../README.md#the-companion-mod).
 
 The mod registers fixed generic world content plus `/src2mc status`, `validate`,
 `reload`, `reconcile` and `place`; client diagnostics include
-`/src2mc_render_status`, `/src2mc_prop_status` and
-`/src2mc_prop_overlay_toggle`. Bundles load by themselves in the background
+`/src2mc_render_status`, `/src2mc_prop_status`,
+`/src2mc_prop_overlay_toggle` and `/src2mc_audio`. Bundles load by themselves in the background
 during game startup, so `/src2mc reload` is only needed for a bundle that
 changed on disk — see [`docs/bundle-loading.md`](docs/bundle-loading.md). What
 a shaderpack does to the buffers the mod uploads is in
@@ -40,6 +41,11 @@ keeps every texture at its original resolution, at a much larger bundle and
 texture memory cost (INFRA's furnace: 36 MB and 1 atlas page by default,
 1.1 GB and 49 pages at full quality). Raise `textureVramBudgetBytes` and
 `textureRamBudgetBytes` in the mod config if pages fail to load.
+
+Sound is exported by default, as Ogg Vorbis at quality 7 (INFRA's furnace: 308
+sounds, 14.6 MB); `--no-audio` leaves it out. The mod plays it through
+Minecraft's sound engine by placing decoded buffers in the engine's own buffer
+cache under a namespace of its own (`client/audio/SoundLibrary.java`).
 
 ## Requirements
 

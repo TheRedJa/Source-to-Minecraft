@@ -34,4 +34,11 @@ final class Src2mcCarrierBlock extends Src2mcInvisibleBlock {
 
     @Override
     protected boolean propagatesSkylightDown(BlockState state, BlockGetter level, BlockPos pos) { return true; }
+
+    /** See {@link Src2mcSounds}. Only this positional form changes; the plain one stays stone's for mods that read it. */
+    @Override
+    public net.minecraft.world.level.block.SoundType getSoundType(BlockState state, net.minecraft.world.level.LevelReader level,
+                                                                  BlockPos pos, @javax.annotation.Nullable net.minecraft.world.entity.Entity entity) {
+        return Src2mcSounds.SURFACE;
+    }
 }

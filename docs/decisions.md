@@ -369,3 +369,63 @@ the shell of its drawn mesh, a sixteenth thick. A prop's piece in a map
 block's cell joins that block's shape, and one in an empty cell gets a carrier,
 or the prop root when a root lands there; roots carry their cell's shape.
 Removing a root does not yet remove its prop's collision elsewhere.
+
+## D19 — Map sound plays through Minecraft's sound engine, by Source's rules
+
+The map's sound is exported per map (format section 15) and played by the mod
+through Minecraft's own sound engine, not a separate OpenAL context. That
+keeps the volume sliders, subtitles, mods that mute sounds, and Sound Physics
+Remastered's reverb and occlusion working on it with no integration code,
+which is why Source's DSP presets are not reproduced: they are a custom effect
+chain OpenAL's reverb can only approximate, and Sound Physics does the room
+acoustics from the actual blocks.
+
+- **Encoding.** WAVs (PCM, Microsoft and IMA ADPCM) are re-encoded as Ogg
+  Vorbis at quality 7, which the user judged indistinguishable from the
+  source; Minecraft decodes Ogg natively. A stereo file Source places as a
+  point is mixed down to mono, since OpenAL cannot position stereo; other
+  stereo stays stereo and plays unpanned with distance falloff, as in Source.
+- **Playback.** The engine's buffer library only reads resource packs, so the
+  mod decodes a bundle sound itself and puts the buffer into the engine's own
+  buffer cache, reached by reflection by field type, under a content-addressed
+  name in a namespace of its own. Static buffers keep sounds in the large
+  static channel pool; only a loop whose loop point is past its first frame
+  is streamed, from decoded samples, so its intro plays once.
+- **Falloff** is Source's, applied by the mod each tick with Minecraft's own
+  attenuation off: inverse distance from the sound level against a 60 dB,
+  36-unit reference, full volume close by, and below 1% a linear fade to zero
+  over the same distance again. The reference values are the public SDK's;
+  the curve past them is the engine's and is the one part not taken from
+  public code.
+- **Soundscapes** follow `soundscape_system.cpp` and `c_soundscape.cpp`:
+  candidate entities whose PVS holds the listener, in radius and with a clear
+  line (Minecraft's block collision here, where Source traces brushes only),
+  the nearest winning and the last winner staying; three-second crossfades
+  that reuse a slot already playing the same wave; random sounds on their
+  timers, at their positions or on a circle 36 units around the listener.
+- **Surfaces.** Map blocks report their own sound events. The client
+  replaces each with the surface property's soundscript, found from the
+  material under the feet (or the block's largest face) in the surface table:
+  steps alternate left and right at Source's 0.2 walking and 0.5 running
+  volume, with sprinting as running, times a gain (default 2; Source's levels
+  sounded too quiet next to Minecraft's, user 2026-10-02); a hit plays
+  `impactsoft`, a break `break` or `impacthard`. A hit or break that cannot be
+  placed keeps stone's sound, which `sounds.json` also plays on a client
+  without the bundle.
+- **Movement inside a map is Source's only** (user, 2026-10-02: Minecraft's
+  sounds "just ruin it"). Every step Minecraft plays inside a placed map with
+  sound, on any block, becomes the surface's step, or Source's `default`
+  surface where no map face is underfoot; Minecraft's landing and fall-damage
+  sounds are dropped. The local player's jump plays a full-volume step
+  (`CheckJumpButton`), and a landing after a fall of 76.5 units a 0.85 step,
+  after 231 units a full step and `Player.FallDamage` (`CheckFalling`, HL2's
+  values; Source states them as speeds under its own gravity, so the fall
+  heights are what carries over). INFRA has no `Player.FallDamage` but its own
+  `Player.FallLight` and `Player.FallMedium`, whose triggers live in its
+  closed player code; by the user's choice (2026-10-02) light plays on a rough
+  landing and medium on a hurting one. Step gain 2 confirmed by the user.
+- **Scope.** Only sound that plays without the map's logic is exported:
+  soundscapes that do not start disabled, and `ambient_generic`s that start
+  playing at spawn. Everything the I/O system triggers waits on that logic.
+  Props are not looked up for surface sounds yet; standing on one plays the
+  floor's or stone's.

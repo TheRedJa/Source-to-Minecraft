@@ -13,6 +13,7 @@ final class BundleLimits {
     static final int MAX_JSON_NESTING = 64;
     static final int MAX_MAPS = 4_096;
     static final int MAX_MATERIALS_PER_MAP = 1_000_000;
+    static final int MAX_AUDIO_RECORDS = 1_000_000;
     static final int MAX_MODELS_PER_CAMPAIGN = 1_000_000;
     static final int MAX_PROPS_PER_MAP = 10_000_000;
     static final int MAX_UV_REGIONS_PER_MAP = 10_000_000;

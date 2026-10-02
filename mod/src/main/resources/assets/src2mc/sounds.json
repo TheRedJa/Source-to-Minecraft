@@ -1,0 +1,7 @@
+{
+  "surface.step": {"subtitle": "subtitles.block.generic.footsteps", "sounds": [{"name": "block.stone.step", "type": "event"}]},
+  "surface.break": {"subtitle": "subtitles.block.generic.break", "sounds": [{"name": "block.stone.break", "type": "event"}]},
+  "surface.place": {"subtitle": "subtitles.block.generic.place", "sounds": [{"name": "block.stone.place", "type": "event"}]},
+  "surface.hit": {"subtitle": "subtitles.block.generic.hit", "sounds": [{"name": "block.stone.hit", "type": "event"}]},
+  "surface.fall": {"sounds": [{"name": "block.stone.fall", "type": "event"}]}
+}

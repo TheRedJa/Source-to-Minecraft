@@ -130,14 +130,15 @@ impl Bundle {
         let options = SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Deflated)
             .unix_permissions(0o644);
-        // A PNG is deflated already; deflating it again shrinks nothing and
-        // was most of the time spent writing a bundle.
+        // A PNG is deflated already, and Vorbis is as compressed as sound
+        // gets; deflating either again shrinks nothing and was most of the
+        // time spent writing a bundle.
         let stored = options.compression_method(zip::CompressionMethod::Stored);
         let mut zip = zip::ZipWriter::new(writer);
         zip.start_file(MANIFEST_PATH, options)?;
         zip.write_all(manifest)?;
         for (path, bytes) in &self.entries {
-            let options = if path.ends_with(".png") {
+            let options = if path.ends_with(".png") || path.ends_with(".ogg") {
                 stored
             } else {
                 options

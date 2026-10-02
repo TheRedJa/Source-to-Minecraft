@@ -107,7 +107,7 @@ pub fn parse(text: &str) -> Vmt {
 }
 
 /// Split VDF text into tokens, dropping comments and platform conditionals.
-fn tokenize(text: &str) -> Vec<String> {
+pub(crate) fn tokenize(text: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let bytes = text.as_bytes();
     let mut i = 0;

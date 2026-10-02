@@ -61,6 +61,8 @@ pub struct Model {
     /// another with its `skin`, which is how one pipe or tank model comes clean,
     /// painted or rusted.
     pub skins: Vec<Vec<String>>,
+    /// The model's `$surfaceprop`, lowercased; what it sounds like to walk on.
+    pub surface_prop: Option<String>,
 }
 
 impl Model {
@@ -281,6 +283,8 @@ impl<'a> Models<'a> {
                     .collect()
             })
             .collect();
+        let surface_prop = Some(model.surface_prop().trim().to_ascii_lowercase())
+            .filter(|prop| !prop.is_empty());
         Model {
             parts: parts
                 .into_iter()
@@ -294,6 +298,7 @@ impl<'a> Models<'a> {
                 .collect(),
             bounds,
             skins,
+            surface_prop,
         }
     }
 

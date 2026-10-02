@@ -89,6 +89,10 @@ pub struct MapMetadata {
     /// without them, and every block then collides as a full cube.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub collision: Option<String>,
+    /// Optional sound table. Absent when the map was exported without sound
+    /// or has none that plays without its logic.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audio: Option<String>,
     pub diagnostics: String,
 }
 
@@ -135,6 +139,9 @@ pub struct ModelReference {
     pub source_model: String,
     /// Map-local material IDs indexed by the mesh's material slots.
     pub materials: Vec<u32>,
+    /// The model's Source `$surfaceprop`, when it declares one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub surface_prop: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -534,17 +541,20 @@ mod tests {
                     content_id: id('a'),
                     source_model: "a.mdl".into(),
                     materials: vec![0],
+                    surface_prop: None,
                 },
                 ModelReference {
                     content_id: id('b'),
                     source_model: "b.mdl".into(),
                     materials: vec![0],
+                    surface_prop: Some("metal".into()),
                 },
             ],
             props: "maps/d1_01/props.s2props".into(),
             pvs: Some("maps/d1_01/pvs.s2pvs".into()),
             occlusion: Some("maps/d1_01/occlusion.s2occl".into()),
             collision: None,
+            audio: None,
             diagnostics: "maps/d1_01/diagnostics.json".into(),
         };
         let value: serde_json::Value =
