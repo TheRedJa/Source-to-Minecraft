@@ -1,6 +1,7 @@
 //! Writing converted maps to disk.
 
 pub mod atlas;
+pub mod audio;
 pub mod bake;
 pub mod bundle;
 pub mod cell_collision;

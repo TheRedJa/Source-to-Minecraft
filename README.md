@@ -48,6 +48,16 @@ There are two ways to get a map into Minecraft:
   a world with several large maps loads in a second or two.
 - **Shaderpacks** through Iris, tested with Complementary Reimagined: surfaces
   and props land in the shadow map and the gbuffers like terrain does.
+- **The map's sound**: its soundscapes, picked the way Source picks them and
+  crossfaded as you walk between them, the ambient sounds that play from the
+  start (machines, fans, fire), and footsteps, hits and breaks that sound like
+  the surface's own material. Inside a map, Minecraft's own step, landing and
+  fall sounds are replaced: you hear Source's steps, a step when you jump, and
+  one on a hard landing. Source's sounds are re-encoded as Ogg Vorbis at
+  quality 7 and played through Minecraft's sound engine, so the volume sliders
+  apply and [Sound Physics Remastered](https://modrinth.com/mod/sound-physics-remastered),
+  if installed, adds its reverb and occlusion. Sounds the map's logic triggers
+  (button presses, voice lines, music) need that logic and are not exported.
 
 ### Usage
 
@@ -64,6 +74,9 @@ src2mc mod export --campaign infra -o out/ \
 # bundles and much more texture memory (the furnace goes from 36 MB and one
 # atlas page to 1.1 GB and 49).
 src2mc mod export --campaign infra -o out/ --quality full maps/infra_c4_m2_furnace.bsp
+
+# Leave the sound out: no soundscapes, ambient sounds or surface sounds.
+src2mc mod export --campaign infra -o out/ --no-audio maps/infra_c4_m2_furnace.bsp
 
 # Print how long each export stage took.
 SRC2MC_TIMINGS=1 src2mc mod export ...
@@ -84,7 +97,10 @@ Useful client commands: `/src2mc_prop_overlay_toggle` (live render, GPU-time
 and culling counters), `/src2mc_render_status`, `/src2mc_debug_face`, and
 `/src2mc_cull pvs|frustum|shadow on|off`, `/src2mc_mipmaps on|off`,
 `/src2mc_indexed on|off` and `/src2mc_draw_order sorted|unsorted` for A/B
-comparisons.
+comparisons. `/src2mc_audio` reports which soundscape plays and what else is
+sounding, and `/src2mc_audio soundscapes|ambient|surfaces on|off` switches each
+part of the sound; `/src2mc_audio steps <gain>` sets how loud footsteps play
+relative to Source's own levels (default 2).
 
 Building the mod and running its development client is described in
 [`mod/README.md`](mod/README.md). The bundle format is specified in

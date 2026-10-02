@@ -1,7 +1,46 @@
 # src2mc implementation handoff
 
-Updated: 2026-10-01 (Europe/Berlin), DEV-0.16.0 (full-quality texture export,
-atlas mipmaps, cut-out mips, README rewrite)
+Updated: 2026-10-02 (Europe/Berlin), DEV-0.19.0 (map sound; Minecraft's
+movement sounds replaced inside maps; INFRA landing sounds)
+
+**User-confirmed 2026-10-02:** DEV-0.18.0 movement sounds "all sounds good";
+step gain 2 is right (already the default). **DEV-0.19.0 (user-confirmed 2026-10-02, "Works"):**
+INFRA's `Player.FallLight` plays on a rough landing (>= 76.5 units fallen),
+`Player.FallMedium` on a hurting one (>= 231 units) when the game has no
+`Player.FallDamage`; both now exported with the player scripts.
+
+**Movement sounds (DEV-0.18.0, awaiting in-game test):** user feedback on
+DEV-0.17.0: "All ambiance is there", Minecraft's walking/sprinting/falling
+sounds "just ruin it", and our steps were a bit quiet. Now every `*.step`
+inside a placed map with sound becomes Source's step (default surface where no
+face is underfoot), `*.fall`/`*.small_fall`/`*.big_fall` are dropped, the
+local player's jump and hard landings play Source steps (SDK `CheckJumpButton`,
+`CheckFalling`), and `Player.FallDamage` is exported when the game defines it
+(Portal and HL2 do; INFRA instead has `Player.FallLight/Medium/Fatal` and a
+jump sound via operator stacks, triggered by its closed player code -- asked
+the user whether to map them). Step gain default 2, `/src2mc_audio steps <g>`.
+
+**Map sound (DEV-0.17.0, implemented 2026-10-02, awaiting in-game test):**
+tiers 1 and 2 of the audio feasibility check, design in `docs/decisions.md` D19,
+format in `docs/format.md` section 15 (`maps/<id>/audio.json` plus
+`audio/<sha>.ogg`; a format change, hence the minor bump). Converter:
+`source/{keyvalues,wav,sound}.rs`, `output/audio.rs`; `--no-audio` skips it.
+WAV decode covers PCM 8/16/24/32, float, MS and IMA ADPCM; Ogg Vorbis q7 via
+`vorbis_rs` (libvorbis/aoTuV, BSD-3, built from C) with a fixed stream serial,
+so exports stay deterministic (furnace fingerprint identical across runs).
+Mod: `client/audio/` (`SourceAudio` coordinator, `SoundLibrary` puts decoded
+buffers into Minecraft's buffer cache by reflection, `SourceSound`,
+`SourceFalloff`, `SoundscapePlayer`, `AmbientPlayer`, `SurfaceSounds`,
+`SurfaceProbe`), `world/Src2mcSounds` (surface sound events and their
+`DeferredSoundType`, returned only by the positional `getSoundType`; the plain
+one stays stone for Sound Physics' reflectivity). `/src2mc_audio` status and
+`soundscapes|ambient|surfaces on|off`. All 10 bundles re-exported with sound,
+validated, installed (furnace: 308 sounds, 14.6 MB Ogg, 13 soundscapes, 49
+soundscape entities, 4 ambient sounds; 113 ambient_generics need logic). Not
+verified by ear yet: the falloff curve past Source's public reference values
+(engine code, not in the SDK), step volume mapping (sprint = Source run),
+whether Sound Physics processes the unpanned/everywhere sounds well, and the
+SPR raycast through map blocks. Props are not probed for step sounds yet.
 
 Test shaderpack: **Complementary Reimagined** (Iris 1.8.14). Earlier notes and
 the DEV-0.14.0 commit message say Photon by mistake.

@@ -94,14 +94,17 @@ impl Vfs {
         vfs
     }
 
-    /// Index a game directory's loose `materials/` tree.
+    /// Index a game directory's loose `materials/`, `sound/` and `scripts/`
+    /// trees. Games ship their soundscapes and soundscripts loose even when
+    /// everything else is packed.
     pub fn add_dir(&mut self, root: &Path) {
-        let materials = root.join("materials");
-        if !materials.is_dir() {
-            return;
-        }
         let mut files = HashMap::new();
-        index_dir(&materials, root, &mut files);
+        for tree in ["materials", "sound", "scripts"] {
+            let dir = root.join(tree);
+            if dir.is_dir() {
+                index_dir(&dir, root, &mut files);
+            }
+        }
         if !files.is_empty() {
             self.sources.push(Source::Dir {
                 root: root.to_path_buf(),

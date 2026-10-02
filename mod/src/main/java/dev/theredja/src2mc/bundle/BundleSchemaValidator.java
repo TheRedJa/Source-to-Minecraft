@@ -93,6 +93,7 @@ final class BundleSchemaValidator {
         if (map.has("pvs")) expected.add("pvs");
         if (map.has("occlusion")) expected.add("occlusion");
         if (map.has("collision")) expected.add("collision");
+        if (map.has("audio")) expected.add("audio");
         expected.add("diagnostics");
         keys(map, expected.toArray(String[]::new));
         format(map, "src2mc-map", path);
@@ -118,7 +119,8 @@ final class BundleSchemaValidator {
         BundleModel prior = null;
         for (JsonElement value : models) {
             JsonObject model = object(value, "model");
-            keys(model, "content_id", "source_model", "materials");
+            if (model.has("surface_prop")) keys(model, "content_id", "source_model", "materials", "surface_prop");
+            else keys(model, "content_id", "source_model", "materials");
             String contentId = digest(string(model, "content_id"), "model content ID");
             String source = string(model, "source_model");
             if (source.isEmpty()) fail(BundleErrorCode.INVALID_SCHEMA, "empty source model");
@@ -126,7 +128,8 @@ final class BundleSchemaValidator {
             if (slots.isEmpty()) fail(BundleErrorCode.INVALID_SCHEMA, "model has no material slots");
             int[] ids = new int[slots.size()];
             for (int i = 0; i < ids.length; i++) { ids[i] = uintIndex(slots.get(i), "material ID"); if (ids[i] >= materials.size()) fail(BundleErrorCode.INVALID_REFERENCE, "model material ID out of range"); }
-            BundleModel current = new BundleModel(contentId, source, ids);
+            String surfaceProp = model.has("surface_prop") ? string(model, "surface_prop") : null;
+            BundleModel current = new BundleModel(contentId, source, ids, surfaceProp);
             if (prior != null && compareModels(prior, current) >= 0) fail(BundleErrorCode.DUPLICATE_IDENTITY, "model references are not uniquely sorted");
             prior = current;
             modelRefs.add(current);
@@ -154,6 +157,12 @@ final class BundleSchemaValidator {
             referenced.add(collisionPath);
             collision = validateCollision(zip, required(entries, collisionPath));
         }
+        AudioTable audio = null;
+        if (map.has("audio")) {
+            String audioPath = exactPath(map, "audio", prefix + "audio.json");
+            referenced.add(audioPath);
+            audio = validateAudio(zip, entries, hashes, json(zip, required(entries, audioPath), audioPath), referenced);
+        }
         referenced.addAll(List.of(surfaces, props, diagnostics));
         SurfaceTable surfaceTable = validateFaces(zip, required(entries, surfaces), materials.size());
         List<BundleProp> propRecords = validateProps(zip, required(entries, props), modelRefs.size());
@@ -176,7 +185,7 @@ final class BundleSchemaValidator {
         }
         long mapHeight = (long) max[1] - min[1] + 1;
         return new BundleMap(mapId, sourceName, min, max, anchor, loadedMaterials, modelRefs, propRecords, mapHeight > 384,
-            surfaceTable, modelRefs.stream().map(BundleModel::contentId).collect(java.util.stream.Collectors.toUnmodifiableSet()), atlas, pvs, occlusion, collision);
+            surfaceTable, modelRefs.stream().map(BundleModel::contentId).collect(java.util.stream.Collectors.toUnmodifiableSet()), atlas, pvs, occlusion, collision, audio);
     }
 
     /** Parses and validates the optional per-cell collision table (format.md section 14). */
@@ -294,7 +303,163 @@ final class BundleSchemaValidator {
             case "cutout" -> BundleMaterial.RenderClass.CUTOUT;
             case "translucent" -> BundleMaterial.RenderClass.TRANSLUCENT;
             default -> BundleMaterial.RenderClass.FALLBACK;
-        }, loadedTexture, material.has("double_sided"));
+        }, loadedTexture, material.has("double_sided"), material.has("surface_prop") ? string(material, "surface_prop") : null);
+    }
+
+    private static final byte[] OGG_MAGIC = {'O','g','g','S'};
+
+    /** Parses and validates the optional sound table (format.md section 15) and checks every sound payload. */
+    private static AudioTable validateAudio(ZipFile zip, Map<String, ZipEntry> entries, Map<String, String> hashes,
+                                            JsonObject root, Set<String> referenced) throws IOException {
+        keys(root, "format", "version", "sounds", "soundscapes", "emitters", "ambients", "scripts", "surfaces");
+        format(root, "src2mc-audio", "audio.json");
+        JsonArray soundArray = array(root, "sounds");
+        limit(soundArray.size(), BundleLimits.MAX_AUDIO_RECORDS, "sound count");
+        List<AudioTable.Sound> sounds = new ArrayList<>(soundArray.size());
+        for (JsonElement element : soundArray) {
+            JsonObject sound = object(element, "sound");
+            if (sound.has("loop_start")) keys(sound, "content_id", "source", "channels", "sample_rate", "frames", "loop_start");
+            else keys(sound, "content_id", "source", "channels", "sample_rate", "frames");
+            String contentId = digest(string(sound, "content_id"), "sound content ID");
+            int channels = uintIndex(sound.get("channels"), "channels");
+            if (channels != 1 && channels != 2) fail(BundleErrorCode.INVALID_SCHEMA, "sounds must be mono or stereo");
+            int rate = uintIndex(sound.get("sample_rate"), "sample_rate");
+            if (rate == 0 || rate > 384_000) fail(BundleErrorCode.INVALID_SCHEMA, "invalid sample rate");
+            long frames = uintIndex(sound.get("frames"), "frames");
+            if (frames == 0) fail(BundleErrorCode.INVALID_SCHEMA, "empty sound");
+            long loopStart = sound.has("loop_start") ? uintIndex(sound.get("loop_start"), "loop_start") : -1;
+            if (loopStart >= frames) fail(BundleErrorCode.INVALID_SCHEMA, "loop starts past the end of its sound");
+            AudioTable.Sound loaded = new AudioTable.Sound(contentId, string(sound, "source"), channels, rate, frames, loopStart);
+            String path = loaded.entryPath();
+            referenced.add(path);
+            contentHash(hashes, path, contentId);
+            try (Binary in = new Binary(zip.getInputStream(required(entries, path)), required(entries, path).getSize())) {
+                in.magic(OGG_MAGIC);
+            }
+            sounds.add(loaded);
+        }
+        JsonArray soundscapeArray = array(root, "soundscapes");
+        limit(soundscapeArray.size(), BundleLimits.MAX_AUDIO_RECORDS, "soundscape count");
+        int soundscapeCount = soundscapeArray.size();
+        List<AudioTable.Soundscape> soundscapes = new ArrayList<>(soundscapeCount);
+        for (JsonElement element : soundscapeArray) {
+            JsonObject soundscape = object(element, "soundscape");
+            keys(soundscape, "name", "loops", "randoms", "children");
+            List<AudioTable.Loop> loops = new ArrayList<>();
+            for (JsonElement value : array(soundscape, "loops")) {
+                JsonObject loop = object(value, "loop");
+                if (loop.has("position")) keys(loop, "sound", "volume", "pitch", "sound_level", "position");
+                else keys(loop, "sound", "volume", "pitch", "sound_level");
+                loops.add(new AudioTable.Loop(index(loop.get("sound"), sounds.size(), "loop sound"), range(loop, "volume"),
+                    range(loop, "pitch"), range(loop, "sound_level"), loop.has("position") ? uintIndex(loop.get("position"), "position") : -1));
+            }
+            List<AudioTable.Random> randoms = new ArrayList<>();
+            for (JsonElement value : array(soundscape, "randoms")) {
+                JsonObject random = object(value, "random");
+                if (random.has("position")) keys(random, "sounds", "time", "volume", "pitch", "sound_level", "position", "random_position");
+                else keys(random, "sounds", "time", "volume", "pitch", "sound_level", "random_position");
+                JsonElement randomPosition = random.get("random_position");
+                if (!randomPosition.isJsonPrimitive() || !randomPosition.getAsJsonPrimitive().isBoolean()) fail(BundleErrorCode.INVALID_SCHEMA, "random_position must be a boolean");
+                randoms.add(new AudioTable.Random(indices(random, "sounds", sounds.size()), range(random, "time"), range(random, "volume"),
+                    range(random, "pitch"), range(random, "sound_level"),
+                    random.has("position") ? uintIndex(random.get("position"), "position") : -1, randomPosition.getAsBoolean()));
+            }
+            List<AudioTable.Child> children = new ArrayList<>();
+            for (JsonElement value : array(soundscape, "children")) {
+                JsonObject child = object(value, "child");
+                List<String> childKeys = new ArrayList<>(List.of("soundscape", "volume", "position"));
+                if (child.has("position_override")) childKeys.add("position_override");
+                if (child.has("ambient_position_override")) childKeys.add("ambient_position_override");
+                keys(child, childKeys.toArray(String[]::new));
+                children.add(new AudioTable.Child(index(child.get("soundscape"), soundscapeCount, "child soundscape"), range(child, "volume"),
+                    uintIndex(child.get("position"), "position"),
+                    child.has("position_override") ? uintIndex(child.get("position_override"), "position_override") : -1,
+                    child.has("ambient_position_override") ? uintIndex(child.get("ambient_position_override"), "ambient_position_override") : -1));
+            }
+            soundscapes.add(new AudioTable.Soundscape(string(soundscape, "name"), loops, randoms, children));
+        }
+        JsonArray emitterArray = array(root, "emitters");
+        limit(emitterArray.size(), BundleLimits.MAX_AUDIO_RECORDS, "soundscape entity count");
+        List<AudioTable.Emitter> emitters = new ArrayList<>(emitterArray.size());
+        for (JsonElement element : emitterArray) {
+            JsonObject emitter = object(element, "soundscape entity");
+            keys(emitter, "position", "radius", "soundscape", "positions");
+            double[] position = vector3d(emitter.get("position"), "soundscape entity position");
+            double radius = finiteNumber(emitter.get("radius"), "radius");
+            if (radius < 0 && radius != -1) fail(BundleErrorCode.INVALID_SCHEMA, "radius must be -1 or not negative");
+            JsonArray positionArray = array(emitter, "positions");
+            if (positionArray.size() != AudioTable.LOCAL_POSITIONS) fail(BundleErrorCode.INVALID_SCHEMA, "a soundscape entity has eight positions");
+            double[][] positions = new double[AudioTable.LOCAL_POSITIONS][];
+            for (int i = 0; i < positions.length; i++) {
+                JsonElement value = positionArray.get(i);
+                positions[i] = value.isJsonNull() ? null : vector3d(value, "soundscape position");
+            }
+            emitters.add(new AudioTable.Emitter(position[0], position[1], position[2], radius,
+                index(emitter.get("soundscape"), soundscapeCount, "soundscape"), positions));
+        }
+        JsonArray ambientArray = array(root, "ambients");
+        limit(ambientArray.size(), BundleLimits.MAX_AUDIO_RECORDS, "ambient sound count");
+        List<AudioTable.Ambient> ambients = new ArrayList<>(ambientArray.size());
+        for (JsonElement element : ambientArray) {
+            JsonObject ambient = object(element, "ambient sound");
+            keys(ambient, "position", "sounds", "volume", "pitch", "sound_level");
+            double[] position = vector3d(ambient.get("position"), "ambient sound position");
+            ambients.add(new AudioTable.Ambient(position[0], position[1], position[2], indices(ambient, "sounds", sounds.size()),
+                range(ambient, "volume"), range(ambient, "pitch"), range(ambient, "sound_level")));
+        }
+        JsonArray scriptArray = array(root, "scripts");
+        limit(scriptArray.size(), BundleLimits.MAX_AUDIO_RECORDS, "soundscript count");
+        List<AudioTable.Script> scripts = new ArrayList<>(scriptArray.size());
+        for (JsonElement element : scriptArray) {
+            JsonObject script = object(element, "soundscript");
+            keys(script, "name", "sounds", "volume", "pitch", "sound_level");
+            scripts.add(new AudioTable.Script(string(script, "name"), indices(script, "sounds", sounds.size()),
+                range(script, "volume"), range(script, "pitch"), range(script, "sound_level")));
+        }
+        JsonArray surfaceArray = array(root, "surfaces");
+        limit(surfaceArray.size(), BundleLimits.MAX_AUDIO_RECORDS, "surface count");
+        Map<String, AudioTable.Surface> surfaces = new HashMap<>();
+        String[] slots = {"step_left", "step_right", "impact_soft", "impact_hard", "break_sound"};
+        for (JsonElement element : surfaceArray) {
+            JsonObject surface = object(element, "surface");
+            List<String> surfaceKeys = new ArrayList<>(List.of("name"));
+            for (String slot : slots) if (surface.has(slot)) surfaceKeys.add(slot);
+            keys(surface, surfaceKeys.toArray(String[]::new));
+            int[] scriptIds = new int[slots.length];
+            for (int i = 0; i < slots.length; i++) scriptIds[i] = surface.has(slots[i]) ? index(surface.get(slots[i]), scripts.size(), "surface script") : -1;
+            String name = string(surface, "name");
+            if (!name.equals(name.toLowerCase(java.util.Locale.ROOT))) fail(BundleErrorCode.INVALID_SCHEMA, "surface names are lowercase");
+            if (surfaces.put(name, new AudioTable.Surface(name, scriptIds[0], scriptIds[1], scriptIds[2], scriptIds[3], scriptIds[4])) != null)
+                fail(BundleErrorCode.DUPLICATE_IDENTITY, "duplicate surface " + name);
+        }
+        return new AudioTable(sounds, soundscapes, emitters, ambients, scripts, surfaces);
+    }
+
+    private static AudioTable.Range range(JsonObject o, String key) throws BundleValidationException {
+        JsonArray value = array(o, key);
+        if (value.size() != 2) fail(BundleErrorCode.INVALID_SCHEMA, key + " must have two values");
+        return new AudioTable.Range(finiteNumber(value.get(0), key), finiteNumber(value.get(1), key));
+    }
+
+    private static int index(JsonElement value, int count, String label) throws BundleValidationException {
+        int index = uintIndex(value, label);
+        if (index >= count) fail(BundleErrorCode.INVALID_REFERENCE, label + " out of range");
+        return index;
+    }
+
+    private static int[] indices(JsonObject o, String key, int count) throws BundleValidationException {
+        JsonArray value = array(o, key);
+        if (value.isEmpty()) fail(BundleErrorCode.INVALID_SCHEMA, key + " must not be empty");
+        int[] out = new int[value.size()];
+        for (int i = 0; i < out.length; i++) out[i] = index(value.get(i), count, key);
+        return out;
+    }
+
+    private static double[] vector3d(JsonElement e, String label) throws BundleValidationException {
+        if (e == null || !e.isJsonArray() || e.getAsJsonArray().size() != 3) fail(BundleErrorCode.INVALID_SCHEMA, label + " must have three numbers");
+        double[] out = new double[3];
+        for (int i = 0; i < 3; i++) out[i] = finiteNumber(e.getAsJsonArray().get(i), label);
+        return out;
     }
 
     private static void validateDiagnostics(JsonObject diagnostics) throws BundleValidationException {

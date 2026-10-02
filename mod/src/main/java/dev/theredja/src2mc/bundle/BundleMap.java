@@ -20,8 +20,19 @@ public record BundleMap(
     // Cells that block light without holding a block; null when the map has none.
     OcclusionTable occlusion,
     // Per-cell collision shapes; null when the map was exported without them.
-    CollisionTable collision
+    CollisionTable collision,
+    // The map's sound; null when it was exported without any.
+    AudioTable audio
 ) {
+    public BundleMap(String mapId, String sourceName, int[] cellMin, int[] cellMax, int[] anchorCell,
+                     java.util.List<BundleMaterial> materials, java.util.List<BundleModel> models,
+                     java.util.List<BundleProp> props, boolean exceedsVanillaBuildHeight, SurfaceTable surfaces,
+                     java.util.Set<String> modelContentIds, AtlasIndex atlas, PropVisibility pvs,
+                     OcclusionTable occlusion, CollisionTable collision) {
+        this(mapId, sourceName, cellMin, cellMax, anchorCell, materials, models, props, exceedsVanillaBuildHeight,
+            surfaces, modelContentIds, atlas, pvs, occlusion, collision, null);
+    }
+
     public BundleMap {
         cellMin = cellMin.clone();
         cellMax = cellMax.clone();
@@ -45,7 +56,7 @@ public record BundleMap(
             && materials.equals(map.materials) && models.equals(map.models) && props.equals(map.props)
             && exceedsVanillaBuildHeight == map.exceedsVanillaBuildHeight && surfaces.equals(map.surfaces)
             && modelContentIds.equals(map.modelContentIds) && java.util.Objects.equals(atlas, map.atlas)
-            && pvs == map.pvs && occlusion == map.occlusion && collision == map.collision;
+            && pvs == map.pvs && occlusion == map.occlusion && collision == map.collision && audio == map.audio;
     }
 
     @Override
@@ -62,7 +73,8 @@ public record BundleMap(
         // rebuilt within one published generation, and this record is hashed
         // often enough that walking them would cost real frame time.
         result = 31 * result + System.identityHashCode(occlusion);
-        return 31 * result + System.identityHashCode(collision);
+        result = 31 * result + System.identityHashCode(collision);
+        return 31 * result + System.identityHashCode(audio);
     }
 
     public int materialCount() { return materials.size(); }

@@ -157,6 +157,10 @@ enum ModCommand {
         /// `full` keeps every texture at its original Source resolution.
         #[arg(long, value_enum, default_value_t = Quality::Default)]
         quality: Quality,
+        /// Leave the map's sound out: soundscapes, ambient sounds and
+        /// footsteps. Encoding sound is a large part of export time.
+        #[arg(long)]
+        no_audio: bool,
     },
 }
 
@@ -377,6 +381,7 @@ fn mod_export(
     campaign: &str,
     out: &Path,
     quality: Quality,
+    with_audio: bool,
 ) -> Result<()> {
     let quality = match quality {
         Quality::Default => src2mc::output::atlas::TextureQuality::Default,
@@ -410,6 +415,7 @@ fn mod_export(
             &config,
             &conversion,
             quality,
+            with_audio,
         )?);
     }
     let written = src2mc::output::mod_export::write_campaign(out, campaign, exports)?;
@@ -802,7 +808,8 @@ fn main() -> Result<()> {
                 campaign,
                 out,
                 quality,
-            } => mod_export(&maps, &common, &campaign, &out, quality)?,
+                no_audio,
+            } => mod_export(&maps, &common, &campaign, &out, quality, !no_audio)?,
         },
         Command::Maps { vpk } => {
             let maps = src2mc::bsp::maps_in_vpk(&vpk)?;

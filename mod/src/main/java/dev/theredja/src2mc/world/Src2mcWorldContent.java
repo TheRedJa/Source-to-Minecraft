@@ -64,6 +64,7 @@ public final class Src2mcWorldContent {
     public static void register(IEventBus bus) {
         BLOCKS.register(bus);
         BLOCK_ENTITIES.register(bus);
+        Src2mcSounds.register(bus);
     }
 
     private static Src2mcDataBlockEntity newDataBlockEntity(BlockPos position, BlockState state) {

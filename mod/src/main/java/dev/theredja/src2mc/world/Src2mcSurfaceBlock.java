@@ -61,4 +61,11 @@ final class Src2mcSurfaceBlock extends Src2mcInvisibleBlock {
         if (!newState.is(this)) SurfaceChangeTracker.mark(level, pos);
         super.onRemove(state, level, pos, newState, movedByPiston);
     }
+
+    /** See {@link Src2mcSounds}. Only this positional form changes; the plain one stays stone's for mods that read it. */
+    @Override
+    public net.minecraft.world.level.block.SoundType getSoundType(BlockState state, net.minecraft.world.level.LevelReader level,
+                                                                  BlockPos pos, @javax.annotation.Nullable net.minecraft.world.entity.Entity entity) {
+        return Src2mcSounds.SURFACE;
+    }
 }

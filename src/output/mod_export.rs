@@ -14,6 +14,7 @@ pub struct ModelAsset {
     pub source_model: String,
     pub bytes: Vec<u8>,
     pub materials: Vec<u32>,
+    pub surface_prop: Option<String>,
 }
 
 pub struct TextureAsset {
@@ -54,6 +55,8 @@ pub struct MapExport {
     /// Encoded per-cell collision shapes; absent when the map was converted
     /// without them.
     pub collision: Option<Vec<u8>>,
+    /// The map's sound; absent when exported without it.
+    pub audio: Option<crate::output::audio::AudioExport>,
     pub diagnostics: metadata::Diagnostics,
 }
 
@@ -70,6 +73,7 @@ pub fn from_conversion(
     config: &crate::config::Config,
     conversion: &crate::convert::Conversion,
     quality: atlas::TextureQuality,
+    with_audio: bool,
 ) -> Result<MapExport> {
     ensure!(
         conversion.transform.units_per_block() == UNITS_PER_BLOCK,
@@ -166,7 +170,8 @@ pub fn from_conversion(
                 ids
             });
     // Keyed by skin as well: one mesh, but each skin its own material slots.
-    let mut model_by_path: BTreeMap<(String, i32), (String, Vec<u32>, Vec<u8>)> = BTreeMap::new();
+    let mut model_by_path: BTreeMap<(String, i32), (String, Vec<u32>, Vec<u8>, Option<String>)> =
+        BTreeMap::new();
     for item in &extracted {
         let key = (item.prop.model.clone(), item.prop.skin);
         if model_by_path.contains_key(&key) {
@@ -198,7 +203,7 @@ pub fn from_conversion(
             .collect::<Vec<_>>();
         let bytes = crate::output::mesh::encode(&mesh)?;
         let id = bundle::content_id(&bytes);
-        model_by_path.insert(key, (id, slot_ids, bytes));
+        model_by_path.insert(key, (id, slot_ids, bytes, item.model.surface_prop.clone()));
     }
     crate::timing::mark("export: prop meshes");
     // Props go exactly where the map puts them. They used to be settled onto
@@ -242,7 +247,7 @@ pub fn from_conversion(
             cell_max[axis] = cell_max[axis].max(root_cell[axis]);
             cell_min[axis] = cell_min[axis].min(root_cell[axis]);
         }
-        let (model_content_id, slots, _) =
+        let (model_content_id, slots, _, _) =
             &model_by_path[&(item.prop.model.clone(), item.prop.skin)];
         let origin = conversion.transform.to_block_space(item.prop.origin);
         props.push(Prop {
@@ -322,13 +327,16 @@ pub fn from_conversion(
         });
     }
     crate::timing::mark("export: prop roots and diagnostics");
-    let models = model_by_path
+    let models: Vec<ModelAsset> = model_by_path
         .into_iter()
-        .map(|((source_model, _), (_, materials, bytes))| ModelAsset {
-            source_model,
-            bytes,
-            materials,
-        })
+        .map(
+            |((source_model, _), (_, materials, bytes, surface_prop))| ModelAsset {
+                source_model,
+                bytes,
+                materials,
+                surface_prop,
+            },
+        )
         .collect();
     let pvs = if let Some((visibility, index)) = visibility.as_ref().zip(pvs_index.as_ref()) {
         let rows = visibility.rows.clone();
@@ -384,6 +392,23 @@ pub fn from_conversion(
         .then(|| crate::output::occlusion::encode(&light_blockers))
         .transpose()
         .context("encoding the light-occlusion mask")?;
+    let audio = if with_audio {
+        // What a surface sounds like comes from its material's
+        // `$surfaceprop`, and a prop's from its model's.
+        let surface_props: BTreeSet<String> = materials
+            .iter()
+            .filter_map(|m| m.surface_prop.clone())
+            .chain(models.iter().filter_map(|m| m.surface_prop.clone()))
+            .collect();
+        let entities = crate::bsp::entities::extract(map, &conversion.transform);
+        let audio = crate::output::audio::build(map, config, &entities, &surface_props)
+            .context("exporting the map's sound")?;
+        diagnostics.extend(audio.diagnostics.iter().cloned());
+        crate::timing::mark("export: audio");
+        (!audio.table.is_empty()).then_some(audio)
+    } else {
+        None
+    };
     Ok(MapExport {
         map_id: portable_id(&map.name),
         source_name: map.name.clone(),
@@ -400,6 +425,7 @@ pub fn from_conversion(
         pvs,
         occlusion,
         collision,
+        audio,
         diagnostics: metadata::Diagnostics::new(diagnostics)?,
     })
 }
@@ -977,6 +1003,7 @@ pub fn write_campaign(
                 content_id,
                 source_model: model.source_model,
                 materials: model.materials,
+                surface_prop: model.surface_prop,
             });
         }
         model_refs.sort();
@@ -1077,6 +1104,14 @@ pub fn write_campaign(
         if let Some(collision) = map.collision {
             archive.add(format!("{prefix}/collision.s2coll"), collision)?;
         }
+        let has_audio = map.audio.is_some();
+        if let Some(audio) = map.audio {
+            for (content_id, bytes) in audio.assets {
+                let added = archive.add_content("audio", "ogg", bytes)?;
+                ensure!(added == content_id, "sound content ID changed");
+            }
+            archive.add(format!("{prefix}/audio.json"), audio.table.encode()?)?;
+        }
         archive.add(
             format!("{prefix}/diagnostics.json"),
             map.diagnostics.encode()?,
@@ -1098,6 +1133,7 @@ pub fn write_campaign(
             pvs: has_pvs.then(|| format!("{prefix}/pvs.s2pvs")),
             occlusion: has_occlusion.then(|| format!("{prefix}/occlusion.s2occl")),
             collision: has_collision.then(|| format!("{prefix}/collision.s2coll")),
+            audio: has_audio.then(|| format!("{prefix}/audio.json")),
             diagnostics: format!("{prefix}/diagnostics.json"),
         };
         archive.add(&metadata_path, meta.encode()?)?;
@@ -1248,10 +1284,12 @@ mod tests {
                 source_model: source_model.into(),
                 bytes: mesh_bytes,
                 materials: vec![0],
+                surface_prop: None,
             }],
             pvs: None,
             occlusion: None,
             collision: None,
+            audio: None,
             props: vec![Prop {
                 source_ordinal: 0,
                 source_model: source_model.into(),
@@ -1464,6 +1502,7 @@ mod tests {
             source_model: "models/b.mdl".into(),
             bytes,
             materials: vec![1],
+            surface_prop: None,
         });
         map.props.push(Prop {
             source_ordinal: 1,

@@ -15,8 +15,8 @@ Duplicate names are invalid after exact UTF-8 comparison.
 
 `manifest.json` is the only bootstrap entry and is reserved. Directory entries
 are unnecessary. Readers must use names, never ZIP entry order.
-Entries may be stored or deflated; the converter stores PNG entries, which are
-compressed already, and deflates the rest. Content IDs and the fingerprint
+Entries may be stored or deflated; the converter stores PNG and Ogg entries,
+which are compressed already, and deflates the rest. Content IDs and the fingerprint
 cover entry bytes, not the ZIP encoding.
 
 ## 2. Canonical payloads
@@ -167,6 +167,7 @@ fields in order:
 | `pvs` | optional canonical `maps/<map-id>/pvs.s2pvs` path; absent when the map has no usable PVS |
 | `occlusion` | optional canonical `maps/<map-id>/occlusion.s2occl` path (section 13) |
 | `collision` | optional canonical `maps/<map-id>/collision.s2coll` path (section 14) |
+| `audio` | optional canonical `maps/<map-id>/audio.json` path (section 15) |
 | `diagnostics` | canonical `maps/<map-id>/diagnostics.json` path |
 
 Surface-table material IDs index `materials` directly. This array therefore
@@ -192,7 +193,8 @@ payloads. `atlas.json` records the fixed 4096 page size, mip levels 0 through 4,
 16-pixel base gutter, every page mip and its dimensions, and every logical
 texture's lossless source-to-page rectangles. A model reference
 similarly contains its content ID, diagnostic normalized Source model path,
-and a `materials` array mapping mesh material slots to map-local material IDs.
+a `materials` array mapping mesh material slots to map-local material IDs, and
+an optional lowercase `surface_prop`, the model's `$surfaceprop`.
 Model bytes live at `meshes/<content-id>.s2mesh`.
 
 Multiple model references may name the same content ID when their Source-model
@@ -465,3 +467,49 @@ their map-local 16-block section coordinates: three `i32` values, a `u16` cell
 count of at least 1, and that many cell records of a `u16` local index —
 `(y & 15) << 8 | (z & 15) << 4 | (x & 15)`, strictly ascending — and a `u32`
 shape index. Nothing may follow the last section.
+
+## 15. Sound table
+
+`maps/<map-id>/audio.json` optionally records the map's sound. Map metadata
+references it through the optional `audio` field, which sits between
+`collision` and `diagnostics`. It holds only what plays without the map's
+entity logic: soundscapes selected by `env_soundscape` entities that do not
+start disabled, `ambient_generic` sounds that neither start silent nor are
+flagged not-looping (Source starts exactly those at spawn), and the
+soundscripts each surface property plays.
+
+The payload is canonical JSON with `format` `src2mc-audio`, `version` 1, and
+these arrays in order: `sounds`, `soundscapes`, `emitters`, `ambients`,
+`scripts`, `surfaces`. Indices refer into these arrays. A *range* is an array
+of two finite numbers, Source's interval: a value is drawn uniformly between
+them each time it is used. Positions are map-local blocks; sound levels are
+Source decibels, 0 meaning heard everywhere without falloff; pitch is
+Source's, 100 being unchanged.
+
+| Record | Fields, in order |
+| --- | --- |
+| sound | `content_id`; diagnostic `source` path below `sound/`; `channels` 1 or 2; `sample_rate`; `frames`; optional `loop_start` frame, less than `frames`, present only for a sound that loops |
+| soundscape | `name`; `loops`; `randoms`; `children` |
+| loop | `sound`; `volume`, `pitch`, `sound_level` ranges; optional `position` index |
+| random | non-empty `sounds`; `time`, `volume`, `pitch`, `sound_level` ranges; optional `position`; `random_position` boolean |
+| child | `soundscape`; `volume` range; `position` offset; optional `position_override`, `ambient_position_override` |
+| emitter | `position`; `radius` in blocks, -1 for unlimited; `soundscape`; `positions`, exactly eight entries, each a position or `null` |
+| ambient | `position`; non-empty `sounds`; `volume`, `pitch`, `sound_level` ranges |
+| script | lowercase `name`; non-empty `sounds`; `volume`, `pitch`, `sound_level` ranges |
+| surface | unique lowercase `name`; optional `step_left`, `step_right`, `impact_soft`, `impact_hard`, `break_sound` script indices |
+
+Commands keep Source's meaning (`c_soundscape.cpp`): a loop or random sound
+without a position is heard everywhere; `position` indices are offset by the
+enclosing children's `position` and replaced by their overrides. Surfaces
+include `default`, which a `$surfaceprop` the table does not list falls back
+to. Material and model `surface_prop` values select surfaces.
+
+Each sound's payload is `audio/<content-id>.ogg`: Ogg Vorbis, mono or stereo,
+whose decoded frame count is `frames`. The converter encodes at Vorbis quality
+7 with a fixed stream serial, so equal sounds have equal IDs. Stereo files
+Source places in the world as one point (`)` or `(` before the name) and
+files with more than two channels are mixed down to mono; other stereo files
+stay stereo, which Source plays unpanned. Whether a sound loops comes from
+the WAV's first `cue ` point, or its first `smpl` loop: Source loops a file
+from that frame to its end, and plays a file with neither once.
+
