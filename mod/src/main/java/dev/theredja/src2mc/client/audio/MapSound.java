@@ -10,7 +10,7 @@ import net.minecraft.world.phys.Vec3;
  * A placed map with sound, and what it takes to turn its map-local positions into world ones.
  * Never a hash key: it holds a {@link BundleMap}, whose hash walks the whole map.
  */
-record MapSound(MapPlacement placement, BundleManifest bundle, BundleMap map) {
+record MapSound(MapPlacement placement, BundleManifest bundle, BundleMap map, PropGround props) {
     AudioTable audio() { return map.audio(); }
 
     Vec3 world(double x, double y, double z) {

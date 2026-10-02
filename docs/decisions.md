@@ -427,5 +427,7 @@ acoustics from the actual blocks.
 - **Scope.** Only sound that plays without the map's logic is exported:
   soundscapes that do not start disabled, and `ambient_generic`s that start
   playing at spawn. Everything the I/O system triggers waits on that logic.
-  Props are not looked up for surface sounds yet; standing on one plays the
-  floor's or stone's.
+  Standing on a prop plays its model's `$surfaceprop` when the prop's box
+  (the mesh bounds, turned and scaled as placed) tops the map floor there by
+  more than a sixteenth; flatter props sound like the floor, since the bundle
+  does not say which props are solid.

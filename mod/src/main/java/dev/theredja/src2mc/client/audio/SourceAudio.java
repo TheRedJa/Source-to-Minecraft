@@ -131,7 +131,7 @@ public final class SourceAudio {
         for (MapPlacement placement : PlacementNetwork.clientIndex(current.dimension().location()).view()) {
             var located = generation.findLocatedMap(placement.campaignId(), placement.mapId()).orElse(null);
             if (located == null || located.map().audio() == null) continue;
-            MapSound map = new MapSound(placement, located.bundle(), located.map());
+            MapSound map = new MapSound(placement, located.bundle(), located.map(), PropGround.of(located.map()));
             nextMaps.add(map);
             AudioTable audio = located.map().audio();
             PropVisibility pvs = located.map().pvs();
