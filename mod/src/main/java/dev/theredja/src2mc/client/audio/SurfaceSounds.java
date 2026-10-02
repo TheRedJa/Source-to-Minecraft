@@ -28,7 +28,7 @@ import net.minecraft.world.phys.Vec3;
  * <p>Minecraft decides when a step sounds, about every 1.7 blocks walked: 0.39 s walking, 0.30 s
  * sprinting, close to Source's 0.4 s and 0.3 s. The volume is Source's ({@code CBasePlayer::
  * UpdateStepSound}): 0.2 walking, 0.5 running -- sprinting here -- and 65% of that crouched,
- * times {@link #stepGain()}. Map blocks also report their own hit, break and place sounds
+ * times {@link #stepGain()}. Standing on a prop plays the prop model's surface. Map blocks also report their own hit, break and place sounds
  * ({@code Src2mcSounds}): {@code impactsoft} for a hit, {@code break} (or {@code impacthard})
  * for a break; those keep stone's sound where no surface is found.
  */
@@ -193,16 +193,25 @@ final class SurfaceSounds {
     }
 
     /**
-     * The surface a sound at {@code at} comes from: the floor under it for something underfoot,
-     * the block's largest face otherwise. Underfoot, a spot with no map face -- a prop, a block
-     * placed since -- is Source's {@code default}; a block with no face is no surface at all.
+     * The surface a sound at {@code at} comes from. Underfoot it is the floor, or a prop whose top
+     * stands above that floor ({@link PropGround}), with the prop model's {@code $surfaceprop};
+     * a spot with neither -- a block placed since -- is Source's {@code default}. Otherwise it is
+     * the block's largest face, and a block with no face is no surface at all.
      */
     private static AudioTable.Surface surface(MapSound map, Vec3 at, boolean underfoot) {
         Vec3 local = map.local(at);
         BundleMap bundleMap = map.map();
-        int material = underfoot
-            ? SurfaceProbe.ground(bundleMap.surfaces(), local.x, local.y, local.z)
-            : SurfaceProbe.block(bundleMap.surfaces(), (int) Math.floor(local.x), (int) Math.floor(local.y), (int) Math.floor(local.z));
+        int material;
+        if (underfoot) {
+            SurfaceProbe.Ground floor = SurfaceProbe.floor(bundleMap.surfaces(), local.x, local.y, local.z);
+            PropGround.Standing prop = map.props().under(local.x, local.y, local.z);
+            if (prop != null && (floor == null || prop.top() > floor.height() + PropGround.ABOVE_FLOOR)) {
+                return map.audio().surface(prop.surfaceProp());
+            }
+            material = floor == null ? -1 : floor.material();
+        } else {
+            material = SurfaceProbe.block(bundleMap.surfaces(), (int) Math.floor(local.x), (int) Math.floor(local.y), (int) Math.floor(local.z));
+        }
         if (material >= bundleMap.materials().size()) return null;
         if (material < 0) return underfoot ? map.audio().surface(null) : null;
         BundleMaterial surfaceMaterial = bundleMap.materials().get(material);

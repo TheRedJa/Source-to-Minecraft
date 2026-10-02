@@ -8,17 +8,26 @@ import dev.theredja.src2mc.bundle.SurfaceTable;
  */
 final class SurfaceProbe {
     /** How far below the feet a floor still counts as stood on, and how far above. */
-    private static final double BELOW = 0.6, ABOVE = 0.1;
+    static final double BELOW = 0.6, ABOVE = 0.1;
     private static final double MIN_UP = 0.7;
     private static final double EPSILON = 1e-6;
 
     private SurfaceProbe() {}
 
-    /**
-     * The material of the floor under map-local feet at {@code (x, y, z)}: of the upward faces
-     * whose polygon lies under the point, the highest that is not above the feet. -1 for none.
-     */
+    /** A floor found under the feet: its material and its height, map-local. */
+    record Ground(int material, double height) {}
+
+    /** The material of {@link #floor}, or -1 for none. */
     static int ground(SurfaceTable surfaces, double x, double y, double z) {
+        Ground floor = floor(surfaces, x, y, z);
+        return floor == null ? -1 : floor.material();
+    }
+
+    /**
+     * The floor under map-local feet at {@code (x, y, z)}: of the upward faces whose polygon lies
+     * under the point, the highest that is not above the feet. Null for none.
+     */
+    static Ground floor(SurfaceTable surfaces, double x, double y, double z) {
         int cx = (int) Math.floor(x), cz = (int) Math.floor(z);
         int best = -1;
         double bestHeight = Double.NEGATIVE_INFINITY;
@@ -36,7 +45,7 @@ final class SurfaceProbe {
                 best = face.materialId();
             }
         }
-        return best;
+        return best < 0 ? null : new Ground(best, bestHeight);
     }
 
     /** The material covering most of a cell's faces, for a sound the whole block makes. -1 for none. */

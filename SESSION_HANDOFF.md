@@ -1,7 +1,69 @@
 # src2mc implementation handoff
 
-Updated: 2026-10-02 (Europe/Berlin), DEV-0.19.0 (map sound; Minecraft's
-movement sounds replaced inside maps; INFRA landing sounds)
+Updated: 2026-10-02 (Europe/Berlin), DEV-0.20.0 (map sound; Minecraft's
+movement sounds replaced inside maps; INFRA landing sounds; prop steps)
+
+## NEXT TASK (agreed 2026-10-02): run the map's logic in Minecraft
+
+The user approved this as the next big step and asked for it to be written
+down before compacting. Start with a **design pass**, not code: measure, then
+propose phases and get the user's go-ahead.
+
+Why: almost everything still missing from a map hangs on Source's entity I/O.
+In furnace 113 of 118 `ambient_generic`s start silent and only play when an
+output fires them (32 `PlaySound` and 10 `Volume` inputs); 11
+`logic_choreographed_scene`s carry 35 voice lines (VCD `speak` events naming
+soundscripts, captions in `resource/closecaption_english.txt`/`.dat`);
+buttons, alarms, music and every door, lift and track need it too. The
+converter already dumps every entity with all keyvalues (`src2mc entities
+<map> -o x.json`; `bsp/entities.rs`, outputs are `\x1b`-separated
+`target,input,param,delay,times` strings in keys starting with `On`).
+
+Design pass, step 1 -- survey the 10 test maps: histogram of classnames that
+take part in I/O (have outputs or are targeted), every (classname, input) pair
+used, every output name used, and which of them chains reach a sound, a
+scene, a door/mover or a level change. Furnace alone: 72 `logic_relay`, 16
+`logic_branch`, 8 `logic_branch_listener`, 7 `logic_timer`, 8 `logic_auto`,
+53 `infra_button`, 8 `func_button`, 42 triggers (`trigger_once`/`multiple`),
+35 `prop_door_rotating`, 6 `func_door_rotating`, 8 `func_tracktrain` with 25
+`path_track`, 7 `func_rotating`, 15 `func_brush`, 9 `env_shake`, 11 scenes,
+8 `func_areaportal`, 5 `filter_activator_name`. INFRA-specific: `infra_button`,
+`infra_camera_target`, `infra_document`, `infra_corruption_target`,
+`infra_crow`, `item_d_batteries`.
+
+Proposed phases (to confirm after the survey):
+- **A, the I/O core** (server side): an event queue with Source's semantics
+  (output delays, `times` limits, `!activator`/`!self`/`!caller` and wildcard
+  targets, `FireUser1..4`, `Enable`/`Disable`, `Kill`), `logic_auto`,
+  `logic_relay`, `logic_branch(_listener)`, `logic_timer`, `logic_compare`,
+  `math_counter`, filters; triggers as player-touched volumes (brush entity
+  bounds from the BSP model), `func_button` and `infra_button` pressed with
+  the use key; then the sound side: `ambient_generic` inputs (`PlaySound`,
+  `StopSound`, `ToggleSound`, `Volume`, `FadeIn`/`FadeOut`, `Pitch`),
+  `env_soundscape` `Enable`/`Disable`, `logic_choreographed_scene` `Start`
+  playing its speak events in order with captions. The mod's sound player
+  (`client/audio/`) would get a server-to-client "play this" message.
+- **B, movers**: brush entities rendered and colliding apart from the static
+  world (doors, rotating doors, buttons, `func_tracktrain` along `path_track`,
+  `func_rotating`, `func_movelinear`, `func_brush` toggling), and
+  `prop_door_rotating`. This needs moving geometry in the renderer and
+  collision, a large change of its own.
+- **C, INFRA's own entities** (camera targets, documents, corruption,
+  batteries), whose behaviour is in INFRA's closed code and needs the user's
+  description.
+
+Open questions to put to the user after the survey: whether triggers should
+fire for every player or the first (multiplayer), what happens to logic
+state when blocks are broken, and whether level changes (`trigger_changelevel`)
+should do anything.
+
+**Prop steps (DEV-0.20.0, user-confirmed 2026-10-02):** standing on a prop plays
+its model's `$surfaceprop`. Validation now keeps each mesh's bounds on its
+`BundleModel`; `client/audio/PropGround` boxes every prop (turned and scaled
+like the renderer does) and wins over the map floor when its top is more than
+a sixteenth above it. No re-export needed.
+
+**Committed and pushed:** sound work DEV-0.17.0 to DEV-0.19.0 as c911bbf.
 
 **User-confirmed 2026-10-02:** DEV-0.18.0 movement sounds "all sounds good";
 step gain 2 is right (already the default). **DEV-0.19.0 (user-confirmed 2026-10-02, "Works"):**

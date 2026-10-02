@@ -171,12 +171,14 @@ final class BundleSchemaValidator {
         // A map's meshes are the bulk of its validation and each is walked on
         // its own, so this is where the parallelism pays for a campaign that
         // holds a single large map.
+        Map<String, float[]> meshBounds = new ConcurrentHashMap<>();
         BundleLoadPool.forEach(modelRefs, model -> {
             String mesh = "meshes/" + model.contentId() + ".s2mesh";
             referenced.add(mesh);
             contentHash(hashes, mesh, model.contentId());
-            validateMesh(zip, required(entries, mesh), model.materialSlotCount());
+            meshBounds.put(model.contentId(), validateMesh(zip, required(entries, mesh), model.materialSlotCount()));
         });
+        modelRefs.replaceAll(model -> model.withBounds(meshBounds.get(model.contentId())));
         if (!textureIds.isEmpty() && atlas == null) fail(BundleErrorCode.MISSING_ENTRY, "textured materials require atlas.json");
         for (Map.Entry<String, int[]> textureRef : textureIds.entrySet()) {
             AtlasIndex.Texture texture = atlas.textures().get(textureRef.getKey());
@@ -640,7 +642,8 @@ final class BundleSchemaValidator {
         }
     }
 
-    private static void validateMesh(ZipFile zip, ZipEntry entry, int materialSlots) throws IOException {        try (Binary in = new Binary(zip.getInputStream(entry), entry.getSize())) {
+    /** Validates one mesh and returns its bounds, min XYZ then max XYZ. */
+    private static float[] validateMesh(ZipFile zip, ZipEntry entry, int materialSlots) throws IOException {        try (Binary in = new Binary(zip.getInputStream(entry), entry.getSize())) {
             in.magic(MESH_MAGIC); in.version(); long vertices = in.count(BundleLimits.MAX_VERTICES_PER_MESH, "vertex"), indices = in.count(BundleLimits.MAX_INDICES_PER_MESH, "index"), submeshes = in.count(BundleLimits.MAX_SUBMESHES_PER_MESH, "submesh");
             if (vertices == 0 || indices == 0 || indices % 3 != 0 || submeshes == 0) fail(BundleErrorCode.INVALID_SCHEMA, "empty or non-triangular mesh");
             float[] min = new float[3], max = new float[3]; for (int i=0;i<3;i++) min[i]=in.canonicalF32("bounds"); for (int i=0;i<3;i++) max[i]=in.canonicalF32("bounds"); for(int i=0;i<3;i++) if(min[i]>max[i]) fail(BundleErrorCode.INVALID_SCHEMA,"invalid mesh bounds");
@@ -648,6 +651,7 @@ final class BundleSchemaValidator {
             for(long v=0;v<vertices;v++){ for(int n=0;n<3;n++) in.canonicalF32("position"); double normal=0; for(int n=0;n<3;n++){float x=in.canonicalF32("normal");normal+=x*x;} if(normal<=1e-12) fail(BundleErrorCode.INVALID_SCHEMA,"zero mesh normal"); for(int n=0;n<2;n++)in.canonicalF32("UV"); }
             for(long i=0;i<indices;i++) if(in.u32()>=vertices) fail(BundleErrorCode.INVALID_REFERENCE,"mesh index out of range");
             long next=0; for(long s=0;s<submeshes;s++){long first=in.u32(), count=in.u32(), slot=in.u32(); if(first!=next||count==0||count%3!=0||(next=Math.addExact(next,count))>indices) fail(BundleErrorCode.INVALID_SCHEMA,"invalid submesh ranges"); if(slot>=materialSlots) fail(BundleErrorCode.INVALID_REFERENCE,"mesh material slot out of range");} if(next!=indices) fail(BundleErrorCode.INVALID_SCHEMA,"submeshes do not cover indices"); in.end();
+            return new float[]{min[0], min[1], min[2], max[0], max[1], max[2]};
         }
     }
 
