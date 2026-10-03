@@ -1,24 +1,71 @@
 # src2mc implementation handoff
 
-Updated: 2026-10-03 (Europe/Berlin), DEV-0.23.0 (the map's logic: Source
-entity I/O on the server, triggered sounds, scenes with captions, level
-changes between placed maps)
+Updated: 2026-10-03 (Europe/Berlin), DEV-0.26.0 (fixes from the DEV-0.25.0 in-game test)
 
-## NEXT TASK: map logic phase B, continued (order agreed with the user 2026-10-03)
+## NEXT TASK: map logic phase B, continued (B2 next)
 
-1. `prop_door_rotating` usable with the use key: a use volume from the model's box
-   (the logic opens them already; `UseInput`/`LogicSystem.use` only know brush volumes).
-2. `func_brush` Enable/Disable: show/hide and solidity (`solidity` 0 toggle, 1 never,
-   2 always; `StartDisabled`), on the mover sub-level path (renderer skips hidden
-   movers, `MoverRegistry` shape empty when not solid).
-3. `func_tracktrain` + `path_track`: follow the path at speed (8 on furnace); Sable carries riders.
-4. `func_rotating`: continuous spin, SetSpeed/Start/Stop (6 on furnace).
-5. Mover rendering polish: rotate normals with the pose; per-vertex light instead of one light.
-6. B2: `prop_dynamic` Skin, Enable/Disable, color (biggest unhandled inputs).
+User test of DEV-0.25.0 (2026-10-03): prop doors, func_brush, elevator, fans, lighting and
+the old doors all fine. Trains moved and faced right, but: no wheel spin (the checklist fired
+`StartForward` on the train directly, which skips the relays that start the wheels; the map's
+relays spin them at 800 deg/s, checked in a simulation), carts lost collision (passable flag;
+now solid again), the second minitrain's buttons stayed behind (their button and switch
+models were under the converter's 12-unit size floor and never rode; use volumes and triggers
+parented to movers did not move). The second minitrain jumping forward on logic start is
+Source's `Find` (teleports to its first node, `path_5`, 6 blocks ahead of where it was
+compiled); ask the user to compare with INFRA if it still looks wrong.
+DEV-0.26.0: triggers, use aim and the `/src2mc_logic_show` wireframes follow the mover
+carrying them (client helper `Carriers`); passable trains solid. User test of the first
+DEV-0.26.0 build: wheels spin, collision back, buttons work, train 2's jump confirmed as
+INFRA's own behaviour (user checked the real game). User then asked to drop the prop size
+floor altogether ("various missing buttons, levers, wheels, rocks"): `[props] min_size` now
+defaults to 0 (was 12 units). All 10 bundles regenerated and installed. User confirmed the fixes
+in game, then asked to drop the collision floor too: `collision_min_size` now defaults to 0
+(was 48), so props are solid by their Source `solid` setting at any size. Bundles
+regenerated and installed again. User: all fixes work, performance not noticeably impacted
+(2026-10-03); committed as DEV-0.26.0.
+
+Then, in the agreed order:
+
+6. B2: `prop_dynamic` Skin, Enable/Disable, color (biggest unhandled inputs; furnace: 122
+   Skin, 11 Kill, 6 Enable, 1 Disable). Needs the converter: static props carry no entity
+   index, and only skins some prop wears are exported as model references. Plan: tag
+   props.s2props records (or a side table) with their entity index for named
+   prop_dynamics, export every skin family's material array for those models, then the
+   mod rebuilds the prop's section aggregate (or the mover's buffers) on a change.
 7. B3: INFRA chapter titles (`game_text`), `env_fade`, `env_shake`.
 Later (user): skeletal animation (test case: furnace `cellardoor1` #2209, a prop_dynamic
 slid by `SetAnimation open/close`; its `func_door` #2112 is an invisible clip, not exported),
 `env_sprite`, lights, VScript, INFRA gameplay. Each step ends with the user's in-game test.
+Also open: train/rotator sounds (MoveSound, StartSound, rotator `message` loop) are not
+played; `MoveToPathNode`/`TeleportToPathNode`/`LockOrientation` (INFRA FGD extras) unhandled;
+props riding a hidden func_brush hide with it (Source would still draw them); triggers are
+touched by players only, so INFRA's cart bumpers (`car_multiple*`, "everything" flag, touched
+by the other carts' props in Source) never fire from cart contact.
+
+## DONE: map logic phase B steps 1-5 (DEV-0.25.0/0.26.0, user-confirmed 2026-10-03)
+
+- Prop doors on the use key: `PropUseBox` (model box turned and placed as compiled) for
+  `UseInput` aim and `LogicSystem.use` reach; `SF_DOOR_IGNORE_USE` (32768) honoured.
+- Mover state bits HIDDEN / NOT_SOLID (`MoverRegistry`), from `LogicEntity.moverState()`
+  each server tick, synced by `MoverNetwork.StatePayload` (protocol "5"); renderer skips
+  hidden, collision empty when not solid. `Movers.Brush` = CFuncBrush (Enable/Disable/
+  Toggle, StartDisabled, solidity). Furnace test: `ap_prehall_brush` #532 hides while the
+  player stands in trigger #1869.
+- `Trains.PathTrack` (Link, LookAhead, InPass/OnPass, Enable/DisablePath, alternate),
+  `Trains.TrackTrain` (Find, Next per tick, ArriveAtNode, DeadEnd, teleport flag, all speed
+  inputs, velocity/orientation types), `Trains.Rotating` (CFuncRotating incl. Acc/Dcc steps
+  and StopAtStartPos). Passable trains and flag-64 rotators are NOT_SOLID, as in Source.
+- Hierarchy: `LogicEntity.worldPose` composes parent poses (`MoverPose.compose`); furnace
+  cases: minitrain wheels, `elevator_gate1` #1398 via prop `elevator` #1519 on
+  `elevator_tractrain`, `ladle_ch_hooks` on `lc_gantry`, func_brush #37 on prop door #2071.
+- Train orientation is relative to spawn angles (see D21; the 4 furnace trains with angles
+  `0 -90 0` are built along their tracks). User to compare against INFRA.
+- MoverRenderer: per-vertex smooth light, relit after 0.25 block / 5 degrees (max every 6
+  frames) or a middle-light change; shading lights counter-rotated per mover.
+  `/src2mc_movers status|draw on|off|light vertex|single|shading turned|unturned`.
+- Tests: train path/OnPass/dead end, train save mid-path, rotator speed and friction, child
+  on moving parent, func_brush states; realMapsRun now starts every train and rotator and
+  checks every mover pose stays finite (6 maps clean).
 
 ## DONE: map logic phase B1 (DEV-0.24.0, user-confirmed 2026-10-03)
 

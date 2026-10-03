@@ -42,6 +42,16 @@ final class PackedVertices {
     }
 
     int vertices() { return vertices; }
+
+    float x(int vertex) { return data[vertex * FLOATS]; }
+    float y(int vertex) { return data[vertex * FLOATS + 1]; }
+    float z(int vertex) { return data[vertex * FLOATS + 2]; }
+    float nx(int vertex) { return data[vertex * FLOATS + 5]; }
+    float ny(int vertex) { return data[vertex * FLOATS + 6]; }
+    float nz(int vertex) { return data[vertex * FLOATS + 7]; }
+
+    /** Replaces one vertex's light; {@link #index} again before uploading indexed. */
+    void setLight(int vertex, int packedLight) { light[vertex] = packedLight; }
     int triangles() { return vertices / 3; }
     boolean isEmpty() { return vertices == 0; }
 

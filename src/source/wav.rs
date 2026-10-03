@@ -178,7 +178,11 @@ fn pcm(format: &Format, data: &[u8]) -> Result<Vec<Vec<f32>>> {
 }
 
 fn float(format: &Format, data: &[u8]) -> Result<Vec<Vec<f32>>> {
-    ensure!(format.bits == 32, "unsupported float bit depth {}", format.bits);
+    ensure!(
+        format.bits == 32,
+        "unsupported float bit depth {}",
+        format.bits
+    );
     Ok(deinterleave(
         format.channels as usize,
         data.chunks_exact(4)

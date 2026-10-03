@@ -32,14 +32,20 @@ public final class MoverRegistry {
     /** One mover's sub-level: the placement it belongs to by anchor, the mover by entity index. */
     public record Instance(long anchor, String campaignId, String mapId, int entity, UUID subLevel) {}
 
-    /** An instance with its map, mover and collision shapes found. */
+    /** An instance with its map, mover and collision shapes found; {@code initialState} is its state before the logic says otherwise. */
     public record Resolved(Instance instance, MapPlacement placement, BundleMap map, MoverTable.Mover mover,
-                           AtomicReferenceArray<VoxelShape> shapes, boolean solid) {}
+                           AtomicReferenceArray<VoxelShape> shapes, int initialState) {}
+
+    /** State bits of a mover: not drawn, does not collide. Zero for one drawn and solid. */
+    public static final int HIDDEN = 1, NOT_SOLID = 2;
 
     private static final Map<UUID, Instance> SERVER = new ConcurrentHashMap<>();
     private static final Map<UUID, Instance> CLIENT = new ConcurrentHashMap<>();
     private static final Map<UUID, Resolved> SERVER_RESOLVED = new ConcurrentHashMap<>();
     private static final Map<UUID, Resolved> CLIENT_RESOLVED = new ConcurrentHashMap<>();
+    /** The logic's latest state per sub-level; one absent has its {@link Resolved#initialState}. */
+    private static final Map<UUID, Integer> SERVER_STATE = new ConcurrentHashMap<>();
+    private static final Map<UUID, Integer> CLIENT_STATE = new ConcurrentHashMap<>();
     private static volatile BundleGeneration serverGeneration, clientGeneration;
 
     private MoverRegistry() {}
@@ -52,18 +58,37 @@ public final class MoverRegistry {
     public static void remove(boolean client, UUID subLevel) {
         (client ? CLIENT : SERVER).remove(subLevel);
         (client ? CLIENT_RESOLVED : SERVER_RESOLVED).remove(subLevel);
+        (client ? CLIENT_STATE : SERVER_STATE).remove(subLevel);
     }
 
     /** Replaces every client entry of one dimension's sync; the client knows only one dimension at a time. */
     public static void replaceClient(List<Instance> instances) {
         CLIENT.clear();
         CLIENT_RESOLVED.clear();
+        CLIENT_STATE.clear();
         for (Instance instance : instances) CLIENT.put(instance.subLevel(), instance);
     }
 
     public static void clear(boolean client) {
         (client ? CLIENT : SERVER).clear();
         (client ? CLIENT_RESOLVED : SERVER_RESOLVED).clear();
+        (client ? CLIENT_STATE : SERVER_STATE).clear();
+    }
+
+    /** Sets a sub-level's state as the logic has it. */
+    public static void setState(boolean client, UUID subLevel, int state) {
+        (client ? CLIENT_STATE : SERVER_STATE).put(subLevel, state);
+    }
+
+    /** The state the logic last set, or null when it has set none. */
+    public static Integer storedState(boolean client, UUID subLevel) {
+        return (client ? CLIENT_STATE : SERVER_STATE).get(subLevel);
+    }
+
+    /** A resolved mover's state now. */
+    public static int state(boolean client, Resolved resolved) {
+        Integer state = (client ? CLIENT_STATE : SERVER_STATE).get(resolved.instance().subLevel());
+        return state == null ? resolved.initialState() : state;
     }
 
     public static Collection<Instance> instances(boolean client) { return (client ? CLIENT : SERVER).values(); }
@@ -96,18 +121,27 @@ public final class MoverRegistry {
         if (index2 < 0) return null;
         MoverTable.Mover mover = map.movers().movers().get(index2);
         var shapes = new AtomicReferenceArray<VoxelShape>(mover.collision() == null ? 0 : mover.collision().shapeCount());
-        hit = new Resolved(instance, placement, map, mover, shapes, solid(map, mover));
+        hit = new Resolved(instance, placement, map, mover, shapes, initialState(map, mover));
         resolved.put(subLevel, hit);
         return hit;
     }
 
     /**
-     * Whether the mover collides at all. A {@code func_brush} set to "never solid" ({@code solidity}
-     * 1) is only seen: INFRA puts such brushes in doorways as player clips the logic never turns on.
+     * A mover's state as its entity spawns, before any input: a {@code func_brush} starts hidden
+     * with {@code StartDisabled}, and collides by its {@code solidity} -- 0 while shown, 1 never
+     * (INFRA puts such brushes in doorways as player clips the logic never turns on), 2 always.
      */
-    private static boolean solid(BundleMap map, MoverTable.Mover mover) {
-        if (!mover.classname().equals("func_brush") || map.logic() == null || mover.entity() >= map.logic().entities().size()) return true;
-        return !"1".equals(map.logic().entities().get(mover.entity()).value("solidity"));
+    private static int initialState(BundleMap map, MoverTable.Mover mover) {
+        if (!mover.classname().equals("func_brush") || map.logic() == null || mover.entity() >= map.logic().entities().size()) return 0;
+        var entity = map.logic().entities().get(mover.entity());
+        return brushState(dev.theredja.src2mc.logic.Variant.integer(entity.value("startdisabled")) != 0,
+            dev.theredja.src2mc.logic.Variant.integer(entity.value("solidity")));
+    }
+
+    /** {@code CFuncBrush}'s look and solidity: hidden when disabled, solid by its solidity. */
+    public static int brushState(boolean disabled, int solidity) {
+        boolean solid = solidity == 2 || (solidity != 1 && !disabled);
+        return (disabled ? HIDDEN : 0) | (solid ? 0 : NOT_SOLID);
     }
 
     private static Level levelOf(dev.ryanhcode.sable.util.LevelAccelerator accelerator, BlockPos pos) {
@@ -134,7 +168,7 @@ public final class MoverRegistry {
         LevelPlot plot = container.getPlot(pos.getX() >> 4, pos.getZ() >> 4);
         if (plot == null) return Shapes.empty();
         Resolved resolved = resolve(level, plot.getSubLevel().getUniqueId());
-        if (resolved == null || !resolved.solid() || resolved.mover().collision() == null) return Shapes.empty();
+        if (resolved == null || (state(level.isClientSide(), resolved) & NOT_SOLID) != 0 || resolved.mover().collision() == null) return Shapes.empty();
         BlockPos origin = plotOrigin(plot);
         int id = resolved.mover().collision().shapeAt(pos.getX() - origin.getX(), pos.getY() - origin.getY(), pos.getZ() - origin.getZ());
         if (id < 0) return Shapes.empty();

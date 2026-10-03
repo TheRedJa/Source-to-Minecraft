@@ -321,7 +321,7 @@ final class Movers {
      */
     static final class Door extends LogicEntity implements Usable {
         private static final int START_OPEN = 1, NO_AUTO_RETURN = 32, USE_OPENS = 256, LOCKED = 2048, SILENT = 4096,
-            USE_CLOSES = 8192, CAN_BE_HELD = 16384, NEW_USE_RULES = 65536;
+            USE_CLOSES = 8192, CAN_BE_HELD = 16384, PROP_IGNORE_USE = 32768, NEW_USE_RULES = 65536;
         private enum Kind { BRUSH, PROP, MOVELINEAR }
         private Kind kind;
         private Toggle state = Toggle.AT_BOTTOM;
@@ -377,7 +377,7 @@ final class Movers {
         @Override public boolean usable() {
             if (removed) return false;
             return switch (kind) {
-                case PROP -> true;
+                case PROP -> !hasSpawnFlags(PROP_IGNORE_USE);
                 case MOVELINEAR -> false;
                 case BRUSH -> hasSpawnFlags(USE_OPENS);
             };
@@ -700,5 +700,48 @@ final class Movers {
             return switch (state) { case AT_BOTTOM -> "closed"; case GOING_UP -> "opening"; case AT_TOP -> "open"; case GOING_DOWN -> "closing"; }
                 + (locked ? ", locked" : "");
         }
+    }
+
+    /**
+     * {@code CFuncBrush}: a brush the logic shows and hides. Disabled it is not drawn, and
+     * collides only with {@code solidity} 2; enabled it collides unless {@code solidity} is 1.
+     * Shown and hidden through its sub-level, which carries it whether it moves or not.
+     */
+    static final class Brush extends LogicEntity {
+        private boolean disabled;
+        private int solidity;
+
+        Brush(MapLogic map, int index, LogicTable.Entity entity) { super(map, index, entity); }
+
+        @Override void spawn() {
+            disabled = Variant.integer(key("startdisabled")) != 0;
+            solidity = Variant.integer(key("solidity"));
+        }
+
+        @Override boolean accept(String input, String value, Actor activator, LogicEntity caller) {
+            switch (input) {
+                case "enable" -> disabled = false;
+                case "disable" -> disabled = true;
+                case "toggle" -> disabled = !disabled;
+                default -> { return false; }
+            }
+            return true;
+        }
+
+        @Override int moverState() {
+            return removed ? super.moverState() : dev.theredja.src2mc.world.MoverRegistry.brushState(disabled, solidity);
+        }
+
+        @Override void save(CompoundTag tag) {
+            super.save(tag);
+            tag.putBoolean("disabled", disabled);
+        }
+
+        @Override void load(CompoundTag tag) {
+            super.load(tag);
+            disabled = tag.getBoolean("disabled");
+        }
+
+        @Override String state() { return disabled ? "disabled" : "enabled"; }
     }
 }

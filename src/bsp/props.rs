@@ -170,6 +170,21 @@ pub fn extract_entities(bsp: &vbsp::Bsp) -> Vec<Prop> {
         .collect()
 }
 
+/// Indices of the entities that name a `parentname`: things that ride on
+/// another entity and may move with it.
+pub fn parented_entities(bsp: &vbsp::Bsp) -> std::collections::HashSet<usize> {
+    bsp.entities
+        .iter()
+        .enumerate()
+        .filter(|(_, raw)| {
+            raw.properties().any(|(key, value)| {
+                key.eq_ignore_ascii_case("parentname") && !value.trim().is_empty()
+            })
+        })
+        .map(|(index, _)| index)
+        .collect()
+}
+
 fn triple(value: &str) -> Option<[f64; 3]> {
     let mut parts = value
         .split_whitespace()

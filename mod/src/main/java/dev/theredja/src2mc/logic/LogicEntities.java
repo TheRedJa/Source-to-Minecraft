@@ -33,6 +33,10 @@ final class LogicEntities {
             case "trigger_once", "trigger_multiple" -> new Triggers.Trigger(map, index, entity);
             case "trigger_changelevel" -> new Triggers.ChangeLevel(map, index, entity);
             case "func_button", "func_rot_button", "momentary_rot_button" -> new Movers.Button(map, index, entity);
+            case "func_brush" -> new Movers.Brush(map, index, entity);
+            case "func_tracktrain" -> new Trains.TrackTrain(map, index, entity);
+            case "path_track" -> new Trains.PathTrack(map, index, entity);
+            case "func_rotating" -> new Trains.Rotating(map, index, entity);
             case "func_door", "func_door_rotating", "func_movelinear", "infra_button", "prop_door_rotating" -> new Movers.Door(map, index, entity);
             case "ambient_generic" -> new SoundEntities.Ambient(map, index, entity);
             case "env_soundscape" -> new SoundEntities.Soundscape(map, index, entity);

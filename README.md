@@ -127,12 +127,16 @@ with class, name and entity index up close. `/src2mc place_chain <map> <count>` 
 maps its level changes lead to, side by side, and `/src2mc_audio captions
 on|off` switches the captions.
 
-Doors, buttons and other moving brush entities, with the props attached to
-them, move as [Sable](https://github.com/ryanhcode/sable) sub-levels, which the
-mod requires: players collide with them where they are, ride lifts and are
-pushed by closing doors. Every placed map gets them whether its logic runs or
-not; `/src2mc movers status` counts them and `/src2mc movers respawn` rebuilds
-them. They cannot be broken yet.
+Doors, buttons, track trains, rotators and other moving brush entities, with
+the props attached to them, move as [Sable](https://github.com/ryanhcode/sable)
+sub-levels, which the mod requires: players collide with them where they are,
+ride lifts and trains and are pushed by closing doors. A child rides its parent
+(wheels on a train, a gate on a lift), `func_brush` shows and hides by the
+logic, and prop doors open with the use key. Every placed map gets them whether
+its logic runs or not; `/src2mc movers status` counts them and
+`/src2mc movers respawn` rebuilds them. `/src2mc_movers light vertex|single`
+and `shading turned|unturned` switch how they are lit, for comparison. They
+cannot be broken yet.
 
 Building the mod and running its development client is described in
 [`mod/README.md`](mod/README.md). The bundle format is specified in
@@ -363,9 +367,9 @@ schematics' `Entities` list and into a `.mcfunction` of `summon` commands at
 the same absolute coordinates, everything tagged `src2mc_<map>` so a bad paste
 is one `/kill` away. `bake = false` puts every prop back on it.
 
-Neither route has collision of its own, so props at least `collision_min_size`
-units across (48 by default) are made solid separately: you can stand on a
-container and walk through a traffic cone. That used to be a shell of invisible
+Neither route has collision of its own, so props are made solid separately, as
+their Source `solid` setting says; `collision_min_size` (0 by default) can leave
+small ones walk-through. That used to be a shell of invisible
 barriers, one full cube per cell the surface passes through, which walks well
 enough and is wrong in every detail — a catwalk floor three pixels thick
 collides as a whole block, a railing as a wall. Physics mods make that worse
@@ -394,8 +398,9 @@ material like any other and gets the same rules, colour matching and generated
 block. Voxelized props are surfaces rather than solids, so a fence stays one
 block thick.
 
-`[props] min_size` drops anything under 12 units — maps are full of pebbles and
-cans — and `max_size` is the lever for backdrop scenery, which is placed as
+`[props] min_size` can drop anything under a size (off by default: small props
+are drawn as exact meshes, and a map's buttons and levers are small), and
+`max_size` is the lever for backdrop scenery, which is placed as
 ordinary props thousands of units across and can be tens of thousands of blocks
 of one dark material. It is off by default, because that scenery really is
 there.

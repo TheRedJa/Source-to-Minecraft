@@ -165,17 +165,24 @@ public final class LogicSystem {
     static void use(ServerPlayer player, long anchor, int index, boolean pressed) {
         MapLogic logic = running(player.serverLevel()).get(anchor);
         if (logic == null || !(logic.entity(index) instanceof Movers.Usable usable) || !usable.usable()) return;
-        LogicTable.Volume volume = logic.volume(logic.entity(index));
-        if (volume == null) return;
-        double[] b = volume.bounds();
         // A door that has moved is aimed at where it is now: the eye goes into the frame it was compiled in.
         Vec3 eye = MoverSystem.toCompiled(player.serverLevel(), anchor, index, player.getEyePosition());
-        Vec3 min = logic.world(new double[]{b[0], b[1], b[2]}), max = logic.world(new double[]{b[3], b[4], b[5]});
-        double dx = Math.max(0, Math.max(min.x - eye.x, eye.x - max.x)), dy = Math.max(0, Math.max(min.y - eye.y, eye.y - max.y)),
-            dz = Math.max(0, Math.max(min.z - eye.z, eye.z - max.z));
+        double distance;
+        LogicTable.Volume volume = logic.volume(logic.entity(index));
+        if (volume != null) {
+            double[] b = volume.bounds();
+            Vec3 min = logic.world(new double[]{b[0], b[1], b[2]}), max = logic.world(new double[]{b[3], b[4], b[5]});
+            double dx = Math.max(0, Math.max(min.x - eye.x, eye.x - max.x)), dy = Math.max(0, Math.max(min.y - eye.y, eye.y - max.y)),
+                dz = Math.max(0, Math.max(min.z - eye.z, eye.z - max.z));
+            distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        } else {
+            PropUseBox box = PropUseBox.of(logic.map, index);
+            if (box == null) return;
+            Vec3 origin = logic.world(new double[3]);
+            distance = box.distance(eye.x - origin.x, eye.y - origin.y, eye.z - origin.z);
+        }
         // The client aimed within its block reach; a little slack for the shape's corners and latency.
-        double reach = player.blockInteractionRange() + 1.5;
-        if (dx * dx + dy * dy + dz * dz > reach * reach) return;
+        if (distance > player.blockInteractionRange() + 1.5) return;
         usable.use(new PlayerActor(player.getUUID()), pressed);
     }
 

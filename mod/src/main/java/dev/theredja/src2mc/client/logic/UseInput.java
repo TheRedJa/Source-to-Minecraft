@@ -5,11 +5,11 @@ import dev.theredja.src2mc.bundle.BundleGeneration;
 import dev.theredja.src2mc.bundle.BundleMap;
 import dev.theredja.src2mc.bundle.LogicTable;
 import dev.theredja.src2mc.logic.LogicNetwork;
+import dev.theredja.src2mc.logic.PropUseBox;
 import dev.theredja.src2mc.logic.Variant;
 import dev.theredja.src2mc.network.PlacementNetwork;
 import dev.theredja.src2mc.world.MapPlacement;
 import dev.theredja.src2mc.world.MoverRegistry;
-import java.util.HashMap;
 import java.util.Map;
 import net.minecraft.client.Minecraft;
 import net.minecraft.world.phys.HitResult;
@@ -23,13 +23,14 @@ import net.neoforged.neoforge.network.PacketDistributor;
 
 /**
  * The use key on a running map's buttons and doors, Source's {@code +use}: the look ray within
- * block reach is tested against every usable entity's brushes, and a hit nothing nearer blocks
+ * block reach is tested against every usable entity's brushes, or a prop door's model box, and a hit nothing nearer blocks
  * goes to the server instead of Minecraft's own use. A momentary button, or an INFRA button that
  * can be held, keeps receiving the use while the key stays down on it.
  */
 @EventBusSubscriber(modid = Src2mc.MOD_ID, value = Dist.CLIENT)
 public final class UseInput {
-    private static final int BUTTON_USE_ACTIVATES = 1024, DOOR_USE_OPENS = 256, INFRA_CAN_BE_HELD = 16384;
+    private static final int BUTTON_USE_ACTIVATES = 1024, DOOR_USE_OPENS = 256, INFRA_CAN_BE_HELD = 16384,
+        PROP_DOOR_IGNORE_USE = 32768;
     /** How much nearer than the entity a block may be hit before it counts as in the way: the map's own blocks hold its faces. */
     private static final double BLOCK_TOLERANCE = 0.5;
 
@@ -77,25 +78,27 @@ public final class UseInput {
             BundleMap map = generation.findMap(placement.campaignId(), placement.mapId()).orElse(null);
             LogicTable logic = map == null ? null : map.logic();
             if (logic == null) continue;
-            Map<Integer, MoverRegistry.Instance> movers = new HashMap<>();
-            for (MoverRegistry.Instance instance : MoverRegistry.instances(true)) {
-                if (instance.anchor() == anchor) movers.put(instance.entity(), instance);
-            }
+            Map<Integer, MoverRegistry.Instance> movers = Carriers.movers(anchor);
             for (int i = 0; i < logic.entities().size(); i++) {
                 LogicTable.Entity entity = logic.entities().get(i);
-                if (entity.volume() < 0 || !usable(entity)) continue;
-                LogicTable.Volume volume = logic.volumes().get(entity.volume());
+                if (!usable(entity)) continue;
+                LogicTable.Volume volume = entity.volume() < 0 ? null : logic.volumes().get(entity.volume());
+                PropUseBox box = volume == null ? PropUseBox.of(map, i) : null;
+                if (volume == null && box == null) continue;
                 // A door that has moved is aimed at where it is now: the ray goes into the frame it was compiled in.
                 Vec3 from = eye, to = eye.add(ray);
-                MoverRegistry.Instance mover = movers.get(i);
-                if (mover != null) {
-                    Vec3[] moved = compiled(minecraft.level, mover, placement, from, to);
-                    if (moved != null) { from = moved[0]; to = moved[1]; }
-                }
+                MoverRegistry.Instance mover = Carriers.carrier(logic, movers, i);
+                Carriers.Frame frame = mover == null ? null : Carriers.frame(minecraft.level, mover, placement, -1);
+                if (frame != null) { from = frame.toCompiled(from); to = frame.toCompiled(to); }
                 double fx = from.x - placement.translation().getX(), fy = from.y - placement.translation().getY(), fz = from.z - placement.translation().getZ();
                 Vec3 segment = to.subtract(from);
-                if (!crosses(volume.bounds(), fx, fy, fz, segment)) continue;
-                double fraction = volume.clip(fx, fy, fz, segment.x, segment.y, segment.z);
+                double fraction;
+                if (volume != null) {
+                    if (!crosses(volume.bounds(), fx, fy, fz, segment)) continue;
+                    fraction = volume.clip(fx, fy, fz, segment.x, segment.y, segment.z);
+                } else {
+                    fraction = box.clip(fx, fy, fz, segment.x, segment.y, segment.z);
+                }
                 if (fraction >= 0 && fraction < bestFraction) {
                     bestFraction = fraction;
                     best = new Target(anchor, i, continuous(entity));
@@ -109,31 +112,13 @@ public final class UseInput {
         return best;
     }
 
-    /**
-     * Both ends of a ray moved from the world into the frame a mover's entity was compiled in, or
-     * null while its sub-level is not here. A plot point is mover-local cell coordinates from the
-     * plot's centre; the compiled map-local point adds the mover's cell origin.
-     */
-    private static Vec3[] compiled(net.minecraft.client.multiplayer.ClientLevel level, MoverRegistry.Instance instance, MapPlacement placement,
-                                   Vec3 from, Vec3 to) {
-        var container = dev.ryanhcode.sable.api.sublevel.SubLevelContainer.getContainer(level);
-        if (container == null || !(container.getSubLevel(instance.subLevel()) instanceof dev.ryanhcode.sable.sublevel.ClientSubLevel subLevel)) return null;
-        MoverRegistry.Resolved resolved = MoverRegistry.resolve(level, instance.subLevel());
-        if (resolved == null) return null;
-        var pose = subLevel.logicalPose();
-        net.minecraft.core.BlockPos origin = MoverRegistry.plotOrigin(subLevel.getPlot());
-        Vec3 shift = new Vec3(resolved.mover().originX() + placement.translation().getX() - origin.getX(),
-            resolved.mover().originY() + placement.translation().getY() - origin.getY(),
-            resolved.mover().originZ() + placement.translation().getZ() - origin.getZ());
-        return new Vec3[]{pose.transformPositionInverse(from).add(shift), pose.transformPositionInverse(to).add(shift)};
-    }
-
     /** Which entities Source lets the player use: the same spawnflags the server checks. */
     private static boolean usable(LogicTable.Entity entity) {
         int flags = Variant.integer(entity.value("spawnflags"));
         return switch (entity.classname()) {
             case "func_button", "func_rot_button", "momentary_rot_button" -> (flags & BUTTON_USE_ACTIVATES) != 0;
             case "func_door", "func_door_rotating", "infra_button" -> (flags & DOOR_USE_OPENS) != 0;
+            case "prop_door_rotating" -> (flags & PROP_DOOR_IGNORE_USE) == 0;
             default -> false;
         };
     }

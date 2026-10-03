@@ -124,6 +124,9 @@ pub fn extract_mod_props(map: &Map, config: &Config) -> Vec<ModProp> {
     if config.props.entity_props {
         props.extend(crate::bsp::props::extract_entities(&map.bsp));
     }
+    // A parented prop may ride a mover: a train's buttons and levers are small,
+    // but they are its controls and move with it, so the size floor spares them.
+    let parented = crate::bsp::props::parented_entities(&map.bsp);
     props
         .into_iter()
         .enumerate()
@@ -137,7 +140,8 @@ pub fn extract_mod_props(map: &Map, config: &Config) -> Vec<ModProp> {
             let model = models.get_skin(&prop.model, prop.skin)?;
             let size = model.bounds.size() * prop.scale;
             let longest = size.x.max(size.y).max(size.z);
-            if longest < config.props.min_size
+            let rides = prop.entity.is_some_and(|entity| parented.contains(&entity));
+            if (longest < config.props.min_size && !rides)
                 || (config.props.max_size > 0.0 && longest > config.props.max_size)
             {
                 return None;
@@ -1123,7 +1127,10 @@ mod tests {
     #[test]
     fn modelled_props_leave_only_invisible_collision_behind() {
         let Some(map) = sample_map() else { return };
-        let assets = extract(&map, &kubejs());
+        // Every size is solid by default; the floor still leaves clutter out.
+        let mut config = kubejs();
+        config.props.collision_min_size = 48.0;
+        let assets = extract(&map, &config);
         if assets.placements.is_empty() {
             return;
         }

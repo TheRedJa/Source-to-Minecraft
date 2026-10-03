@@ -48,7 +48,7 @@ final class Triggers {
                 for (ServerPlayer player : players) {
                     // Source's noclip players touch triggers too; a spectator is Minecraft's noclip.
                     if (!player.isAlive() || (player.isSpectator() && !touchedBySpectators())) continue;
-                    AABB box = map.local(player);
+                    AABB box = compiled(map.local(player));
                     if (volume.intersects(box.minX, box.minY, box.minZ, box.maxX, box.maxY, box.maxZ)) now.add(player.getUUID());
                 }
             }
@@ -98,7 +98,7 @@ final class Triggers {
         void arrived(ServerPlayer player) {
             LogicTable.Volume volume = map.volume(this);
             if (volume == null) return;
-            AABB box = map.local(player);
+            AABB box = compiled(map.local(player));
             if (volume.intersects(box.minX, box.minY, box.minZ, box.maxX, box.maxY, box.maxZ)) contacts.add(player.getUUID());
         }
 
@@ -226,7 +226,7 @@ final class Triggers {
         @Override void arrived(ServerPlayer player) {
             super.arrived(player);
             LogicTable.Volume volume = map.volume(this);
-            AABB box = map.local(player);
+            AABB box = compiled(map.local(player));
             if (volume != null && volume.intersects(box.minX, box.minY, box.minZ, box.maxX, box.maxY, box.maxZ)) arrivedInside.add(player.getUUID());
         }
 
