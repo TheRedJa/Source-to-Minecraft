@@ -33,6 +33,19 @@ java {
 
 repositories {
     mavenCentral()
+    // Sable, which moves the maps' doors, lifts and trains (D21).
+    exclusiveContent {
+        forRepository {
+            maven {
+                url = 'https://maven.ryanhcode.dev/releases'
+                name = 'RyanHCode Maven'
+            }
+        }
+        filter {
+            includeGroup('dev.ryanhcode.sable')
+            includeGroup('dev.ryanhcode.sable-companion')
+        }
+    }
 }
 
 runs {
@@ -47,6 +60,12 @@ runs {
 
 dependencies {
     implementation "net.neoforged:neoforge:${neo_version}"
+    // Compiled against only: the game loads Sable from its mods folder (the dev client's is
+    // runs/client/mods), and neoforge.mods.toml makes it required.
+    compileOnly("dev.ryanhcode.sable:sable-neoforge-${minecraft_version}:${sable_version}") { transitive = false }
+    compileOnly("dev.ryanhcode.sable-companion:sable-companion-common-${minecraft_version}:${sable_companion_version}") { transitive = false }
+    testImplementation("dev.ryanhcode.sable:sable-neoforge-${minecraft_version}:${sable_version}") { transitive = false }
+    testImplementation("dev.ryanhcode.sable-companion:sable-companion-common-${minecraft_version}:${sable_companion_version}") { transitive = false }
     testImplementation platform('org.junit:junit-bom:5.11.4')
     testImplementation 'org.junit.jupiter:junit-jupiter'
 }
@@ -63,6 +82,7 @@ tasks.withType(ProcessResources).configureEach {
         minecraft_version      : minecraft_version,
         minecraft_version_range: minecraft_version_range,
         neo_version            : neo_version,
+        sable_version_range    : sable_version_range,
         loader_version_range   : loader_version_range,
         mod_id                 : mod_id,
         mod_name               : mod_name,

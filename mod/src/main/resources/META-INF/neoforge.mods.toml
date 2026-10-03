@@ -25,3 +25,11 @@ type="required"
 versionRange="${minecraft_version_range}"
 ordering="NONE"
 side="BOTH"
+
+# Doors, buttons, lifts and trains move as Sable sub-levels (D21).
+[[dependencies.${mod_id}]]
+modId="sable"
+type="required"
+versionRange="${sable_version_range}"
+ordering="AFTER"
+side="BOTH"

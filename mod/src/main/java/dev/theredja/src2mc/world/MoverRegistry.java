@@ -1,0 +1,148 @@
+package dev.theredja.src2mc.world;
+
+import dev.ryanhcode.sable.api.sublevel.SubLevelContainer;
+import dev.ryanhcode.sable.sublevel.plot.LevelPlot;
+import dev.theredja.src2mc.Src2mc;
+import dev.theredja.src2mc.bundle.BundleGeneration;
+import dev.theredja.src2mc.bundle.BundleMap;
+import dev.theredja.src2mc.bundle.MoverTable;
+import java.util.Collection;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicReferenceArray;
+import net.minecraft.core.BlockPos;
+import net.minecraft.world.level.BlockGetter;
+import net.minecraft.world.level.Level;
+import net.minecraft.world.level.chunk.LevelChunk;
+import net.minecraft.world.phys.shapes.Shapes;
+import net.minecraft.world.phys.shapes.VoxelShape;
+
+/**
+ * Which Sable sub-level carries which map's mover, on each side (D21). The server knows from its
+ * saved data, the client from the server's sync; both resolve an entry against the active
+ * bundle generation when it is first asked.
+ *
+ * A mover's cells stand in its sub-level's plot from the plot's centre block on, mover-local
+ * cell (0, 0, 0) at the centre. Sable keeps a sub-level's plot when it saves and loads it, and the
+ * centre is the plot's own, so neither side has to remember where the blocks went.
+ */
+public final class MoverRegistry {
+    /** One mover's sub-level: the placement it belongs to by anchor, the mover by entity index. */
+    public record Instance(long anchor, String campaignId, String mapId, int entity, UUID subLevel) {}
+
+    /** An instance with its map, mover and collision shapes found. */
+    public record Resolved(Instance instance, MapPlacement placement, BundleMap map, MoverTable.Mover mover,
+                           AtomicReferenceArray<VoxelShape> shapes, boolean solid) {}
+
+    private static final Map<UUID, Instance> SERVER = new ConcurrentHashMap<>();
+    private static final Map<UUID, Instance> CLIENT = new ConcurrentHashMap<>();
+    private static final Map<UUID, Resolved> SERVER_RESOLVED = new ConcurrentHashMap<>();
+    private static final Map<UUID, Resolved> CLIENT_RESOLVED = new ConcurrentHashMap<>();
+    private static volatile BundleGeneration serverGeneration, clientGeneration;
+
+    private MoverRegistry() {}
+
+    public static void put(boolean client, Instance instance) {
+        (client ? CLIENT : SERVER).put(instance.subLevel(), instance);
+        (client ? CLIENT_RESOLVED : SERVER_RESOLVED).remove(instance.subLevel());
+    }
+
+    public static void remove(boolean client, UUID subLevel) {
+        (client ? CLIENT : SERVER).remove(subLevel);
+        (client ? CLIENT_RESOLVED : SERVER_RESOLVED).remove(subLevel);
+    }
+
+    /** Replaces every client entry of one dimension's sync; the client knows only one dimension at a time. */
+    public static void replaceClient(List<Instance> instances) {
+        CLIENT.clear();
+        CLIENT_RESOLVED.clear();
+        for (Instance instance : instances) CLIENT.put(instance.subLevel(), instance);
+    }
+
+    public static void clear(boolean client) {
+        (client ? CLIENT : SERVER).clear();
+        (client ? CLIENT_RESOLVED : SERVER_RESOLVED).clear();
+    }
+
+    public static Collection<Instance> instances(boolean client) { return (client ? CLIENT : SERVER).values(); }
+
+    public static Instance instance(boolean client, UUID subLevel) { return (client ? CLIENT : SERVER).get(subLevel); }
+
+    /** The resolved mover a sub-level carries, or null when it is none of src2mc's or its map is not loaded. */
+    public static Resolved resolve(Level level, UUID subLevel) {
+        boolean client = level.isClientSide();
+        Map<UUID, Resolved> resolved = client ? CLIENT_RESOLVED : SERVER_RESOLVED;
+        BundleGeneration generation = Src2mc.bundles().active();
+        if (generation != (client ? clientGeneration : serverGeneration)) {
+            resolved.clear();
+            if (client) clientGeneration = generation; else serverGeneration = generation;
+        }
+        Resolved hit = resolved.get(subLevel);
+        if (hit != null) return hit;
+        Instance instance = (client ? CLIENT : SERVER).get(subLevel);
+        if (instance == null) return null;
+        PlacementIndex index = level instanceof net.minecraft.server.level.ServerLevel server ? PlacementSavedData.get(server).index()
+            : dev.theredja.src2mc.network.PlacementNetwork.clientIndex(level.dimension().location());
+        MapPlacement placement = null;
+        for (MapPlacement candidate : index.view()) {
+            if (candidate.anchorWorld().asLong() == instance.anchor()) { placement = candidate; break; }
+        }
+        if (placement == null) return null;
+        BundleMap map = generation.findMap(instance.campaignId(), instance.mapId()).orElse(null);
+        if (map == null || map.movers() == null) return null;
+        int index2 = map.movers().indexOfEntity(instance.entity());
+        if (index2 < 0) return null;
+        MoverTable.Mover mover = map.movers().movers().get(index2);
+        var shapes = new AtomicReferenceArray<VoxelShape>(mover.collision() == null ? 0 : mover.collision().shapeCount());
+        hit = new Resolved(instance, placement, map, mover, shapes, solid(map, mover));
+        resolved.put(subLevel, hit);
+        return hit;
+    }
+
+    /**
+     * Whether the mover collides at all. A {@code func_brush} set to "never solid" ({@code solidity}
+     * 1) is only seen: INFRA puts such brushes in doorways as player clips the logic never turns on.
+     */
+    private static boolean solid(BundleMap map, MoverTable.Mover mover) {
+        if (!mover.classname().equals("func_brush") || map.logic() == null || mover.entity() >= map.logic().entities().size()) return true;
+        return !"1".equals(map.logic().entities().get(mover.entity()).value("solidity"));
+    }
+
+    private static Level levelOf(dev.ryanhcode.sable.util.LevelAccelerator accelerator, BlockPos pos) {
+        LevelChunk chunk = accelerator.getChunk(pos);
+        return chunk == null ? null : chunk.getLevel();
+    }
+
+    /** Mover-local cell (0, 0, 0) of a sub-level's plot. */
+    public static BlockPos plotOrigin(LevelPlot plot) { return plot.getCenterBlock(); }
+
+    /**
+     * A mover block's collision at {@code pos}. Asked with no level -- Sable's per-state solidity
+     * and mass checks -- it is a full cube; see {@link Src2mcMoverBlock}.
+     */
+    static VoxelShape shape(BlockGetter getter, BlockPos pos) {
+        Level level = getter instanceof Level direct ? direct
+            : getter instanceof LevelChunk chunk ? chunk.getLevel()
+            // Sable resolves entity collision against sub-levels through its own block cache.
+            : getter instanceof dev.ryanhcode.sable.util.LevelAccelerator accelerator ? levelOf(accelerator, pos)
+            : null;
+        if (level == null) return Shapes.block();
+        SubLevelContainer container = SubLevelContainer.getContainer(level);
+        if (container == null || !container.inBounds(pos)) return Shapes.block();
+        LevelPlot plot = container.getPlot(pos.getX() >> 4, pos.getZ() >> 4);
+        if (plot == null) return Shapes.empty();
+        Resolved resolved = resolve(level, plot.getSubLevel().getUniqueId());
+        if (resolved == null || !resolved.solid() || resolved.mover().collision() == null) return Shapes.empty();
+        BlockPos origin = plotOrigin(plot);
+        int id = resolved.mover().collision().shapeAt(pos.getX() - origin.getX(), pos.getY() - origin.getY(), pos.getZ() - origin.getZ());
+        if (id < 0) return Shapes.empty();
+        VoxelShape shape = resolved.shapes().get(id);
+        if (shape == null) {
+            shape = CollisionShapes.build(resolved.mover().collision().boxes(id));
+            if (!resolved.shapes().compareAndSet(id, null, shape)) shape = resolved.shapes().get(id);
+        }
+        return shape;
+    }
+}

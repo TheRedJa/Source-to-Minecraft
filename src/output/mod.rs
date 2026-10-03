@@ -15,6 +15,7 @@ pub mod logic;
 pub mod mesh;
 pub mod metadata;
 pub mod mod_export;
+pub mod movers;
 pub mod obj;
 pub mod occlusion;
 pub mod placement;

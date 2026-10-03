@@ -237,4 +237,14 @@ public class LogicEntity implements Actor {
 
     /** Persistent state worth showing in a listing; empty for none. */
     String state() { return ""; }
+
+    /**
+     * Where the entity is at time {@code t} relative to its compiled position, for an entity that
+     * moves; null for one that does not. A pure function of the entity's state and the time, so
+     * Sable's physics substeps can ask for any moment between two logic ticks.
+     */
+    MoverPose pose(double t) { return null; }
+
+    /** Whether {@link #pose} changes around time {@code t}. */
+    boolean moving(double t) { return false; }
 }

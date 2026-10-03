@@ -37,6 +37,12 @@ public final class Src2mc {
         NeoForge.EVENT_BUS.addListener(dev.theredja.src2mc.logic.LogicSystem::onPlayerChangedDimension);
         NeoForge.EVENT_BUS.addListener(dev.theredja.src2mc.logic.LogicSystem::onServerStopped);
         NeoForge.EVENT_BUS.addListener(dev.theredja.src2mc.logic.LogicCommands::register);
+        NeoForge.EVENT_BUS.addListener(dev.theredja.src2mc.logic.MoverSystem::onServerTick);
+        NeoForge.EVENT_BUS.addListener(dev.theredja.src2mc.logic.MoverSystem::onPrePhysicsTick);
+        NeoForge.EVENT_BUS.addListener(dev.theredja.src2mc.logic.MoverSystem::onContainerReady);
+        NeoForge.EVENT_BUS.addListener(dev.theredja.src2mc.logic.MoverSystem::onPlayerLoggedIn);
+        NeoForge.EVENT_BUS.addListener(dev.theredja.src2mc.logic.MoverSystem::onPlayerChangedDimension);
+        NeoForge.EVENT_BUS.addListener(dev.theredja.src2mc.logic.MoverSystem::onServerStopped);
         // Baked light is keyed by dimension, so one left behind would light the
         // next world's overworld as if this world's maps were still in it.
         NeoForge.EVENT_BUS.addListener((net.neoforged.neoforge.event.server.ServerStoppedEvent event) -> {

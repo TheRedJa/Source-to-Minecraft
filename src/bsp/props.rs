@@ -27,6 +27,9 @@ pub struct Prop {
     pub solid: u8,
     /// The model's skin family to wear; 0 is the default.
     pub skin: i32,
+    /// Index of the entity in the BSP entity lump; `None` for a `prop_static`,
+    /// which has none. What a prop parented to a moving entity is found by.
+    pub entity: Option<usize>,
 }
 
 /// Not solid at all; the player walks through it in the game.
@@ -101,6 +104,7 @@ pub fn extract(map: &crate::bsp::Map) -> Vec<Prop> {
                 classname: "prop_static".to_string(),
                 solid: prop.solid,
                 skin: prop.skin,
+                entity: None,
             })
         })
         .collect()
@@ -122,7 +126,8 @@ pub fn extract(map: &crate::bsp::Map) -> Vec<Prop> {
 pub fn extract_entities(bsp: &vbsp::Bsp) -> Vec<Prop> {
     bsp.entities
         .iter()
-        .filter_map(|raw| {
+        .enumerate()
+        .filter_map(|(index, raw)| {
             let mut model = None;
             let mut origin = None;
             let mut angles = [0.0; 3];
@@ -159,6 +164,7 @@ pub fn extract_entities(bsp: &vbsp::Bsp) -> Vec<Prop> {
                 classname,
                 solid,
                 skin,
+                entity: Some(index),
             })
         })
         .collect()
@@ -184,6 +190,7 @@ mod tests {
             classname: "prop_static".into(),
             solid: SOLID_VPHYSICS,
             skin: 0,
+            entity: None,
         }
     }
 

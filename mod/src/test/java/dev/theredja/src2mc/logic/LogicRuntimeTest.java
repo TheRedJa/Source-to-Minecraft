@@ -143,6 +143,71 @@ final class LogicRuntimeTest {
         assertTrue(state(restored, "counter").startsWith("5 "));
     }
 
+    @Test void sourceAnglesTurnTheWaySourceDoes() {
+        // Yaw 90 turns Source's forward (+x) to its left (+y), which is Minecraft's north (-z).
+        org.joml.Vector3d forward = MoverPose.angles(0, 90, 0).transform(new org.joml.Vector3d(1, 0, 0));
+        assertEquals(0, forward.x, 1e-9);
+        assertEquals(-1, forward.z, 1e-9);
+        // Pitch 90 points forward straight down.
+        org.joml.Vector3d down = MoverPose.angles(90, 0, 0).transform(new org.joml.Vector3d(1, 0, 0));
+        assertEquals(-1, down.y, 1e-9);
+    }
+
+    @Test void aDoorTurnsAtItsSpeedAndReversesFromWhereItIs() {
+        MapLogic logic = run(entity("func_door_rotating", "targetname", "door", "distance", "90", "speed", "90", "spawnflags", "0"));
+        LogicEntity door = logic.findFirst("door", null, null, null);
+        logic.queue(0, "door", null, "Open", null, null, null);
+        seconds(logic, 0.5);
+        org.joml.Vector3d turned = door.pose(logic.time()).rotation().transform(new org.joml.Vector3d(1, 0, 0));
+        // Within a tick: the Open is queued for the next tick.
+        assertEquals(Math.cos(Math.toRadians(45)), turned.x, 0.06, "half way after half its travel time");
+        assertTrue(door.moving(logic.time()));
+        logic.queue(0, "door", null, "Close", null, null, null);
+        seconds(logic, 0.3);
+        assertTrue(door.moving(logic.time()), "closing from half open takes half the time, not all of it");
+        seconds(logic, 0.3);
+        assertTrue(!door.moving(logic.time()) && state(logic, "door").startsWith("closed"), state(logic, "door"));
+        assertEquals(1, door.pose(logic.time()).rotation().transform(new org.joml.Vector3d(1, 0, 0)).x, 1e-9);
+    }
+
+    @Test void aPropDoorTurnsFromItsOwnClosedAnglesTheWaySourceOpensIt() {
+        MapLogic logic = run(entity("prop_door_rotating", "targetname", "door", "angles", "0 270 0", "distance", "90", "speed", "100",
+            "opendir", "1", "spawnpos", "0"));
+        LogicEntity door = logic.findFirst("door", null, null, null);
+        // The prop is placed at its closed angles, so closed is no turn at all.
+        assertEquals(1, Math.abs(door.pose(logic.time()).rotation().w), 1e-9);
+        logic.queue(0, "door", null, "Open", null, null, null);
+        seconds(logic, 1.2);
+        // Forward opens to the yaw minus the distance: a turn of -90 degrees about up.
+        org.joml.Vector3d turned = door.pose(logic.time()).rotation().transform(new org.joml.Vector3d(1, 0, 0));
+        org.joml.Vector3d expected = MoverPose.angles(0, -90, 0).transform(new org.joml.Vector3d(1, 0, 0));
+        assertEquals(expected.x, turned.x, 1e-6);
+        assertEquals(expected.z, turned.z, 1e-6);
+        MapLogic back = run(entity("prop_door_rotating", "targetname", "door", "angles", "0 270 0", "distance", "90", "spawnpos", "2"));
+        org.joml.Vector3d spawned = back.findFirst("door", null, null, null).pose(back.time()).rotation().transform(new org.joml.Vector3d(1, 0, 0));
+        org.joml.Vector3d open = MoverPose.angles(0, 90, 0).transform(new org.joml.Vector3d(1, 0, 0));
+        assertEquals(open.z, spawned.z, 1e-6, "spawning open back starts turned by the distance");
+    }
+
+    @Test void moverCellsAreJoinedIntoOnePieceSoSableNeverSplitsThem() {
+        int[] joined = MoverSystem.connected(new int[]{0, 0, 0, 3, 2, 0, 0, 0, 5});
+        java.util.Set<Long> cells = new java.util.HashSet<>();
+        for (int i = 0; i < joined.length; i += 3) cells.add(BlockPos.asLong(joined[i], joined[i + 1], joined[i + 2]));
+        assertTrue(cells.contains(BlockPos.asLong(3, 2, 0)) && cells.contains(BlockPos.asLong(0, 0, 5)));
+        // Every cell reaches the first through face neighbours.
+        java.util.ArrayDeque<Long> queue = new java.util.ArrayDeque<>(List.of(BlockPos.asLong(0, 0, 0)));
+        java.util.Set<Long> seen = new java.util.HashSet<>(queue);
+        while (!queue.isEmpty()) {
+            long cell = queue.poll();
+            for (net.minecraft.core.Direction direction : net.minecraft.core.Direction.values()) {
+                long next = BlockPos.offset(cell, direction);
+                if (cells.contains(next) && seen.add(next)) queue.add(next);
+            }
+        }
+        assertEquals(cells.size(), seen.size());
+        assertEquals(3, MoverSystem.connected(new int[0]).length, "an empty mover still gets one block");
+    }
+
     /** With {@code -Dsrc2mc.testBundle}: spawns each map, presses every button it has, and runs it for two minutes. */
     @Test void realMapsRun() throws Exception {
         String path = System.getProperty("src2mc.testBundle");

@@ -563,7 +563,9 @@ impl Default for Props {
 pub enum BrushEntityMode {
     /// Voxelize them into the world alongside worldspawn.
     Include,
-    /// Voxelize them into their own schematic per entity.
+    /// Voxelize them into their own schematic per entity. Under mod export
+    /// they are movers instead: their exact geometry goes into the bundle's
+    /// mover table rather than into a schematic.
     Separate,
     /// Record them in the manifest but do not voxelize.
     Skip,
@@ -595,6 +597,38 @@ impl Default for Entities {
             manifest: true,
             brush_entities: BrushEntityMode::Include,
             classname_modes,
+        }
+    }
+}
+
+/// Brush entities the mod moves on their own, as physics sub-levels: every
+/// one of them opens, slides, turns or toggles at runtime, so none of them can
+/// be part of the static world it moves through.
+pub const MOVER_CLASSES: &[&str] = &[
+    "func_door",
+    "func_door_rotating",
+    "func_movelinear",
+    "func_tracktrain",
+    "func_rotating",
+    "func_button",
+    "func_rot_button",
+    "momentary_rot_button",
+    "infra_button",
+    "func_brush",
+    "func_wall_toggle",
+];
+
+impl Entities {
+    /// Take every mover class out of the world, for mod export.
+    ///
+    /// Forced rather than left to the configuration: the mod drives these
+    /// entities itself, and one left in the world grid would leave a copy of
+    /// the door sealing the doorway the moving one opens. Schematic export
+    /// keeps its own defaults, where only doors and platforms are separate.
+    pub fn separate_movers(&mut self) {
+        for class in MOVER_CLASSES {
+            self.classname_modes
+                .insert(class.to_string(), BrushEntityMode::Separate);
         }
     }
 }

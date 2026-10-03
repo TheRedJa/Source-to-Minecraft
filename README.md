@@ -127,6 +127,13 @@ with class, name and entity index up close. `/src2mc place_chain <map> <count>` 
 maps its level changes lead to, side by side, and `/src2mc_audio captions
 on|off` switches the captions.
 
+Doors, buttons and other moving brush entities, with the props attached to
+them, move as [Sable](https://github.com/ryanhcode/sable) sub-levels, which the
+mod requires: players collide with them where they are, ride lifts and are
+pushed by closing doors. Every placed map gets them whether its logic runs or
+not; `/src2mc movers status` counts them and `/src2mc movers respawn` rebuilds
+them. They cannot be broken yet.
+
 Building the mod and running its development client is described in
 [`mod/README.md`](mod/README.md). The bundle format is specified in
 [`docs/format.md`](docs/format.md), the design in

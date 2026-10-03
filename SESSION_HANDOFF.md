@@ -4,23 +4,51 @@ Updated: 2026-10-03 (Europe/Berlin), DEV-0.23.0 (the map's logic: Source
 entity I/O on the server, triggered sounds, scenes with captions, level
 changes between placed maps)
 
-## NEXT TASK: map logic phase B (not started; user compacts first)
+## NEXT TASK: map logic phase B, continued (order agreed with the user 2026-10-03)
 
-Phase A is done and user-confirmed (2026-10-03: "All fixed and working").
-Phase B, as planned in D20: things the logic moves or shows. Start with a
-short design pass like phase A's (survey, then ask): per-entity geometry in
-the renderer and in collision so `func_door`/`func_door_rotating`/
-`func_movelinear`/`func_tracktrain` (now left out of the bundle as
-"separate"), `func_brush` enable/disable, buttons and `infra_button` move;
-`prop_dynamic` doors and parts parented to them (e.g. furnace's sliding door
-#573 on `plant_exit_door`, which today blocks the doorway after the logic
-opens it); `prop_door_rotating` (needs a usable shape); `prop_dynamic`
-Skin/SetAnimation/Enable/Disable, `env_sprite`. Biggest unhandled counts from
-`/src2mc logic status` on the INFRA maps: `prop_dynamic.skin`,
-`env_sprite.show/hidesprite`, lights, `prop_dynamic.setanimation`,
-`func_rotating.setspeed`, `func_tracktrain.*`. Also open: INFRA chapter titles
-(`game_text` Display), `env_shake`/`env_fade`. Later, together: VScript,
-lights, INFRA gameplay (camera, documents, corruption).
+1. `prop_door_rotating` usable with the use key: a use volume from the model's box
+   (the logic opens them already; `UseInput`/`LogicSystem.use` only know brush volumes).
+2. `func_brush` Enable/Disable: show/hide and solidity (`solidity` 0 toggle, 1 never,
+   2 always; `StartDisabled`), on the mover sub-level path (renderer skips hidden
+   movers, `MoverRegistry` shape empty when not solid).
+3. `func_tracktrain` + `path_track`: follow the path at speed (8 on furnace); Sable carries riders.
+4. `func_rotating`: continuous spin, SetSpeed/Start/Stop (6 on furnace).
+5. Mover rendering polish: rotate normals with the pose; per-vertex light instead of one light.
+6. B2: `prop_dynamic` Skin, Enable/Disable, color (biggest unhandled inputs).
+7. B3: INFRA chapter titles (`game_text`), `env_fade`, `env_shake`.
+Later (user): skeletal animation (test case: furnace `cellardoor1` #2209, a prop_dynamic
+slid by `SetAnimation open/close`; its `func_door` #2112 is an invisible clip, not exported),
+`env_sprite`, lights, VScript, INFRA gameplay. Each step ends with the user's in-game test.
+
+## DONE: map logic phase B1 (DEV-0.24.0, user-confirmed 2026-10-03)
+
+User: "Everything looks good and the sliding door works correctly", then all doors fixed.
+Decisions (user, 2026-10-03): all movement through Sable (hard dependency, 2.0.3 in the dev
+client, compileOnly from maven.ryanhcode.dev); movers not breakable; animation, env_sprite,
+lights later. Design in D21. Hold-still = fixed constraint world<->sub-level (as Create:
+Aeronautics' physics staff); moving = per physics substep teleport + resetVelocity + new
+constraint at the Source pose. Decompiled references (regenerate with vineflower if gone):
+`target/sable-src`, `target/sable-rapier/src`, `target/aero/sim`, `target/companion`.
+
+Converter (format section 17): mod export takes `MOVER_CLASSES` (+ prop_door_rotating) out of
+the world into `maps/<id>/movers.json` + `movers/<entity>.s2faces|.s2coll`, props riding them
+by parentname (`src/output/movers.rs`); empty movers (nodraw/clip only, nothing riding) are
+left out. Fixed: the 3D-skybox filter tested brush-entity brushes at their entity-relative
+position and dropped nearly all of them on INFRA. Furnace: 71 movers, 69 riding props.
+Mod: `MoverTable`, `src2mc:mover` block, `MoverRegistry` (plot pos -> mover cell via plot
+centre; resolves the level through Sable's `LevelAccelerator`), `MoverPose`, Door/Button
+`pose(t)`, `MoverSystem` (spawn, lock, drive, saved data `src2mc_movers`, sync, cells joined
+into one face-connected piece so Sable never splits them), `MoverNetwork` (protocol "4"),
+`MoverRenderer`, aiming through the moved pose, `/src2mc movers status|respawn`.
+Bugs found in the in-game test: saved data read inside Sable's container-ready event (fires in
+the ServerLevel constructor, crash); Sable splitting disconnected movers (pieces fell out of
+the world); prop doors rotated by their angles twice (prop is placed at its closed angles;
+prop doors now move by angles per CPropDoorRotating: forward = yaw - distance, hinge swap,
+spawnpos, open away from the player); `func_brush` solidity 1 collided; Sable's entity
+collision asks through `LevelAccelerator`, which fell back to full cubes.
+Known gaps: rotated movers keep unrotated normals; one light per mover; nodraw/clip mover
+brushes have no collision; thin movers not in the light-occlusion mask; F3+B shows Sable's red
+sub-level bounds (debug only).
 
 ## DONE: map logic phase A (DEV-0.21.0 to DEV-0.23.0, user-confirmed 2026-10-03)
 

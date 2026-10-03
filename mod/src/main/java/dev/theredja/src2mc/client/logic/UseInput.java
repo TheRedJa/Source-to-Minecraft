@@ -8,6 +8,9 @@ import dev.theredja.src2mc.logic.LogicNetwork;
 import dev.theredja.src2mc.logic.Variant;
 import dev.theredja.src2mc.network.PlacementNetwork;
 import dev.theredja.src2mc.world.MapPlacement;
+import dev.theredja.src2mc.world.MoverRegistry;
+import java.util.HashMap;
+import java.util.Map;
 import net.minecraft.client.Minecraft;
 import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
@@ -74,13 +77,25 @@ public final class UseInput {
             BundleMap map = generation.findMap(placement.campaignId(), placement.mapId()).orElse(null);
             LogicTable logic = map == null ? null : map.logic();
             if (logic == null) continue;
-            double fx = eye.x - placement.translation().getX(), fy = eye.y - placement.translation().getY(), fz = eye.z - placement.translation().getZ();
+            Map<Integer, MoverRegistry.Instance> movers = new HashMap<>();
+            for (MoverRegistry.Instance instance : MoverRegistry.instances(true)) {
+                if (instance.anchor() == anchor) movers.put(instance.entity(), instance);
+            }
             for (int i = 0; i < logic.entities().size(); i++) {
                 LogicTable.Entity entity = logic.entities().get(i);
                 if (entity.volume() < 0 || !usable(entity)) continue;
                 LogicTable.Volume volume = logic.volumes().get(entity.volume());
-                if (!crosses(volume.bounds(), fx, fy, fz, ray)) continue;
-                double fraction = volume.clip(fx, fy, fz, ray.x, ray.y, ray.z);
+                // A door that has moved is aimed at where it is now: the ray goes into the frame it was compiled in.
+                Vec3 from = eye, to = eye.add(ray);
+                MoverRegistry.Instance mover = movers.get(i);
+                if (mover != null) {
+                    Vec3[] moved = compiled(minecraft.level, mover, placement, from, to);
+                    if (moved != null) { from = moved[0]; to = moved[1]; }
+                }
+                double fx = from.x - placement.translation().getX(), fy = from.y - placement.translation().getY(), fz = from.z - placement.translation().getZ();
+                Vec3 segment = to.subtract(from);
+                if (!crosses(volume.bounds(), fx, fy, fz, segment)) continue;
+                double fraction = volume.clip(fx, fy, fz, segment.x, segment.y, segment.z);
                 if (fraction >= 0 && fraction < bestFraction) {
                     bestFraction = fraction;
                     best = new Target(anchor, i, continuous(entity));
@@ -92,6 +107,25 @@ public final class UseInput {
         if (hit != null && hit.getType() != HitResult.Type.MISS
             && hit.getLocation().distanceTo(eye) < bestFraction * reach - BLOCK_TOLERANCE) return null;
         return best;
+    }
+
+    /**
+     * Both ends of a ray moved from the world into the frame a mover's entity was compiled in, or
+     * null while its sub-level is not here. A plot point is mover-local cell coordinates from the
+     * plot's centre; the compiled map-local point adds the mover's cell origin.
+     */
+    private static Vec3[] compiled(net.minecraft.client.multiplayer.ClientLevel level, MoverRegistry.Instance instance, MapPlacement placement,
+                                   Vec3 from, Vec3 to) {
+        var container = dev.ryanhcode.sable.api.sublevel.SubLevelContainer.getContainer(level);
+        if (container == null || !(container.getSubLevel(instance.subLevel()) instanceof dev.ryanhcode.sable.sublevel.ClientSubLevel subLevel)) return null;
+        MoverRegistry.Resolved resolved = MoverRegistry.resolve(level, instance.subLevel());
+        if (resolved == null) return null;
+        var pose = subLevel.logicalPose();
+        net.minecraft.core.BlockPos origin = MoverRegistry.plotOrigin(subLevel.getPlot());
+        Vec3 shift = new Vec3(resolved.mover().originX() + placement.translation().getX() - origin.getX(),
+            resolved.mover().originY() + placement.translation().getY() - origin.getY(),
+            resolved.mover().originZ() + placement.translation().getZ() - origin.getZ());
+        return new Vec3[]{pose.transformPositionInverse(from).add(shift), pose.transformPositionInverse(to).add(shift)};
     }
 
     /** Which entities Source lets the player use: the same spawnflags the server checks. */

@@ -253,6 +253,15 @@ public final class MapLogic {
         return level.getServer().getPlayerList().getPlayer(player.id());
     }
 
+    /** Where a player stands, map-local, or null when they are not in this map's level. */
+    double[] playerPosition(PlayerActor actor) {
+        if (level == null || actor == null) return null;
+        net.minecraft.world.entity.player.Player player = level.getPlayerByUUID(actor.id());
+        if (player == null) return null;
+        return new double[]{player.getX() - placement.translation().getX(), player.getY() - placement.translation().getY(),
+            player.getZ() - placement.translation().getZ()};
+    }
+
     LogicEntity entity(int index) { return index >= 0 && index < entities.length ? entities[index] : null; }
 
     double time() { return time; }

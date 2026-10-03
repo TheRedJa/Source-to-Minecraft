@@ -168,7 +168,8 @@ public final class LogicSystem {
         LogicTable.Volume volume = logic.volume(logic.entity(index));
         if (volume == null) return;
         double[] b = volume.bounds();
-        Vec3 eye = player.getEyePosition();
+        // A door that has moved is aimed at where it is now: the eye goes into the frame it was compiled in.
+        Vec3 eye = MoverSystem.toCompiled(player.serverLevel(), anchor, index, player.getEyePosition());
         Vec3 min = logic.world(new double[]{b[0], b[1], b[2]}), max = logic.world(new double[]{b[3], b[4], b[5]});
         double dx = Math.max(0, Math.max(min.x - eye.x, eye.x - max.x)), dy = Math.max(0, Math.max(min.y - eye.y, eye.y - max.y)),
             dz = Math.max(0, Math.max(min.z - eye.z, eye.z - max.z));

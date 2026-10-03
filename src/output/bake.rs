@@ -362,6 +362,7 @@ mod tests {
                 classname: "prop_static".into(),
                 solid: crate::bsp::props::SOLID_VPHYSICS,
                 skin: 0,
+                entity: None,
             };
             let origin = transform.to_block_space(prop.origin);
             let cell = [

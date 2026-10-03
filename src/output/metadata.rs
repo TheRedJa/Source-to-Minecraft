@@ -96,6 +96,9 @@ pub struct MapMetadata {
     /// Optional entity logic table. Absent when the map has no entities.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub logic: Option<String>,
+    /// Optional mover table. Absent when the map has no moving entities.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub movers: Option<String>,
     pub diagnostics: String,
 }
 
@@ -349,6 +352,12 @@ impl MapMetadata {
                 "non-canonical logic path"
             );
         }
+        if let Some(movers) = &self.movers {
+            ensure!(
+                movers == &format!("maps/{}/movers.json", self.map_id),
+                "non-canonical movers path"
+            );
+        }
         for material in &mut self.materials {
             material.validate()?;
         }
@@ -571,6 +580,7 @@ mod tests {
             collision: None,
             audio: None,
             logic: None,
+            movers: None,
             diagnostics: "maps/d1_01/diagnostics.json".into(),
         };
         let value: serde_json::Value =
