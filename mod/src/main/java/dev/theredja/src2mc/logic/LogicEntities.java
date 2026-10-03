@@ -39,6 +39,9 @@ final class LogicEntities {
             case "path_track" -> new Trains.PathTrack(map, index, entity);
             case "func_rotating" -> new Trains.Rotating(map, index, entity);
             case "func_door", "func_door_rotating", "func_movelinear", "infra_button", "prop_door_rotating" -> new Movers.Door(map, index, entity);
+            case "game_text" -> new ScreenEffects.GameText(map, index, entity);
+            case "env_fade" -> new ScreenEffects.Fade(map, index, entity);
+            case "env_shake" -> new ScreenEffects.Shake(map, index, entity);
             case "ambient_generic" -> new SoundEntities.Ambient(map, index, entity);
             case "env_soundscape" -> new SoundEntities.Soundscape(map, index, entity);
             case "infra_music" -> new SoundEntities.Music(map, index, entity);

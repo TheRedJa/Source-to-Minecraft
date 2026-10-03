@@ -66,14 +66,16 @@ public final class MapLogic {
     private final List<LogicNetwork.SoundEvent> soundEvents = new ArrayList<>();
     private final List<Long> stoppedSounds = new ArrayList<>();
     private long soundEventIds;
-    private boolean dirty;
+    private boolean dirty, restoring;
+    /** Screen effects a run without a server would have sent; see {@link ScreenEffects#drain}. */
+    final List<ScreenEffects.Sent> screenSent = new ArrayList<>();
 
     MapLogic(MapPlacement placement, BundleMap map) {
         this.placement = placement;
         this.map = map;
         this.table = map.logic();
         this.audio = map.audio();
-        this.entities = new LogicEntity[table.entities().size()];
+        this.entities = new LogicEntity[table.entities().size() + table.engineEntities().size()];
     }
 
     /** Spawns every entity fresh, as a map loads in Source, and activates them. */
@@ -85,11 +87,15 @@ public final class MapLogic {
         byClass.clear();
         playerEntities.clear();
         for (int i = 0; i < entities.length; i++) {
-            entities[i] = LogicEntities.create(this, i, table.entities().get(i));
+            entities[i] = LogicEntities.create(this, i, record(i));
             index(entities[i]);
         }
         for (LogicEntity entity : entities) entity.spawn();
         for (LogicEntity entity : entities) if (!entity.removed) entity.activate();
+        // What the game's own code queues as the map spawns; a restored save has its queue already.
+        if (!restoring) {
+            for (LogicTable.EngineEvent event : table.engineEvents()) queue(event.delay(), event.target(), null, event.input(), event.parameter(), null, null);
+        }
         for (LogicEntity entity : entities) if (entity instanceof SoundEntities.Synced) soundChanges.add(entity.index);
         dirty = true;
     }
@@ -287,9 +293,15 @@ public final class MapLogic {
         return player.getBoundingBox().move(-placement.translation().getX(), -placement.translation().getY(), -placement.translation().getZ());
     }
 
+    /** The table record of entity {@code index}: the lump's entities, then those the game's code adds. */
+    LogicTable.Entity record(int index) {
+        int lump = table.entities().size();
+        return index < lump ? table.entities().get(index) : table.engineEntities().get(index - lump);
+    }
+
     double[] position(LogicEntity entity) {
         if (entity.index < 0) return null;
-        LogicTable.Entity source = table.entities().get(entity.index);
+        LogicTable.Entity source = record(entity.index);
         if (source.origin() != null) return source.origin();
         if (source.volume() >= 0) {
             double[] b = table.volumes().get(source.volume()).bounds();
@@ -300,13 +312,13 @@ public final class MapLogic {
 
     LogicTable.Volume volume(LogicEntity entity) {
         if (entity.index < 0) return null;
-        int volume = table.entities().get(entity.index).volume();
+        int volume = record(entity.index).volume();
         return volume < 0 ? null : table.volumes().get(volume);
     }
 
     LogicTable.Scene scene(LogicEntity entity) {
         if (entity.index < 0) return null;
-        int scene = table.entities().get(entity.index).scene();
+        int scene = record(entity.index).scene();
         return scene < 0 ? null : table.scenes().get(scene);
     }
 
@@ -463,7 +475,12 @@ public final class MapLogic {
      * is of a different export of the map.
      */
     boolean load(CompoundTag tag) {
-        spawn(LoadType.valueOf(tag.getString("load_type").isEmpty() ? "NEW_GAME" : tag.getString("load_type")));
+        restoring = true;
+        try {
+            spawn(LoadType.valueOf(tag.getString("load_type").isEmpty() ? "NEW_GAME" : tag.getString("load_type")));
+        } finally {
+            restoring = false;
+        }
         if (tag.getInt("entity_count") != entities.length) return false;
         time = tag.getDouble("time");
         CompoundTag states = tag.getCompound("entities");

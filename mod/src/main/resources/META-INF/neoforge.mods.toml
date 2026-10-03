@@ -12,6 +12,9 @@ description='''
 Companion mod for loading and rendering maps exported by src2mc.
 '''
 
+[[accessTransformers]]
+file="META-INF/accesstransformer.cfg"
+
 [[dependencies.${mod_id}]]
 modId="neoforge"
 type="required"

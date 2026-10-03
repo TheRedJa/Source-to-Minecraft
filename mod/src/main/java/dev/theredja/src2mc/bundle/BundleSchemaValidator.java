@@ -631,7 +631,9 @@ final class BundleSchemaValidator {
 
     /** Parses and validates the optional logic table (format.md section 16). */
     private static LogicTable validateLogic(JsonObject root) throws BundleValidationException {
-        keys(root, "format", "version", "source_origin", "entities", "volumes", "scenes", "captions");
+        List<String> rootKeys = new ArrayList<>(List.of("format", "version", "source_origin", "entities", "volumes", "scenes", "captions"));
+        for (String optional : List.of("strings", "engine_entities", "engine_events")) if (root.has(optional)) rootKeys.add(optional);
+        keys(root, rootKeys.toArray(String[]::new));
         format(root, "src2mc-logic", "logic.json");
         double[] sourceOrigin = vector3d(root.get("source_origin"), "source_origin");
         JsonArray volumeArray = array(root, "volumes");
@@ -702,7 +704,48 @@ final class BundleSchemaValidator {
         JsonArray entityArray = array(root, "entities");
         limit(entityArray.size(), BundleLimits.MAX_LOGIC_RECORDS, "entity count");
         List<LogicTable.Entity> entities = new ArrayList<>(entityArray.size());
-        for (JsonElement element : entityArray) {
+        for (JsonElement element : entityArray) entities.add(logicEntity(element, volumes, scenes));
+        Map<String, String> captions = tokens(root, "captions");
+        Map<String, String> strings = root.has("strings") ? tokens(root, "strings") : Map.of();
+        List<LogicTable.Entity> engineEntities = new ArrayList<>();
+        if (root.has("engine_entities")) {
+            JsonArray engineArray = array(root, "engine_entities");
+            limit(engineArray.size(), BundleLimits.MAX_LOGIC_RECORDS, "engine entity count");
+            for (JsonElement element : engineArray) engineEntities.add(logicEntity(element, volumes, scenes));
+        }
+        List<LogicTable.EngineEvent> engineEvents = new ArrayList<>();
+        if (root.has("engine_events")) {
+            JsonArray eventArray = array(root, "engine_events");
+            limit(eventArray.size(), BundleLimits.MAX_LOGIC_RECORDS, "engine event count");
+            for (JsonElement element : eventArray) {
+                JsonObject event = object(element, "engine event");
+                keys(event, "target", "input", "parameter", "delay");
+                double delay = finiteNumber(event.get("delay"), "engine event delay");
+                if (delay < 0) fail(BundleErrorCode.INVALID_SCHEMA, "negative engine event delay");
+                engineEvents.add(new LogicTable.EngineEvent(string(event, "target"), string(event, "input"), string(event, "parameter"), delay));
+            }
+        }
+        return new LogicTable(sourceOrigin, entities, volumes, scenes, captions, strings, engineEntities, engineEvents);
+    }
+
+    /** A {@code token}/{@code text} array as a map: tokens unique and lowercase. */
+    private static Map<String, String> tokens(JsonObject root, String key) throws BundleValidationException {
+        JsonArray array = array(root, key);
+        limit(array.size(), BundleLimits.MAX_LOGIC_RECORDS, key + " count");
+        Map<String, String> tokens = new HashMap<>();
+        for (JsonElement element : array) {
+            JsonObject entry = object(element, key);
+            keys(entry, "token", "text");
+            String token = string(entry, "token");
+            if (!token.equals(token.toLowerCase(java.util.Locale.ROOT)) || tokens.put(token, string(entry, "text")) != null)
+                fail(BundleErrorCode.DUPLICATE_IDENTITY, key + " tokens are unique and lowercase");
+        }
+        return tokens;
+    }
+
+    private static LogicTable.Entity logicEntity(JsonElement element, List<LogicTable.Volume> volumes, List<LogicTable.Scene> scenes)
+        throws BundleValidationException {
+        {
             JsonObject entity = object(element, "entity");
             List<String> entityKeys = new ArrayList<>(List.of("classname", "keyvalues", "outputs"));
             if (entity.has("origin")) entityKeys.add("origin");
@@ -732,22 +775,11 @@ final class BundleSchemaValidator {
             }
             String classname = string(entity, "classname");
             if (!classname.equals(classname.toLowerCase(java.util.Locale.ROOT))) fail(BundleErrorCode.INVALID_SCHEMA, "classnames are lowercase");
-            entities.add(new LogicTable.Entity(classname, pairs, outputs,
+            return new LogicTable.Entity(classname, pairs, outputs,
                 entity.has("origin") ? vector3d(entity.get("origin"), "entity origin") : null,
                 entity.has("volume") ? index(entity.get("volume"), volumes.size(), "entity volume") : -1,
-                entity.has("scene") ? index(entity.get("scene"), scenes.size(), "entity scene") : -1));
+                entity.has("scene") ? index(entity.get("scene"), scenes.size(), "entity scene") : -1);
         }
-        JsonArray captionArray = array(root, "captions");
-        limit(captionArray.size(), BundleLimits.MAX_LOGIC_RECORDS, "caption count");
-        Map<String, String> captions = new HashMap<>();
-        for (JsonElement element : captionArray) {
-            JsonObject caption = object(element, "caption");
-            keys(caption, "token", "text");
-            String token = string(caption, "token");
-            if (!token.equals(token.toLowerCase(java.util.Locale.ROOT)) || captions.put(token, string(caption, "text")) != null)
-                fail(BundleErrorCode.DUPLICATE_IDENTITY, "caption tokens are unique and lowercase");
-        }
-        return new LogicTable(sourceOrigin, entities, volumes, scenes, captions);
     }
 
     private static boolean bool(JsonObject o, String key) throws BundleValidationException {

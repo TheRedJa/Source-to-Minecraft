@@ -11,13 +11,38 @@ import java.util.Map;
  * map-local blocks. Indices are validated in range; an absent optional index is -1.
  */
 public record LogicTable(double[] sourceOrigin, List<Entity> entities, List<Volume> volumes, List<Scene> scenes,
-                         Map<String, String> captions) {
+                         Map<String, String> captions, Map<String, String> strings, List<Entity> engineEntities,
+                         List<EngineEvent> engineEvents) {
     public LogicTable {
         sourceOrigin = sourceOrigin.clone();
         entities = List.copyOf(entities);
         volumes = List.copyOf(volumes);
         scenes = List.copyOf(scenes);
         captions = Map.copyOf(captions);
+        strings = Map.copyOf(strings);
+        engineEntities = List.copyOf(engineEntities);
+        engineEvents = List.copyOf(engineEvents);
+    }
+
+    public LogicTable(double[] sourceOrigin, List<Entity> entities, List<Volume> volumes, List<Scene> scenes, Map<String, String> captions) {
+        this(sourceOrigin, entities, volumes, scenes, captions, Map.of(), List.of(), List.of());
+    }
+
+    /**
+     * An input the game's own code queues as the map spawns ({@code EntFire}), such as INFRA's
+     * chapter title script; {@code delay} in seconds.
+     */
+    public record EngineEvent(String target, String input, String parameter, double delay) {}
+
+    /**
+     * A HUD text as {@code g_pVGuiLocalize->Find} shows it: a {@code #} token's localized text,
+     * anything else, or a token the strings lack, as written.
+     */
+    public String localize(String text) {
+        if (text == null) return "";
+        String token = text.startsWith("#") ? text.substring(1) : text;
+        String found = strings.get(token.toLowerCase(Locale.ROOT));
+        return found != null ? found : text;
     }
 
     @Override public double[] sourceOrigin() { return sourceOrigin.clone(); }

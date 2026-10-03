@@ -605,3 +605,46 @@ props some input changes (format section 18) and the mod keeps those apart.
 - **Not yet.** `SetAnimation` (skeletal animation), `Alpha`/`renderamt`, and
   `trigger_remove` taking a carried prop.
 
+## D23 — Texts, fades and shakes follow Source's client code
+
+`game_text`, `env_fade` and `env_shake` (B3) are user messages in Source: the
+server decides who gets what, the client draws it. The mod does the same:
+the server entities follow `maprules.cpp`, `EnvFade.cpp` and `EnvShake.cpp`
+with `UTIL_HudMessage`, `UTIL_ScreenFade` and `UTIL_ScreenShake` ("every
+player" being every player inside the map), and the client follows
+`CHudMessage` and `CViewEffects` line by line.
+
+- **Text.** Six channels, a new text replacing its channel's; positions as
+  screen fractions with -1 centring; the fade (0), flicker (1) and scan-out (2)
+  effects with Source's per-character colour blend, including drawing the
+  characters not yet scanned black. The font is Minecraft's, bold, at
+  Trebuchet 24's 24 screen pixels. The colour's own alpha is ignored, as the
+  2013 client ignores it. `#` tokens are localized by the converter (format
+  section 16 `strings`).
+- **INFRA chapter titles.** INFRA's engine creates the two title texts and runs
+  `chapter_titles.nut`; neither is in the map. The converter writes both as
+  engine entities and the script's `EntFire` calls as engine events, so the
+  mod runs no VScript. The texts' fade and scan timings are Portal 2's own
+  entities of the same names, which INFRA's engine branch shares (its
+  `server.dll` holds the same message and colour strings); awaiting the
+  user's comparison with INFRA.
+- **Fade.** Several fades sum their colours and take the highest alpha;
+  modulate multiplies the screen. Durations go through Source's 7.9 fixed
+  point, so a 99999-second hold is about 128 seconds, as in Source. A fade
+  covers the HUD unless it has Portal 2's flag 16.
+- **Shake.** A random offset (up to 16 units, half a block) and roll, re-rolled
+  at the frequency and settling over the duration, amplitude falling off with
+  distance to the radius; players in the air are left alone unless the flag
+  says otherwise. The roll goes in through the camera angle event; the offset
+  needs `Camera.setPosition`, made public by an access transformer and applied
+  in the field-of-view event, the one fired after the camera is placed and
+  before the world is drawn. Physics and rope shaking are not done. Shakes
+  run on the map's clock, sent with each shake: Source settles a shake as
+  `sin(curtime * freq)` with `curtime` the map's time, so the world's game
+  time made them move at the wrong speed (user, DEV-0.28.0: "way too slow").
+- **Clearing.** Starting or stopping a map's logic takes its texts, fades and
+  shakes off the screens of the players inside, as loading a level clears
+  Source's view effects; `/src2mc_screen clear` does it by hand.
+- **Not yet.** `env_fade`'s `FadeReverse` (Portal 2, not used by the test
+  maps), `env_hudhint`, `env_instructor_hint`, `point_clientcommand`.
+

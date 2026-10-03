@@ -146,7 +146,13 @@ public final class LogicSystem {
         data.pending().remove(placement.anchorWorld().asLong());
         data.setDirty();
         send(level, logic, logic.drainUpdate(true), true);
+        clearScreens(level, placement);
         return null;
+    }
+
+    /** Takes the map's texts, fades and shakes off the screens of the players inside it. */
+    private static void clearScreens(ServerLevel level, MapPlacement placement) {
+        for (ServerPlayer player : playersInside(level, placement)) PacketDistributor.sendToPlayer(player, new ScreenEffects.ClearPayload());
     }
 
     static boolean stop(ServerLevel level, MapPlacement placement) {
@@ -157,6 +163,7 @@ public final class LogicSystem {
         data.setDirty();
         PacketDistributor.sendToPlayersInDimension(level, new LogicNetwork.SyncPayload(level.dimension().location(),
             placement.anchorWorld().asLong(), false, true, List.of(), List.of(), List.of()));
+        clearScreens(level, placement);
         return had;
     }
 

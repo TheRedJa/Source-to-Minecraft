@@ -48,6 +48,12 @@ repositories {
     }
 }
 
+minecraft {
+    accessTransformers {
+        file rootProject.file('src/main/resources/META-INF/accesstransformer.cfg')
+    }
+}
+
 runs {
     configureEach {
         workingDirectory project.layout.projectDirectory.dir('runs').dir(name)
@@ -74,6 +80,7 @@ tasks.named('test', Test) {
     useJUnitPlatform()
     if (System.getProperty('src2mc.testBundle') != null) {
         systemProperty 'src2mc.testBundle', System.getProperty('src2mc.testBundle')
+        if (System.getProperty('src2mc.churn') != null) systemProperty 'src2mc.churn', 'true'
     }
 }
 

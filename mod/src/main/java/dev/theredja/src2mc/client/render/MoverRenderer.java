@@ -78,6 +78,8 @@ public final class MoverRenderer {
         Quaterniond litOrientation;
         long litFrame = Long.MIN_VALUE;
         boolean litPerVertex;
+        /** A relight sampling on a worker; its buffers go up on the render thread once it is done. */
+        java.util.concurrent.CompletableFuture<Void> relighting;
         Built(MoverTable.Mover mover, BundleManifest bundle, AtlasIndex atlas, Map<PageClass, PackedVertices> meshes, boolean shaders,
               boolean complete, double[] bounds, List<dev.theredja.src2mc.world.PropStates.State> propStates) {
             this.mover = mover; this.bundle = bundle; this.atlas = atlas; this.meshes = meshes; this.shaders = shaders;
@@ -89,7 +91,7 @@ public final class MoverRenderer {
     private static final Map<UUID, Built> BUILT = new HashMap<>();
     private static long frame, generationSequence = -1;
     private static boolean enabled = true, perVertexLight = true, turnShading = true;
-    private static long drawnLast, relights;
+    private static long drawnLast, relights, workerRelights, workerNanos, uploadNanosLast, uploadNanosMax;
     /** A moving mover is lit again at most this often, in frames, once it moved or turned this far. */
     private static final int RELIGHT_FRAMES = 6, LIGHT_CHECK_FRAMES = 20;
     private static final double RELIGHT_DISTANCE = 0.25, RELIGHT_ANGLE = Math.toRadians(5);
@@ -101,7 +103,9 @@ public final class MoverRenderer {
 
     public static String status() {
         return "src2mc movers: " + MoverRegistry.instances(true).size() + " known, " + BUILT.size() + " built, "
-            + drawnLast + " drawn last frame, " + relights + " relit; light " + (perVertexLight ? "per vertex" : "one per mover")
+            + drawnLast + " drawn last frame, " + relights + " relit (" + workerRelights + " on workers, "
+            + String.format(java.util.Locale.ROOT, "%.2f ms each; upload %.2f ms last frame, %.2f ms max", workerRelights == 0 ? 0 : workerNanos / 1e6 / workerRelights,
+                uploadNanosLast / 1e6, uploadNanosMax / 1e6) + "); light " + (perVertexLight ? "per vertex" : "one per mover")
             + ", shading " + (turnShading ? "turned" : "unturned") + (enabled ? "" : " (drawing off)");
     }
 
@@ -171,7 +175,16 @@ public final class MoverRenderer {
                 BUILT.put(instance.subLevel(), fresh);
                 built = fresh;
             }
-            if (needsLight(level, subLevel, resolved, built)) light(level, subLevel, built);
+            if (built.relighting != null) {
+                if (!built.relighting.isDone()) continue;
+                finishRelight(built);
+            }
+            if (needsLight(level, subLevel, resolved, built)) {
+                // The first light and the one-light mode are quick and needed now; per-vertex
+                // relights of a moving mover sample a copy of the world on a worker.
+                if (built.litFrame == Long.MIN_VALUE || !perVertexLight) light(level, subLevel, built);
+                else relightOnWorker(level, subLevel, built);
+            }
         }
     }
 
@@ -220,6 +233,69 @@ public final class MoverRenderer {
         built.litFrame = frame;
         built.litPerVertex = perVertexLight;
         relights++;
+    }
+
+    /**
+     * Starts a per-vertex relight on a mesh worker against a snapshot of the world around the
+     * mover; the buffers drawn now stay until {@link #finishRelight} replaces them. Lighting every
+     * turning fan on the render thread cost a frame-time spike every few frames (escape_02's 15
+     * rotators, 2026-10-04).
+     */
+    private static void relightOnWorker(ClientLevel level, ClientSubLevel subLevel, Built built) {
+        Pose3dc pose = subLevel.logicalPose();
+        BlockPos plotOrigin = MoverRegistry.plotOrigin(subLevel.getPlot());
+        MoverRegistry.Resolved resolved = MoverRegistry.resolve(level, subLevel.getUniqueId());
+        int middle = resolved == null ? 0 : lightAt(level, subLevel, resolved);
+        Quaterniond orientation = new Quaterniond(pose.orientation());
+        Vector3d position = new Vector3d(pose.position().x(), pose.position().y(), pose.position().z());
+        Vector3d rotationPoint = new Vector3d(pose.rotationPoint().x(), pose.rotationPoint().y(), pose.rotationPoint().z());
+        if (built.bounds == null) return;
+        AABB box = worldBounds(pose, plotOrigin, built.bounds).inflate(2);
+        WorldSnapshot world = WorldSnapshot.capture(level, (int) Math.floor(box.minX), (int) Math.floor(box.minY), (int) Math.floor(box.minZ),
+            (int) Math.floor(box.maxX), (int) Math.floor(box.maxY), (int) Math.floor(box.maxZ));
+        built.light = middle;
+        built.litPosition = position;
+        built.litOrientation = orientation;
+        built.litFrame = frame;
+        built.litPerVertex = true;
+        built.relighting = MeshBuildPool.submit(() -> {
+            long started = System.nanoTime();
+            Map<Long, Integer> cache = new HashMap<>();
+            Vector3d point = new Vector3d(), normal = new Vector3d();
+            for (PackedVertices vertices : built.meshes.values()) {
+                for (int i = 0; i < vertices.vertices(); i++) {
+                    // Drawn at R (plot - C) + position, as the draw places it.
+                    orientation.transform(point.set(plotOrigin.getX() + vertices.x(i) - rotationPoint.x,
+                        plotOrigin.getY() + vertices.y(i) - rotationPoint.y, plotOrigin.getZ() + vertices.z(i) - rotationPoint.z)).add(position);
+                    orientation.transform(normal.set(vertices.nx(i), vertices.ny(i), vertices.nz(i)));
+                    vertices.setLight(i, LightSampler.smooth(world, point.x, point.y, point.z, (float) normal.x, (float) normal.y, (float) normal.z, cache));
+                }
+                vertices.index();
+            }
+            synchronized (MoverRenderer.class) { workerNanos += System.nanoTime() - started; workerRelights++; }
+            return null;
+        });
+    }
+
+    /** Uploads a finished worker relight in place of the buffers drawn so far. */
+    private static void finishRelight(Built built) {
+        long started = System.nanoTime();
+        var job = built.relighting;
+        built.relighting = null;
+        try {
+            job.join();
+        } catch (RuntimeException exception) {
+            built.litFrame = Long.MIN_VALUE;
+            return;
+        }
+        built.close();
+        for (var entry : built.meshes.entrySet()) {
+            built.buffers.put(entry.getKey(), entry.getValue().upload(MapSurfaceRenderer.neutralEntityId(), MapSurfaceRenderer.indexedMeshes()).buffer());
+        }
+        relights++;
+        long took = System.nanoTime() - started;
+        uploadNanosLast = took;
+        uploadNanosMax = Math.max(uploadNanosMax, took);
     }
 
     /** The world's light at the middle of the mover, where its sub-level has it now. */

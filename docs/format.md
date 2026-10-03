@@ -564,6 +564,9 @@ these fields in order:
 | `volumes` | brush-entity shapes, referenced by entities |
 | `scenes` | parsed choreography scenes, referenced by entities |
 | `captions` | closed-caption texts |
+| `strings` | optional; localized texts of the `#` tokens the map's HUD texts name |
+| `engine_entities` | optional; entities the game's own code creates in the map |
+| `engine_events` | optional; inputs the game's own code queues as the map spawns |
 
 | Record | Fields, in order |
 | --- | --- |
@@ -575,6 +578,8 @@ these fields in order:
 | speak event | `type` `speak`; `actor`, lowercase; `start`, `end` in seconds; `script`, the lowercase soundscript name; optional `caption`, the caption token, lowercase |
 | firetrigger event | `type` `firetrigger`; `start` in seconds; `trigger`, 1 to 16, the `OnTrigger<n>` output it fires |
 | caption | unique lowercase `token`; `text`, as the caption file writes it, tags included |
+| string | as a caption: unique lowercase `token` without its `#`, `text` |
+| engine event | `target`, `input`, `parameter`; `delay` in seconds, finite and not negative |
 
 Keys are matched as Source matches them, ignoring ASCII case, and when a
 key repeats, the last occurrence is the entity's value, as Source applies the
@@ -614,6 +619,30 @@ and then `resource/subtitles_english.txt` (INFRA keeps its dialogue in the
 latter), the first file to define a token winning. Escapes in the files'
 strings (`\"`, `\\`, `\n`, `\t`) are resolved; keys starting with `[`
 (`[english]` originals) are not captions.
+
+`strings` holds the texts of the tokens a `game_text`'s `message`, a `SetText`
+output parameter or an engine event's `SetText` parameter names with a leading
+`#`, as `g_pVGuiLocalize->Find` gives the HUD: read from every loose
+`resource/*_english.txt` of the search path, in path order, the first file to
+define a token winning. A `#` token they lack, and any other text, is shown
+as written. It is absent when no token resolves.
+
+`engine_entities` are entity records like `entities`, for entities that are
+in no lump but that the game's code creates in every map; the runtime gives
+them the indices after the lump's, in order. `engine_events` are queued in
+order when the map spawns (not when a save is restored), as `EntFire` would:
+each with no activator or caller. Both are absent when empty. Today only
+INFRA has them: its `server.dll` creates the `game_text`s
+`@chapter_title_text` and `@chapter_subtitle_text` (message `chapter_title`
+and `chapter_subtitle`, colours `255 255 255` and `205 205 205`; the other
+keyvalues, scan-out effect 2, `fadein` .06, `fxtime` .5, `holdtime` 5,
+`fadeout` .5, channels 2 and 3 and heights .55 and .6, are Portal 2's
+identical entities of the same names) and runs
+`scripts/vscripts/chapter_titles.nut`. A map with a row in its
+`CHAPTER_TITLES` gets both entities and the script's `DisplayChapterTitle`
+calls: `SetTextColor` `210 210 210 128`, `SetTextColor2` `50 90 116 255`,
+`SetPosY` .32 and .35, `SetText` the row's tokens, and, when the row displays
+on spawn, `Display` at its delay and `Kill` 5.6 seconds later.
 
 ## 17. Mover table
 

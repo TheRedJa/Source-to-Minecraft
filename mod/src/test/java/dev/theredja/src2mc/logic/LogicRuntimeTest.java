@@ -423,6 +423,103 @@ final class LogicRuntimeTest {
         }
     }
 
+    /**
+     * INFRA's chapter title: the game's two game_texts and the script's EntFire calls come with the
+     * table; on spawn they set the texts, show them at the row's delay, localized, and kill them.
+     */
+    @Test void theGamesOwnTextsShowAChapterTitle() {
+        List<LogicTable.Entity> lump = List.of(entity("worldspawn"));
+        List<LogicTable.Entity> engine = List.of(
+            entity("game_text", "targetname", "@chapter_title_text", "message", "chapter_title", "spawnflags", "1", "x", "-1",
+                "y", ".55", "effect", "2", "color", "255 255 255", "color2", "205 205 205", "fadein", ".06", "fadeout", "0.5",
+                "holdtime", "5", "fxtime", ".5", "channel", "2"));
+        List<LogicTable.EngineEvent> events = List.of(
+            new LogicTable.EngineEvent("@chapter_title_text", "SetTextColor", "210 210 210 128", 0),
+            new LogicTable.EngineEvent("@chapter_title_text", "SetPosY", "0.32", 0),
+            new LogicTable.EngineEvent("@chapter_title_text", "SetText", "#infra_chapter_3_title", 0),
+            new LogicTable.EngineEvent("@chapter_title_text", "display", "", 2.5),
+            new LogicTable.EngineEvent("@chapter_title_text", "kill", "", 8.1));
+        LogicTable table = new LogicTable(new double[]{0, 0, 0}, lump, List.of(), List.of(), Map.of(),
+            Map.of("infra_chapter_3_title", "Chapter 3"), engine, events);
+        BundleMap map = new BundleMap("m", "m.bsp", new int[]{0, 0, 0}, new int[]{15, 15, 15}, new int[]{0, 0, 0},
+            List.of(), List.of(), List.of(), false, new SurfaceTable(List.of(), Map.of()), java.util.Set.of(), null, null, null, null, null, table);
+        MapLogic logic = new MapLogic(PLACEMENT, map);
+        logic.spawn(MapLogic.LoadType.NEW_GAME);
+        seconds(logic, 2.4);
+        assertTrue(ScreenEffects.drain(logic).isEmpty());
+        seconds(logic, 0.2);
+        List<ScreenEffects.Sent> sent = ScreenEffects.drain(logic);
+        assertEquals(1, sent.size());
+        ScreenEffects.TextPayload text = (ScreenEffects.TextPayload) sent.get(0).payload();
+        assertEquals("Chapter 3", text.text());
+        assertEquals(0.32f, text.y());
+        assertEquals(0xD2D2D280, text.color1());
+        assertEquals(0xCDCDCD00, text.color2(), "UTIL_StringToIntArray leaves a missing alpha 0");
+        assertEquals(2, text.channel());
+        seconds(logic, 6);
+        assertTrue(logic.findFirst("@chapter_title_text", null, null, null) == null, "killed after 8.1 s");
+        // A restored save has its queue already: spawning for it queues nothing twice.
+        MapLogic fresh = new MapLogic(PLACEMENT, map);
+        fresh.spawn(MapLogic.LoadType.NEW_GAME);
+        CompoundTag saved = fresh.save();
+        MapLogic restored = new MapLogic(PLACEMENT, map);
+        assertTrue(restored.load(saved));
+        seconds(restored, 3);
+        assertEquals(1, ScreenEffects.drain(restored).size());
+    }
+
+    /** env_fade: Source's flags, its alpha from renderamt, times in 7.9 fixed point; env_shake: capped at 16. */
+    @Test void fadesAndShakesAreSentAsSourceSendsThem() {
+        MapLogic logic = run(entity("env_fade", "targetname", "fade", "spawnflags", "9", "rendercolor", "240 105 40", "renderamt", "200",
+                "duration", "1.3333", "holdtime", "99999", "OnBeginFade", "counter,Add,1,0,-1"),
+            entity("env_shake", "targetname", "shake", "amplitude", "20", "frequency", "2.5", "duration", "3", "radius", "500"),
+            entity("math_counter", "targetname", "counter"));
+        logic.queue(0, "fade", null, "Fade", null, null, null);
+        logic.queue(0, "shake", null, "StartShake", null, null, null);
+        seconds(logic, 0.05);
+        List<ScreenEffects.Sent> sent = ScreenEffects.drain(logic);
+        ScreenEffects.FadePayload fade = (ScreenEffects.FadePayload) sent.get(0).payload();
+        assertEquals(ScreenEffects.FFADE_IN | ScreenEffects.FFADE_STAYOUT | ScreenEffects.FFADE_PURGE, fade.flags());
+        assertEquals(0xF06928C8, fade.color());
+        assertEquals(Math.round(1.3333 * 512) / 512f, fade.duration());
+        assertEquals(65535 / 512f, fade.holdTime(), "a hold past the fixed point's range is its largest value");
+        ScreenEffects.ShakePayload shake = (ScreenEffects.ShakePayload) sent.get(1).payload();
+        assertEquals(16f, shake.amplitude());
+        assertTrue(state(logic, "counter").startsWith("1 "), "OnBeginFade");
+    }
+
+    /** With {@code -Dsrc2mc.testBundle}: how often each logic prop and mover changes once a map runs, for frame-time hunts. */
+    @Test void churn() throws Exception {
+        String path = System.getProperty("src2mc.testBundle");
+        Assumptions.assumeTrue(path != null && System.getProperty("src2mc.churn") != null, "set -Dsrc2mc.churn");
+        BundleManifest manifest = new BundleValidator().validate(Path.of(path));
+        for (BundleMap map : manifest.maps()) {
+            if (map.logic() == null) continue;
+            MapLogic logic = new MapLogic(PLACEMENT, map);
+            logic.spawn(MapLogic.LoadType.NEW_GAME);
+            Map<Integer, Integer> propChanges = new java.util.TreeMap<>(), moverChanges = new java.util.TreeMap<>();
+            Map<Integer, Object> lastProp = new java.util.HashMap<>(), lastMover = new java.util.HashMap<>();
+            int ticks = 600;
+            long started = System.nanoTime();
+            for (int t = 0; t < ticks; t++) {
+                logic.tick(null, List.of());
+                if (map.logicProps() != null) for (var prop : map.logicProps().props()) {
+                    var state = logic.entity(prop.entity()).propState();
+                    if (!state.equals(lastProp.put(prop.entity(), state)) && t > 0) propChanges.merge(prop.entity(), 1, Integer::sum);
+                }
+                if (map.movers() != null) for (var mover : map.movers().movers()) {
+                    LogicEntity entity = logic.entity(mover.entity());
+                    Object key = entity == null ? null : java.util.List.of(entity.moverState(), String.valueOf(entity.worldPose(logic.time(), new double[]{0, 0, 0})));
+                    if (!java.util.Objects.equals(key, lastMover.put(mover.entity(), key)) && t > 0) moverChanges.merge(mover.entity(), 1, Integer::sum);
+                }
+            }
+            System.out.printf(java.util.Locale.ROOT, "%s: %.2f ms per tick%n", map.mapId(), (System.nanoTime() - started) / 1e6 / ticks);
+            propChanges.forEach((e, n) -> System.out.println("  prop " + logic.entity(e).describe() + ": " + n + " changes in " + ticks + " ticks"));
+            moverChanges.forEach((e, n) -> System.out.println("  mover " + logic.entity(e).describe() + ": " + n + " changes"));
+            System.out.println(logic.status());
+        }
+    }
+
     /** With {@code -Dsrc2mc.testBundle}: spawns each map, presses every button it has, and runs it for two minutes. */
     @Test void realMapsRun() throws Exception {
         String path = System.getProperty("src2mc.testBundle");

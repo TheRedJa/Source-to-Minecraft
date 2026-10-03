@@ -38,6 +38,24 @@ pub struct LogicTable {
     pub volumes: Vec<Volume>,
     pub scenes: Vec<Scene>,
     pub captions: Vec<Caption>,
+    /// Localized texts of the `#` tokens the map's texts name; absent when none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub strings: Vec<Caption>,
+    /// Entities the game's own code creates in the map; absent when none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub engine_entities: Vec<Entity>,
+    /// Inputs the game's own code queues as the map spawns; absent when none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub engine_events: Vec<EngineEvent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct EngineEvent {
+    pub target: String,
+    pub input: String,
+    pub parameter: String,
+    /// Seconds after spawn; finite and not negative.
+    pub delay: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -314,6 +332,73 @@ pub fn build(
             [("count", malformed.to_string())],
         ));
     }
+    // What INFRA's game code adds: its chapter title texts and the script
+    // that sets and shows them.
+    let mut engine_entities = Vec::new();
+    let mut engine_events = Vec::new();
+    if let Some(script) = read_file(vfs, Some(&map.bsp.pack), crate::source::infra::SCRIPT)
+        && let Some(title) =
+            crate::source::infra::chapter_title(&String::from_utf8_lossy(&script), &map.name)
+    {
+        for keyvalues in crate::source::infra::chapter_entities() {
+            engine_entities.push(Entity {
+                classname: "game_text".into(),
+                keyvalues,
+                outputs: Vec::new(),
+                origin: None,
+                volume: None,
+                scene: None,
+            });
+        }
+        for event in crate::source::infra::chapter_events(&title) {
+            engine_events.push(EngineEvent {
+                target: event.target.into(),
+                input: event.input.into(),
+                parameter: event.parameter,
+                delay: canonical(event.delay)?,
+            });
+        }
+    }
+    // Texts naming a `#` token show the token's localized text, as
+    // `g_pVGuiLocalize->Find` gives the HUD.
+    let token = |text: &str| text.strip_prefix('#').map(str::to_ascii_lowercase);
+    let mut wanted_strings: BTreeSet<String> = BTreeSet::new();
+    for entity in table_entities.iter().chain(&engine_entities) {
+        if entity.classname == "game_text"
+            && let Some(message) = entity
+                .keyvalues
+                .iter()
+                .rev()
+                .find(|(k, _)| k.eq_ignore_ascii_case("message"))
+        {
+            wanted_strings.extend(token(&message.1));
+        }
+        for output in &entity.outputs {
+            if output.input.eq_ignore_ascii_case("settext") {
+                wanted_strings.extend(token(&output.parameter));
+            }
+        }
+    }
+    for event in &engine_events {
+        if event.input.eq_ignore_ascii_case("settext") {
+            wanted_strings.extend(token(&event.parameter));
+        }
+    }
+    let strings = if wanted_strings.is_empty() {
+        Vec::new()
+    } else {
+        let all = load_strings(vfs, Some(&map.bsp.pack));
+        wanted_strings
+            .into_iter()
+            .filter_map(|token| {
+                all.get(&token).map(|text| Caption {
+                    token,
+                    text: text.clone(),
+                })
+            })
+            .collect()
+    };
+
     let o = transform.to_block_space(Vec3::ZERO);
     let table = LogicTable {
         format: FORMAT,
@@ -326,6 +411,9 @@ pub fn build(
             .into_iter()
             .map(|(token, text)| Caption { token, text })
             .collect(),
+        strings,
+        engine_entities,
+        engine_events,
     };
     diagnostics.push(diagnostic(
         Severity::Info,
@@ -337,6 +425,8 @@ pub fn build(
             ("volumes", table.volumes.len().to_string()),
             ("scenes", table.scenes.len().to_string()),
             ("captions", table.captions.len().to_string()),
+            ("strings", table.strings.len().to_string()),
+            ("engine_entities", table.engine_entities.len().to_string()),
         ],
     ));
     Ok(LogicExport { table, diagnostics })
@@ -407,6 +497,22 @@ fn load_captions(vfs: &Vfs, pak: Option<&vbsp::Packfile>) -> HashMap<String, Str
         }
     }
     captions
+}
+
+/// Every loose `resource/*_english.txt`, as the HUD's localization loads
+/// them; a token the first file in path order defines wins.
+fn load_strings(vfs: &Vfs, pak: Option<&vbsp::Packfile>) -> HashMap<String, String> {
+    let mut strings = HashMap::new();
+    for file in vfs.loose_files("resource/", "_english.txt") {
+        let Some(bytes) = read_file(vfs, pak, &file) else {
+            continue;
+        };
+        let text = crate::source::captions::decode(&bytes);
+        for (token, value) in crate::source::captions::parse(&text) {
+            strings.entry(token).or_insert(value);
+        }
+    }
+    strings
 }
 
 fn canonical(value: f64) -> Result<f64> {
