@@ -183,6 +183,26 @@ impl Vfs {
         self.sources.is_empty()
     }
 
+    /// Every loose file whose lowercase path starts with `prefix` and ends
+    /// with `suffix`, sorted, each once. Archives are not listed: games ship
+    /// their `resource/` files loose.
+    pub fn loose_files(&self, prefix: &str, suffix: &str) -> Vec<String> {
+        let mut found: Vec<String> = self
+            .sources
+            .iter()
+            .filter_map(|source| match source {
+                Source::Dir { files, .. } => Some(files.keys()),
+                Source::Vpk { .. } => None,
+            })
+            .flatten()
+            .filter(|k| k.starts_with(prefix) && k.ends_with(suffix))
+            .cloned()
+            .collect();
+        found.sort();
+        found.dedup();
+        found
+    }
+
     /// Where content will be looked for, in order, for the `textures` report.
     pub fn describe(&self) -> Vec<String> {
         self.sources

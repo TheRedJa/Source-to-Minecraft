@@ -1,36 +1,43 @@
 # src2mc implementation handoff
 
-Updated: 2026-10-03 (Europe/Berlin), DEV-0.27.1 (B2: logic props, prop tint; door button aim fix)
+Updated: 2026-10-04 (Europe/Berlin), DEV-0.29.0 (B3 fixes after the first in-game test)
 
-## NEXT TASK: B3 (B2 and the DEV-0.27.1 aim fix user-confirmed 2026-10-03)
+User test of DEV-0.28.0: `/src2mc logic fire @chapter_title_text Display` failed to parse (Brigadier
+string arg rejects `@`; now `fire <target> <input> [param]` is one greedy text); furnace's
+title does not show on spawn (by INFRA's table: only on a level change; pending recheck via the
+tunnel4 -> furnace chain); shakes "way too slow" (now on the map's clock, Source's
+`sin(curtime * freq)`, was the world's game time; recheck); fades fine but want clearing (a map's
+logic start/stop now clears every text/fade/shake, and `/src2mc_screen clear`); escape_02 frame
+spikes only while logic runs: 15 func_rotating movers relit per vertex on the render thread
+every few frames (logic itself 0.12 ms/tick, no prop churn, measured by the `churn` test); per-
+vertex mover relights now sample a WorldSnapshot on the mesh workers, only the upload stays on
+the render thread (`/src2mc_movers status` shows worker ms and upload ms). User recheck (2026-10-04): escape_02 spikes gone; title forced and on the level change looks good; shakes work (the catwalk one only reaches players on the ground within 500 units, as in Source; `/src2mc logic list <name>` shows a shake's reach).
 
-User test of DEV-0.27.0 (2026-10-03): all B2 points fine, except furnace's fence-door buttons
-`mahma_entry2b`/`mahma_entry2b1` could not be used: the use ray took the locked
-`prop_door_rotating`'s model box, which holds the button. DEV-0.27.1 aims at the door's mesh
-triangles (box only while the mesh loads); test `aButtonOnADoorIsAimedAtBeforeTheDoor`: 0 of 16
-rays reached the buttons before, 9 of 16 now (also the button on `ladle_controlroom_dr`).
+## NEXT TASK: pick the next item with the user (B3 user-confirmed 2026-10-04, DEV-0.29.0)
 
+B2 and the DEV-0.27.1 door-button aim fix are user-confirmed (2026-10-03), committed as 4f249a5.
+B3 is implemented, all 10 bundles regenerated and installed; not user-tested yet (see D23).
+Findings: INFRA maps contain no game_text at all; INFRA's server.dll creates
+`@chapter_title_text`/`@chapter_subtitle_text` and runs `scripts/vscripts/chapter_titles.nut`
+(table per map: tokens, displayOnSpawn, delay). The converter now writes both as
+`engine_entities`/`engine_events` (format 16); text timings are Portal 2's same-named
+entities' (unverified for INFRA, ask the user to compare). Shake moves the camera through an
+access transformer on `Camera.setPosition`, applied in `ViewportEvent.ComputeFov`.
 
-B2 is implemented and all 10 bundles are regenerated and installed; nothing of it is
-user-tested yet. Decisions taken with the user (2026-10-03): removable collision for props
-the logic kills ("A"), and `rendercolor` tint on every prop, static props from the lump too
-("Option A"). See D22 and format section 18.
-
-Checklist for the user (fresh `/src2mc reload`, maps re-placed):
-1. Tint: Portal 2 `sp_a3_end` gel tubes orange/blue; INFRA metro binders black/blue,
-   benches and trash cans tinted. Anything wrongly dark?
-2. Furnace: `secret_exit_key_button1` and the other key buttons make the key vanish, and no
-   invisible collision is left where it lay. `plant_exit_door_cut` swaps the whole chain for
-   the broken one and shows the bolt cutter.
-3. Skins: furnace `defect_buttons_mdl` and other panels switch skin; waterplant pump lamps
-   (`pump_floc_2_light_*`) change colour; tunnel4 light switches swap on/off models.
-4. Start-disabled props (furnace `inserted_fuse*`, `chain_broken`) are hidden at start.
-5. Logic props look lit like their neighbours (`/src2mc_logic_props draw off` to compare);
-   no fps change.
+Checklist (fresh `/src2mc reload`, maps re-placed, logic started):
+1. Furnace chapter title: comes only on a level change into furnace (its `logic_auto`
+   OnMapTransition), so use the tunnel4 -> furnace chain; or force it:
+   `/src2mc logic fire @chapter_title_text Display` and `... @chapter_subtitle_text Display`.
+   Expect "Chapter 4" over "Heavy Industry of the Past", upper middle, scanning out blue-ish
+   to grey. Compare size, place, timing with INFRA.
+2. Shakes: `/src2mc logic fire furn_globalshake StartShake` (furnace); tunnel4
+   `explosion_relay` Trigger. View jitters and rolls, then settles.
+3. Fades: escape_02 `fade_to_red` (trigger in the map) or `/src2mc logic fire fade_to_white Fade`;
+   testchmb_a_00 starts with `fade_intro` (fade from black).
+4. `/src2mc_screen status|clear` if something sticks.
 
 Then, in the agreed order:
 
-7. B3: INFRA chapter titles (`game_text`), `env_fade`, `env_shake`.
 Later (user): skeletal animation (test case: furnace `cellardoor1` #2209, a prop_dynamic
 slid by `SetAnimation open/close`; its `func_door` #2112 is an invisible clip, not exported),
 `env_sprite`, lights, VScript, INFRA gameplay. Each step ends with the user's in-game test.

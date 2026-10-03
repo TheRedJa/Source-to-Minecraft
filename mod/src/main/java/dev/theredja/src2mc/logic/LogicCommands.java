@@ -39,14 +39,18 @@ public final class LogicCommands {
             .then(literal("trace")
                 .then(literal("on").executes(context -> trace(context.getSource(), true)))
                 .then(literal("off").executes(context -> trace(context.getSource(), false))))
+            // "target input [parameter]" as one text: Source names start with @ or ! and hold
+            // characters a Brigadier word does not take.
             .then(literal("fire")
-                .then(argument("target", StringArgumentType.string())
-                    .then(argument("input", StringArgumentType.word())
-                        .executes(context -> fire(context.getSource(), StringArgumentType.getString(context, "target"),
-                            StringArgumentType.getString(context, "input"), null))
-                        .then(argument("parameter", StringArgumentType.greedyString())
-                            .executes(context -> fire(context.getSource(), StringArgumentType.getString(context, "target"),
-                                StringArgumentType.getString(context, "input"), StringArgumentType.getString(context, "parameter")))))))));
+                .then(argument("event", StringArgumentType.greedyString())
+                    .executes(context -> {
+                        String[] parts = StringArgumentType.getString(context, "event").trim().split("\\s+", 3);
+                        if (parts.length < 2) {
+                            context.getSource().sendFailure(Component.literal("src2mc logic: fire <target> <input> [parameter]"));
+                            return 0;
+                        }
+                        return fire(context.getSource(), parts[0], parts[1], parts.length > 2 ? parts[2] : null);
+                    })))));
         event.getDispatcher().register(literal(Src2mc.MOD_ID).then(literal("movers")
             .requires(source -> source.hasPermission(2))
             .then(literal("status").executes(context -> {

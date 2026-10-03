@@ -145,6 +145,10 @@ lamp's `Skin` switches, `Color` retints, `Enable`/`Disable` shows and hides a
 its collision, and everything parented to it. `/src2mc_logic_props
 status|draw on|off` counts them and switches their drawing off for comparison.
 
+The map's `game_text` messages, screen fades and screen shakes appear as in
+Source, and INFRA's chapter titles show where the game shows them.
+`/src2mc_screen status|clear` lists what is on screen and takes it off.
+
 Building the mod and running its development client is described in
 [`mod/README.md`](mod/README.md). The bundle format is specified in
 [`docs/format.md`](docs/format.md), the design in
