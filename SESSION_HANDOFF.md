@@ -1,61 +1,99 @@
 # src2mc implementation handoff
 
-Updated: 2026-10-02 (Europe/Berlin), DEV-0.20.0 (map sound; Minecraft's
-movement sounds replaced inside maps; INFRA landing sounds; prop steps)
+Updated: 2026-10-03 (Europe/Berlin), DEV-0.23.0 (the map's logic: Source
+entity I/O on the server, triggered sounds, scenes with captions, level
+changes between placed maps)
 
-## NEXT TASK (agreed 2026-10-02): run the map's logic in Minecraft
+## NEXT TASK: map logic phase B (not started; user compacts first)
 
-The user approved this as the next big step and asked for it to be written
-down before compacting. Start with a **design pass**, not code: measure, then
-propose phases and get the user's go-ahead.
+Phase A is done and user-confirmed (2026-10-03: "All fixed and working").
+Phase B, as planned in D20: things the logic moves or shows. Start with a
+short design pass like phase A's (survey, then ask): per-entity geometry in
+the renderer and in collision so `func_door`/`func_door_rotating`/
+`func_movelinear`/`func_tracktrain` (now left out of the bundle as
+"separate"), `func_brush` enable/disable, buttons and `infra_button` move;
+`prop_dynamic` doors and parts parented to them (e.g. furnace's sliding door
+#573 on `plant_exit_door`, which today blocks the doorway after the logic
+opens it); `prop_door_rotating` (needs a usable shape); `prop_dynamic`
+Skin/SetAnimation/Enable/Disable, `env_sprite`. Biggest unhandled counts from
+`/src2mc logic status` on the INFRA maps: `prop_dynamic.skin`,
+`env_sprite.show/hidesprite`, lights, `prop_dynamic.setanimation`,
+`func_rotating.setspeed`, `func_tracktrain.*`. Also open: INFRA chapter titles
+(`game_text` Display), `env_shake`/`env_fade`. Later, together: VScript,
+lights, INFRA gameplay (camera, documents, corruption).
 
-Why: almost everything still missing from a map hangs on Source's entity I/O.
-In furnace 113 of 118 `ambient_generic`s start silent and only play when an
-output fires them (32 `PlaySound` and 10 `Volume` inputs); 11
-`logic_choreographed_scene`s carry 35 voice lines (VCD `speak` events naming
-soundscripts, captions in `resource/closecaption_english.txt`/`.dat`);
-buttons, alarms, music and every door, lift and track need it too. The
-converter already dumps every entity with all keyvalues (`src2mc entities
-<map> -o x.json`; `bsp/entities.rs`, outputs are `\x1b`-separated
-`target,input,param,delay,times` strings in keys starting with `On`).
+## DONE: map logic phase A (DEV-0.21.0 to DEV-0.23.0, user-confirmed 2026-10-03)
 
-Design pass, step 1 -- survey the 10 test maps: histogram of classnames that
-take part in I/O (have outputs or are targeted), every (classname, input) pair
-used, every output name used, and which of them chains reach a sound, a
-scene, a door/mover or a level change. Furnace alone: 72 `logic_relay`, 16
-`logic_branch`, 8 `logic_branch_listener`, 7 `logic_timer`, 8 `logic_auto`,
-53 `infra_button`, 8 `func_button`, 42 triggers (`trigger_once`/`multiple`),
-35 `prop_door_rotating`, 6 `func_door_rotating`, 8 `func_tracktrain` with 25
-`path_track`, 7 `func_rotating`, 15 `func_brush`, 9 `env_shake`, 11 scenes,
-8 `func_areaportal`, 5 `filter_activator_name`. INFRA-specific: `infra_button`,
-`infra_camera_target`, `infra_document`, `infra_corruption_target`,
-`infra_crow`, `item_d_batteries`.
+Design and user decisions are D20 in docs/decisions.md; the data is format
+section 16 (`logic.json`) and the sound table's version 2 (section 15).
 
-Proposed phases (to confirm after the survey):
-- **A, the I/O core** (server side): an event queue with Source's semantics
-  (output delays, `times` limits, `!activator`/`!self`/`!caller` and wildcard
-  targets, `FireUser1..4`, `Enable`/`Disable`, `Kill`), `logic_auto`,
-  `logic_relay`, `logic_branch(_listener)`, `logic_timer`, `logic_compare`,
-  `math_counter`, filters; triggers as player-touched volumes (brush entity
-  bounds from the BSP model), `func_button` and `infra_button` pressed with
-  the use key; then the sound side: `ambient_generic` inputs (`PlaySound`,
-  `StopSound`, `ToggleSound`, `Volume`, `FadeIn`/`FadeOut`, `Pitch`),
-  `env_soundscape` `Enable`/`Disable`, `logic_choreographed_scene` `Start`
-  playing its speak events in order with captions. The mod's sound player
-  (`client/audio/`) would get a server-to-client "play this" message.
-- **B, movers**: brush entities rendered and colliding apart from the static
-  world (doors, rotating doors, buttons, `func_tracktrain` along `path_track`,
-  `func_rotating`, `func_movelinear`, `func_brush` toggling), and
-  `prop_door_rotating`. This needs moving geometry in the renderer and
-  collision, a large change of its own.
-- **C, INFRA's own entities** (camera targets, documents, corruption,
-  batteries), whose behaviour is in INFRA's closed code and needs the user's
-  description.
-
-Open questions to put to the user after the survey: whether triggers should
-fire for every player or the first (multiplayer), what happens to logic
-state when blocks are broken, and whether level changes (`trigger_changelevel`)
-should do anything.
+- **Converter:** `src/output/logic.rs` (entity table, brush volumes, scenes,
+  captions), `src/source/vcd.rs`, `src/source/captions.rs`; `EntityRecord`
+  keeps ordered keyvalues (the old BTreeMap lost repeated outputs) with a
+  case-insensitive, last-wins `get`. Captions come from
+  `closecaption_english.txt` and then INFRA's `subtitles_english.txt` (its
+  dialogue lives there). Sound table v2: every soundscape entity and
+  `ambient_generic` with `entity`/`flags`/`start_disabled`; scripts also hold
+  scene lines, `infra_music` and button/door sound keys (files as
+  `lowercase/path.wav` scripts at volume 1, pitch 100, level 75).
+- **Mod, server:** `logic/` -- `MapLogic` (clock, queue, lookups, touches,
+  saving), `LogicEntities` (relay, auto, branch, listener, case, compare,
+  counter, timer, filters, instance proxy), `Triggers` (once, multiple,
+  changelevel), `Movers` (buttons, momentary buttons, doors, `infra_button`,
+  prop doors: states and durations only), `SoundEntities` (ambient_generic,
+  env_soundscape, infra_music, scenes), `LogicSystem` (start/stop, freeze,
+  sync, use, level changes), `LogicSavedData`, `LogicCommands`,
+  `LogicNetwork` (protocol "3").
+- **Mod, client:** `client/logic/` (`ClientLogic` state copy, `UseInput`
+  raycast of the use key against usable volumes, `CaptionOverlay`);
+  `client/audio/LogicSounds` (one-shots, voice lines, music), `AmbientPlayer`
+  and `SoundscapePlayer` follow the server state when a map runs.
+- **Commands:** `/src2mc logic start|stop|status [map]`, `list <filter>`,
+  `trace on|off`, `fire <target> <input> [param]`; `/src2mc place_chain <map>
+  <count>`; `/src2mc_audio captions on|off`.
+- **Tested:** 571 Rust tests; mod suite incl. `LogicRuntimeTest` (queue
+  order, reverse connection order, times, relay refire, CancelPending,
+  branch listener, case, counter limits, timers, save/load mid-delay); all 10
+  bundles validate; a headless run of each real map (every usable button
+  pressed, 130 simulated seconds) throws nothing and costs 0.2-1 ms per
+  simulated second. **Not yet seen in game.**
+- **In-game test plan (furnace; chain tunnel4 -> furnace):** place, `/src2mc
+  logic start`, walk the map: triggered ambients and alarms, monologue lines
+  with captions, the announcements, button clicks; `status` for unhandled
+  inputs. Then `place_chain infra_c3_m4_tunnel4 2`, start tunnel4, walk to its
+  level change into furnace.
+- **First in-game test (2026-10-03, DEV-0.21.0):** level changes work both
+  ways; button sounds and voice lines at the master switch work. Music did not
+  play anywhere -- the dev client's Music slider is 0 (`options.txt`), and map
+  music plays in Minecraft's Music category; awaiting a retest with it up. The
+  FactoryEntered monologue (trigger_multiple #530 -> `monologue_enter`) did not
+  play; headless, all 35 furnace scene lines play when their scenes start, so
+  the trigger or the client is suspect -- retest with `/src2mc logic trace on`.
+  DEV-0.21.1 narrows the level-change arrival guard to level changes only.
+- **Third test (2026-10-03, DEV-0.23.0): user-confirmed "All fixed and
+  working"** -- music (with Minecraft's music silenced inside maps), the
+  FactoryEntered monologue, level changes both ways, the trigger overlay.
+- **Second test (2026-10-03):** music works with the slider up; user wants
+  Minecraft's music gone inside maps -- DEV-0.22.0 selects no music while the
+  player is inside a placed map. The FactoryEntered monologue still did not
+  play: its trigger #530 lies right behind `plant_exit_door` (a `func_door`
+  whose visible sliding door is `prop_dynamic` #573 parented to it). That
+  prop is a static, solid prop at the closed position here, so the doorway
+  stays shut after the chain is cut. The user passed it in spectator for 1.6 s
+  (log), and the runtime skipped spectators: #530 never fired. DEV-0.23.0:
+  spectators touch triggers like Source's noclip (level changes excepted, as
+  `TouchChangeLevel`), and `/src2mc_logic_show` draws brush-entity volumes. Doors that open in Source being shut props is the
+  main phase B problem. Also unhandled: INFRA's chapter titles
+  (`@chapter_title_text` game_text Display on OnMapTransition).
+- **Known gaps (next phases):** nothing moves (doors, buttons, trains,
+  `func_rotating`: phase B, needs per-entity geometry in the renderer and
+  collision); `prop_dynamic` skin/animation, `env_sprite`, lights, particles,
+  `env_shake`/`env_fade`, `point_viewcontrol` are counted as unhandled;
+  prop doors cannot be used (they have no volume); VScript is counted, not
+  run; entities carried over a level change (tunnel4's raft) are absent.
+  Portal 1 scenes are only in the compiled `scenes.image` and are missing.
+  Momentary buttons turn while use is held; INFRA's held buttons fire
+  OnStart/StopPressing by guess at the FGD's meaning.
 
 **Prop steps (DEV-0.20.0, user-confirmed 2026-10-02):** standing on a prop plays
 its model's `$surfaceprop`. Validation now keeps each mesh's bounds on its

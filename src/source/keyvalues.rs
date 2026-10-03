@@ -1,5 +1,5 @@
 //! KeyValues trees, the text format of Source's scripts: soundscapes,
-//! soundscripts and surface properties.
+//! soundscripts, surface properties and caption files.
 //!
 //! Keys repeat and order matters (a soundscape lists several `playlooping`
 //! blocks), so a block is a list of pairs, not a map.
@@ -18,11 +18,20 @@ pub type Block = Vec<(String, Value)>;
 /// far as it makes sense: a stray `}` closes nothing, and a key with no value
 /// at the end of the file is dropped.
 pub fn parse(text: &str) -> Block {
-    let tokens = crate::source::vmt::tokenize(text);
+    parse_tokens(&crate::source::vmt::tokenize(text))
+}
+
+/// Parse a file whose quoted strings use escape sequences (`\"`), as
+/// localization and caption files do.
+pub fn parse_escaped(text: &str) -> Block {
+    parse_tokens(&crate::source::vmt::tokenize_with(text, true))
+}
+
+fn parse_tokens(tokens: &[String]) -> Block {
     let mut cursor = 0;
     let mut root = Vec::new();
     while cursor < tokens.len() {
-        root.extend(block(&tokens, &mut cursor));
+        root.extend(block(tokens, &mut cursor));
         // A `}` with no block open.
         cursor += 1;
     }
@@ -105,6 +114,16 @@ mod tests {
             })
             .collect();
         assert_eq!(waves, ["x.wav", "y.wav"]);
+    }
+
+    #[test]
+    fn escaped_quotes_stay_inside_their_string() {
+        let parsed = parse_escaped(r#""Tokens" { "a" "Say \"hi\"\n" "b" "c:\\x" }"#);
+        let Value::Block(inner) = &parsed[0].1 else {
+            panic!("expected a block")
+        };
+        assert_eq!(text(inner, "a"), Some("Say \"hi\"\n"));
+        assert_eq!(text(inner, "b"), Some("c:\\x"));
     }
 
     #[test]

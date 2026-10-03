@@ -168,6 +168,7 @@ fields in order:
 | `occlusion` | optional canonical `maps/<map-id>/occlusion.s2occl` path (section 13) |
 | `collision` | optional canonical `maps/<map-id>/collision.s2coll` path (section 14) |
 | `audio` | optional canonical `maps/<map-id>/audio.json` path (section 15) |
+| `logic` | optional canonical `maps/<map-id>/logic.json` path (section 16) |
 | `diagnostics` | canonical `maps/<map-id>/diagnostics.json` path |
 
 Surface-table material IDs index `materials` directly. This array therefore
@@ -472,19 +473,26 @@ shape index. Nothing may follow the last section.
 
 `maps/<map-id>/audio.json` optionally records the map's sound. Map metadata
 references it through the optional `audio` field, which sits between
-`collision` and `diagnostics`. It holds only what plays without the map's
-entity logic: soundscapes selected by `env_soundscape` entities that do not
-start disabled, `ambient_generic` sounds that neither start silent nor are
-flagged not-looping (Source starts exactly those at spawn), and the
-soundscripts each surface property plays.
+`collision` and `diagnostics`. It holds every `env_soundscape` and
+`ambient_generic` whose sound resolves, the soundscripts each surface property
+plays, and the soundscripts the map's logic plays by name: those of scene
+`speak` events (section 16), `infra_music` entities' `sound`, and the sounds
+buttons and doors name in their keyvalues (`noise1`, `locked_sound`,
+`soundopenoverride` and the like, and a button's `sounds` number as
+`Buttons.snd<n>`). Which of the sound
+entities play from the start is the mod's decision from their flags: Source
+starts an `ambient_generic` at spawn exactly when it neither starts silent
+(spawnflag 16) nor is flagged not-looping (32), and an `env_soundscape` unless
+it starts disabled. Everything else waits for the map's logic.
 
-The payload is canonical JSON with `format` `src2mc-audio`, `version` 1, and
+The payload is canonical JSON with `format` `src2mc-audio`, `version` 2, and
 these arrays in order: `sounds`, `soundscapes`, `emitters`, `ambients`,
 `scripts`, `surfaces`. Indices refer into these arrays. A *range* is an array
 of two finite numbers, Source's interval: a value is drawn uniformly between
 them each time it is used. Positions are map-local blocks; sound levels are
 Source decibels, 0 meaning heard everywhere without falloff; pitch is
-Source's, 100 being unchanged.
+Source's, 100 being unchanged. An `entity` is the entity's index in the BSP
+entity lump, which is also its index in the logic table's `entities`.
 
 | Record | Fields, in order |
 | --- | --- |
@@ -493,9 +501,14 @@ Source's, 100 being unchanged.
 | loop | `sound`; `volume`, `pitch`, `sound_level` ranges; optional `position` index |
 | random | non-empty `sounds`; `time`, `volume`, `pitch`, `sound_level` ranges; optional `position`; `random_position` boolean |
 | child | `soundscape`; `volume` range; `position` offset; optional `position_override`, `ambient_position_override` |
-| emitter | `position`; `radius` in blocks, -1 for unlimited; `soundscape`; `positions`, exactly eight entries, each a position or `null` |
-| ambient | `position`; non-empty `sounds`; `volume`, `pitch`, `sound_level` ranges |
-| script | lowercase `name`; non-empty `sounds`; `volume`, `pitch`, `sound_level` ranges |
+| emitter | `entity`; `position`; `radius` in blocks, -1 for unlimited; `soundscape`; `positions`, exactly eight entries, each a position or `null`; `start_disabled` boolean |
+| ambient | `entity`; `position`; non-empty `sounds`; `volume`, `pitch`, `sound_level` ranges; `flags`, the entity's spawnflags |
+| script | unique lowercase `name`; non-empty `sounds`; `volume`, `pitch`, `sound_level` ranges |
+
+Scripts also hold the sounds entity keyvalues name, keyed by the script's
+name or, for a sound file, by its lowercase path below `sound/` with `/`
+separators and without leading sound characters, at volume 1, pitch 100 and
+sound level 75, as Source plays a bare file.
 | surface | unique lowercase `name`; optional `step_left`, `step_right`, `impact_soft`, `impact_hard`, `break_sound` script indices |
 
 Commands keep Source's meaning (`c_soundscape.cpp`): a loop or random sound
@@ -512,4 +525,76 @@ files with more than two channels are mixed down to mono; other stereo files
 stay stereo, which Source plays unpanned. Whether a sound loops comes from
 the WAV's first `cue ` point, or its first `smpl` loop: Source loops a file
 from that frame to its end, and plays a file with neither once.
+
+## 16. Logic table
+
+`maps/<map-id>/logic.json` optionally records the map's entities for the
+mod's logic runtime (Source's entity I/O). Map metadata references it through
+the optional `logic` field, which sits between `audio` and `diagnostics`.
+
+It is deliberately complete rather than a subset the current runtime uses:
+every entity of the BSP entity lump with every keyvalue as written, so later
+features (VScript, lights, movers) read the map's own data rather than
+needing a new export.
+
+The payload is canonical JSON with `format` `src2mc-logic`, `version` 1, and
+these fields in order:
+
+| Field | Meaning |
+| --- | --- |
+| `source_origin` | the map-local block position of Source's origin. A map-local point `(x, y, z)` is Source's `((x - ox) * 32, -(z - oz) * 32, (y - oy) * 32)` |
+| `entities` | every entity of the lump, in lump order, worldspawn first |
+| `volumes` | brush-entity shapes, referenced by entities |
+| `scenes` | parsed choreography scenes, referenced by entities |
+| `captions` | closed-caption texts |
+
+| Record | Fields, in order |
+| --- | --- |
+| entity | `classname`, lowercase; `keyvalues`, an array of `[key, value]` string pairs in lump order, keys as written, outputs excluded; `outputs`; optional `origin`, map-local position of the `origin` keyvalue; optional `volume` index; optional `scene` index |
+| output | `output`, the output's name as written (`OnTrigger`); `target`; `input`; `parameter`; `delay` in seconds, finite and not negative; `times`, -1 for unlimited or at least 1 |
+| volume | `bounds`, map-local `[min x, min y, min z, max x, max y, max z]`; non-empty `brushes` |
+| brush | non-empty array of planes `[nx, ny, nz, d]` in map-local blocks with unit outward normals: a point `p` is inside the brush when `n . p <= d` for every plane |
+| scene | `file`, the scene path as the entity names it; `length` in seconds; `events` in start order |
+| speak event | `type` `speak`; `actor`, lowercase; `start`, `end` in seconds; `script`, the lowercase soundscript name; optional `caption`, the caption token, lowercase |
+| firetrigger event | `type` `firetrigger`; `start` in seconds; `trigger`, 1 to 16, the `OnTrigger<n>` output it fires |
+| caption | unique lowercase `token`; `text`, as the caption file writes it, tags included |
+
+Keys are matched as Source matches them, ignoring ASCII case, and when a
+key repeats, the last occurrence is the entity's value, as Source applies the
+pairs in order. An output is a
+keyvalue whose key starts with `On` (any case) and whose value splits into
+five fields on `0x1B`, or for older maps on `,`: target, input, parameter,
+delay, times. Repeated outputs are all kept, in lump order. Delay and times
+are read as Source reads them (`atof`, `atoi`); a negative delay becomes 0,
+and times of 0 or below become -1, since such an output never counts down to
+removal. Any other `On` key with a separator, which does not make five fields
+or has a non-finite delay, stays an ordinary keyvalue and is counted in a
+`LOGIC_OUTPUT_MALFORMED` diagnostic.
+
+A brush entity whose `model` is `*<n>` has a `volume`: all brushes of BSP
+model `n`, moved to the entity's `origin` exactly as the drawn geometry is
+(VBSP stores a brush model relative to it), then mapped to map-local blocks.
+The entity's `angles` are not applied, again as for the drawn geometry; a
+rotating entity's angles are its runtime rotation, left to the runtime. Every brush entity gets
+one, whether it is a trigger, a button, a door or `func_brush`, drawn or not,
+as long as at least one of its brushes encloses a volume. `bounds` is the box
+around the brushes' own vertices.
+
+A `logic_choreographed_scene` (or `scripted_scene`, its older name) whose
+`SceneFile` resolves to a text `.vcd`, in the map's pakfile or the game, has
+a `scene`; entities naming the same file share it. Compiled scenes
+(`scenes.image`) are not read, so a game that ships only those has no scenes,
+and each missing file is a `LOGIC_SCENE_UNAVAILABLE` warning. Only `speak`
+and `firetrigger` events are kept; scene `length` is the latest end or start
+of any event in the file. An event whose time is not finite or beyond a day is
+dropped, starts below 0 become 0, and a speak event's `end` is at least its
+`start`. `script` is the event's parameter; `caption` is the `cctoken` when
+it is not empty and otherwise the script name, absent for an event whose
+`cctype` is `cc_disabled`, and present only when the captions name it.
+`captions` holds the English captions of every script name in the sound
+table and every scene caption, read from `resource/closecaption_english.txt`
+and then `resource/subtitles_english.txt` (INFRA keeps its dialogue in the
+latter), the first file to define a token winning. Escapes in the files'
+strings (`\"`, `\\`, `\n`, `\t`) are resolved; keys starting with `[`
+(`[english]` originals) are not captions.
 

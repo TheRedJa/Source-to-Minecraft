@@ -5,11 +5,13 @@
 //! matching the average colour the compiler baked into the BSP; this module is
 //! what turns that into the real texture.
 
+pub mod captions;
 pub mod extract;
 pub mod keyvalues;
 pub mod mdl;
 pub mod report;
 pub mod sound;
+pub mod vcd;
 pub mod vfs;
 pub mod vmt;
 pub mod vtf;

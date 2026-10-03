@@ -94,6 +94,7 @@ final class BundleSchemaValidator {
         if (map.has("occlusion")) expected.add("occlusion");
         if (map.has("collision")) expected.add("collision");
         if (map.has("audio")) expected.add("audio");
+        if (map.has("logic")) expected.add("logic");
         expected.add("diagnostics");
         keys(map, expected.toArray(String[]::new));
         format(map, "src2mc-map", path);
@@ -163,6 +164,16 @@ final class BundleSchemaValidator {
             referenced.add(audioPath);
             audio = validateAudio(zip, entries, hashes, json(zip, required(entries, audioPath), audioPath), referenced);
         }
+        LogicTable logic = null;
+        if (map.has("logic")) {
+            String logicPath = exactPath(map, "logic", prefix + "logic.json");
+            referenced.add(logicPath);
+            logic = validateLogic(json(zip, required(entries, logicPath), logicPath));
+        }
+        if (audio != null && logic != null) {
+            for (AudioTable.Emitter emitter : audio.emitters()) if (emitter.entity() >= logic.entities().size()) fail(BundleErrorCode.INVALID_REFERENCE, "soundscape entity out of range");
+            for (AudioTable.Ambient ambient : audio.ambients()) if (ambient.entity() >= logic.entities().size()) fail(BundleErrorCode.INVALID_REFERENCE, "ambient sound entity out of range");
+        }
         referenced.addAll(List.of(surfaces, props, diagnostics));
         SurfaceTable surfaceTable = validateFaces(zip, required(entries, surfaces), materials.size());
         List<BundleProp> propRecords = validateProps(zip, required(entries, props), modelRefs.size());
@@ -187,7 +198,7 @@ final class BundleSchemaValidator {
         }
         long mapHeight = (long) max[1] - min[1] + 1;
         return new BundleMap(mapId, sourceName, min, max, anchor, loadedMaterials, modelRefs, propRecords, mapHeight > 384,
-            surfaceTable, modelRefs.stream().map(BundleModel::contentId).collect(java.util.stream.Collectors.toUnmodifiableSet()), atlas, pvs, occlusion, collision, audio);
+            surfaceTable, modelRefs.stream().map(BundleModel::contentId).collect(java.util.stream.Collectors.toUnmodifiableSet()), atlas, pvs, occlusion, collision, audio, logic);
     }
 
     /** Parses and validates the optional per-cell collision table (format.md section 14). */
@@ -314,7 +325,7 @@ final class BundleSchemaValidator {
     private static AudioTable validateAudio(ZipFile zip, Map<String, ZipEntry> entries, Map<String, String> hashes,
                                             JsonObject root, Set<String> referenced) throws IOException {
         keys(root, "format", "version", "sounds", "soundscapes", "emitters", "ambients", "scripts", "surfaces");
-        format(root, "src2mc-audio", "audio.json");
+        format(root, "src2mc-audio", "audio.json", 2);
         JsonArray soundArray = array(root, "sounds");
         limit(soundArray.size(), BundleLimits.MAX_AUDIO_RECORDS, "sound count");
         List<AudioTable.Sound> sounds = new ArrayList<>(soundArray.size());
@@ -385,7 +396,8 @@ final class BundleSchemaValidator {
         List<AudioTable.Emitter> emitters = new ArrayList<>(emitterArray.size());
         for (JsonElement element : emitterArray) {
             JsonObject emitter = object(element, "soundscape entity");
-            keys(emitter, "position", "radius", "soundscape", "positions");
+            keys(emitter, "entity", "position", "radius", "soundscape", "positions", "start_disabled");
+            int entity = uintIndex(emitter.get("entity"), "soundscape entity index");
             double[] position = vector3d(emitter.get("position"), "soundscape entity position");
             double radius = finiteNumber(emitter.get("radius"), "radius");
             if (radius < 0 && radius != -1) fail(BundleErrorCode.INVALID_SCHEMA, "radius must be -1 or not negative");
@@ -396,25 +408,30 @@ final class BundleSchemaValidator {
                 JsonElement value = positionArray.get(i);
                 positions[i] = value.isJsonNull() ? null : vector3d(value, "soundscape position");
             }
-            emitters.add(new AudioTable.Emitter(position[0], position[1], position[2], radius,
-                index(emitter.get("soundscape"), soundscapeCount, "soundscape"), positions));
+            emitters.add(new AudioTable.Emitter(entity, position[0], position[1], position[2], radius,
+                index(emitter.get("soundscape"), soundscapeCount, "soundscape"), positions, bool(emitter, "start_disabled")));
         }
         JsonArray ambientArray = array(root, "ambients");
         limit(ambientArray.size(), BundleLimits.MAX_AUDIO_RECORDS, "ambient sound count");
         List<AudioTable.Ambient> ambients = new ArrayList<>(ambientArray.size());
         for (JsonElement element : ambientArray) {
             JsonObject ambient = object(element, "ambient sound");
-            keys(ambient, "position", "sounds", "volume", "pitch", "sound_level");
+            keys(ambient, "entity", "position", "sounds", "volume", "pitch", "sound_level", "flags");
+            int entity = uintIndex(ambient.get("entity"), "ambient sound entity index");
             double[] position = vector3d(ambient.get("position"), "ambient sound position");
-            ambients.add(new AudioTable.Ambient(position[0], position[1], position[2], indices(ambient, "sounds", sounds.size()),
-                range(ambient, "volume"), range(ambient, "pitch"), range(ambient, "sound_level")));
+            ambients.add(new AudioTable.Ambient(entity, position[0], position[1], position[2], indices(ambient, "sounds", sounds.size()),
+                range(ambient, "volume"), range(ambient, "pitch"), range(ambient, "sound_level"), uintIndex(ambient.get("flags"), "flags")));
         }
         JsonArray scriptArray = array(root, "scripts");
         limit(scriptArray.size(), BundleLimits.MAX_AUDIO_RECORDS, "soundscript count");
         List<AudioTable.Script> scripts = new ArrayList<>(scriptArray.size());
+        Set<String> scriptNames = new java.util.HashSet<>();
         for (JsonElement element : scriptArray) {
             JsonObject script = object(element, "soundscript");
             keys(script, "name", "sounds", "volume", "pitch", "sound_level");
+            String scriptName = string(script, "name");
+            if (!scriptName.equals(scriptName.toLowerCase(java.util.Locale.ROOT)) || !scriptNames.add(scriptName))
+                fail(BundleErrorCode.DUPLICATE_IDENTITY, "soundscript names are unique and lowercase");
             scripts.add(new AudioTable.Script(string(script, "name"), indices(script, "sounds", sounds.size()),
                 range(script, "volume"), range(script, "pitch"), range(script, "sound_level")));
         }
@@ -435,6 +452,148 @@ final class BundleSchemaValidator {
                 fail(BundleErrorCode.DUPLICATE_IDENTITY, "duplicate surface " + name);
         }
         return new AudioTable(sounds, soundscapes, emitters, ambients, scripts, surfaces);
+    }
+
+    /** Parses and validates the optional logic table (format.md section 16). */
+    private static LogicTable validateLogic(JsonObject root) throws BundleValidationException {
+        keys(root, "format", "version", "source_origin", "entities", "volumes", "scenes", "captions");
+        format(root, "src2mc-logic", "logic.json");
+        double[] sourceOrigin = vector3d(root.get("source_origin"), "source_origin");
+        JsonArray volumeArray = array(root, "volumes");
+        limit(volumeArray.size(), BundleLimits.MAX_LOGIC_RECORDS, "volume count");
+        List<LogicTable.Volume> volumes = new ArrayList<>(volumeArray.size());
+        for (JsonElement element : volumeArray) {
+            JsonObject volume = object(element, "volume");
+            keys(volume, "bounds", "brushes");
+            JsonArray boundArray = array(volume, "bounds");
+            if (boundArray.size() != 6) fail(BundleErrorCode.INVALID_SCHEMA, "volume bounds have six values");
+            double[] bounds = new double[6];
+            for (int i = 0; i < 6; i++) bounds[i] = finiteNumber(boundArray.get(i), "volume bounds");
+            for (int axis = 0; axis < 3; axis++) if (bounds[axis] > bounds[axis + 3]) fail(BundleErrorCode.INVALID_SCHEMA, "inverted volume bounds");
+            JsonArray brushArray = array(volume, "brushes");
+            if (brushArray.isEmpty()) fail(BundleErrorCode.INVALID_SCHEMA, "a volume has brushes");
+            limit(brushArray.size(), BundleLimits.MAX_LOGIC_RECORDS, "brush count");
+            List<double[][]> brushes = new ArrayList<>(brushArray.size());
+            for (JsonElement brushElement : brushArray) {
+                if (!brushElement.isJsonArray() || brushElement.getAsJsonArray().isEmpty()) fail(BundleErrorCode.INVALID_SCHEMA, "a brush is a non-empty array of planes");
+                JsonArray planeArray = brushElement.getAsJsonArray();
+                limit(planeArray.size(), 4096, "brush plane count");
+                double[][] planes = new double[planeArray.size()][];
+                for (int i = 0; i < planes.length; i++) {
+                    JsonElement planeElement = planeArray.get(i);
+                    if (!planeElement.isJsonArray() || planeElement.getAsJsonArray().size() != 4) fail(BundleErrorCode.INVALID_SCHEMA, "a plane has four values");
+                    double[] plane = new double[4];
+                    for (int j = 0; j < 4; j++) plane[j] = finiteNumber(planeElement.getAsJsonArray().get(j), "plane");
+                    double length = Math.sqrt(plane[0] * plane[0] + plane[1] * plane[1] + plane[2] * plane[2]);
+                    if (Math.abs(length - 1) > 1e-3) fail(BundleErrorCode.INVALID_SCHEMA, "plane normals are unit length");
+                    planes[i] = plane;
+                }
+                brushes.add(planes);
+            }
+            volumes.add(new LogicTable.Volume(bounds, brushes));
+        }
+        JsonArray sceneArray = array(root, "scenes");
+        limit(sceneArray.size(), BundleLimits.MAX_LOGIC_RECORDS, "scene count");
+        List<LogicTable.Scene> scenes = new ArrayList<>(sceneArray.size());
+        for (JsonElement element : sceneArray) {
+            JsonObject scene = object(element, "scene");
+            keys(scene, "file", "length", "events");
+            double length = finiteNumber(scene.get("length"), "scene length");
+            if (length < 0) fail(BundleErrorCode.INVALID_SCHEMA, "negative scene length");
+            JsonArray eventArray = array(scene, "events");
+            limit(eventArray.size(), BundleLimits.MAX_LOGIC_RECORDS, "scene event count");
+            List<LogicTable.SceneEvent> events = new ArrayList<>(eventArray.size());
+            for (JsonElement eventElement : eventArray) {
+                JsonObject event = object(eventElement, "scene event");
+                String type = string(event, "type");
+                if (type.equals("speak")) {
+                    if (event.has("caption")) keys(event, "type", "actor", "start", "end", "script", "caption");
+                    else keys(event, "type", "actor", "start", "end", "script");
+                    double start = finiteNumber(event.get("start"), "event start");
+                    double end = finiteNumber(event.get("end"), "event end");
+                    events.add(new LogicTable.SceneEvent(string(event, "actor"), start, end, string(event, "script"),
+                        event.has("caption") ? string(event, "caption") : null, 0));
+                } else if (type.equals("firetrigger")) {
+                    keys(event, "type", "start", "trigger");
+                    int trigger = uintIndex(event.get("trigger"), "trigger");
+                    if (trigger < 1 || trigger > 16) fail(BundleErrorCode.INVALID_SCHEMA, "scene trigger out of range");
+                    events.add(new LogicTable.SceneEvent(null, finiteNumber(event.get("start"), "event start"), -1, null, null, trigger));
+                } else {
+                    fail(BundleErrorCode.INVALID_SCHEMA, "unknown scene event type");
+                }
+            }
+            scenes.add(new LogicTable.Scene(string(scene, "file"), length, events));
+        }
+        JsonArray entityArray = array(root, "entities");
+        limit(entityArray.size(), BundleLimits.MAX_LOGIC_RECORDS, "entity count");
+        List<LogicTable.Entity> entities = new ArrayList<>(entityArray.size());
+        for (JsonElement element : entityArray) {
+            JsonObject entity = object(element, "entity");
+            List<String> entityKeys = new ArrayList<>(List.of("classname", "keyvalues", "outputs"));
+            if (entity.has("origin")) entityKeys.add("origin");
+            if (entity.has("volume")) entityKeys.add("volume");
+            if (entity.has("scene")) entityKeys.add("scene");
+            keys(entity, entityKeys.toArray(String[]::new));
+            JsonArray pairArray = array(entity, "keyvalues");
+            limit(pairArray.size(), BundleLimits.MAX_LOGIC_RECORDS, "keyvalue count");
+            List<String[]> pairs = new ArrayList<>(pairArray.size());
+            for (JsonElement pairElement : pairArray) {
+                if (!pairElement.isJsonArray() || pairElement.getAsJsonArray().size() != 2) fail(BundleErrorCode.INVALID_SCHEMA, "a keyvalue is a pair");
+                JsonArray pair = pairElement.getAsJsonArray();
+                pairs.add(new String[]{text(pair.get(0), "key"), text(pair.get(1), "value")});
+            }
+            JsonArray outputArray = array(entity, "outputs");
+            limit(outputArray.size(), BundleLimits.MAX_LOGIC_RECORDS, "output count");
+            List<LogicTable.Output> outputs = new ArrayList<>(outputArray.size());
+            for (JsonElement outputElement : outputArray) {
+                JsonObject output = object(outputElement, "output");
+                keys(output, "output", "target", "input", "parameter", "delay", "times");
+                double delay = finiteNumber(output.get("delay"), "output delay");
+                if (delay < 0) fail(BundleErrorCode.INVALID_SCHEMA, "negative output delay");
+                int times = integer(output.get("times"), "output times");
+                if (times != -1 && times < 1) fail(BundleErrorCode.INVALID_SCHEMA, "output times is -1 or positive");
+                outputs.add(new LogicTable.Output(string(output, "output"), string(output, "target"), string(output, "input"),
+                    string(output, "parameter"), delay, times));
+            }
+            String classname = string(entity, "classname");
+            if (!classname.equals(classname.toLowerCase(java.util.Locale.ROOT))) fail(BundleErrorCode.INVALID_SCHEMA, "classnames are lowercase");
+            entities.add(new LogicTable.Entity(classname, pairs, outputs,
+                entity.has("origin") ? vector3d(entity.get("origin"), "entity origin") : null,
+                entity.has("volume") ? index(entity.get("volume"), volumes.size(), "entity volume") : -1,
+                entity.has("scene") ? index(entity.get("scene"), scenes.size(), "entity scene") : -1));
+        }
+        JsonArray captionArray = array(root, "captions");
+        limit(captionArray.size(), BundleLimits.MAX_LOGIC_RECORDS, "caption count");
+        Map<String, String> captions = new HashMap<>();
+        for (JsonElement element : captionArray) {
+            JsonObject caption = object(element, "caption");
+            keys(caption, "token", "text");
+            String token = string(caption, "token");
+            if (!token.equals(token.toLowerCase(java.util.Locale.ROOT)) || captions.put(token, string(caption, "text")) != null)
+                fail(BundleErrorCode.DUPLICATE_IDENTITY, "caption tokens are unique and lowercase");
+        }
+        return new LogicTable(sourceOrigin, entities, volumes, scenes, captions);
+    }
+
+    private static boolean bool(JsonObject o, String key) throws BundleValidationException {
+        JsonElement value = o.get(key);
+        if (value == null || !value.isJsonPrimitive() || !value.getAsJsonPrimitive().isBoolean()) fail(BundleErrorCode.INVALID_SCHEMA, key + " must be a boolean");
+        return value.getAsBoolean();
+    }
+
+    private static String text(JsonElement value, String label) throws BundleValidationException {
+        if (value == null || !value.isJsonPrimitive() || !value.getAsJsonPrimitive().isString()) fail(BundleErrorCode.INVALID_SCHEMA, label + " must be a string");
+        return value.getAsString();
+    }
+
+    private static int integer(JsonElement value, String label) throws BundleValidationException {
+        try {
+            if (value == null || !value.isJsonPrimitive() || !value.getAsJsonPrimitive().isNumber()) throw new NumberFormatException();
+            return Integer.parseInt(value.getAsString());
+        } catch (NumberFormatException exception) {
+            fail(BundleErrorCode.INVALID_SCHEMA, label + " must be an integer");
+            return 0;
+        }
     }
 
     private static AudioTable.Range range(JsonObject o, String key) throws BundleValidationException {
@@ -685,7 +844,8 @@ final class BundleSchemaValidator {
     }
 
     private static ZipEntry required(Map<String,ZipEntry> entries,String path)throws BundleValidationException{ZipEntry e=entries.get(path);if(e==null)fail(BundleErrorCode.MISSING_ENTRY,"missing "+path);return e;}
-    private static void format(JsonObject o,String expected,String label)throws BundleValidationException{if(!expected.equals(string(o,"format")))fail(BundleErrorCode.INVALID_SCHEMA,"invalid format: "+label);if(uintIndex(o.get("version"),"version")!=1)fail(BundleErrorCode.UNSUPPORTED_VERSION,"unsupported version: "+label);}
+    private static void format(JsonObject o,String expected,String label)throws BundleValidationException{format(o,expected,label,1);}
+    private static void format(JsonObject o,String expected,String label,int version)throws BundleValidationException{if(!expected.equals(string(o,"format")))fail(BundleErrorCode.INVALID_SCHEMA,"invalid format: "+label);if(uintIndex(o.get("version"),"version")!=version)fail(BundleErrorCode.UNSUPPORTED_VERSION,"unsupported version: "+label);}
     private static void keys(JsonObject o,String... expected)throws BundleValidationException{if(!o.keySet().equals(Set.of(expected))||!new ArrayList<>(o.keySet()).equals(List.of(expected)))fail(BundleErrorCode.INVALID_SCHEMA,"unexpected or non-canonical JSON fields");}
     private static JsonObject object(JsonElement e,String label)throws BundleValidationException{if(e==null||!e.isJsonObject())fail(BundleErrorCode.INVALID_SCHEMA,label+" must be an object");return e.getAsJsonObject();}
     private static JsonArray array(JsonObject o,String key)throws BundleValidationException{JsonElement e=o.get(key);if(e==null||!e.isJsonArray())fail(BundleErrorCode.INVALID_SCHEMA,key+" must be an array");return e.getAsJsonArray();}

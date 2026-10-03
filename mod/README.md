@@ -11,7 +11,7 @@ What it does and how to use it is in the [root README](../README.md#the-companio
 The mod registers fixed generic world content plus `/src2mc status`, `validate`,
 `reload`, `reconcile` and `place`; client diagnostics include
 `/src2mc_render_status`, `/src2mc_prop_status`,
-`/src2mc_prop_overlay_toggle` and `/src2mc_audio`. Bundles load by themselves in the background
+`/src2mc_prop_overlay_toggle` and `/src2mc_audio`; the map's logic is started with `/src2mc logic start` (see the main README). Bundles load by themselves in the background
 during game startup, so `/src2mc reload` is only needed for a bundle that
 changed on disk — see [`docs/bundle-loading.md`](docs/bundle-loading.md). What
 a shaderpack does to the buffers the mod uploads is in

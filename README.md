@@ -57,7 +57,17 @@ There are two ways to get a map into Minecraft:
   quality 7 and played through Minecraft's sound engine, so the volume sliders
   apply and [Sound Physics Remastered](https://modrinth.com/mod/sound-physics-remastered),
   if installed, adds its reverb and occlusion. Sounds the map's logic triggers
-  (button presses, voice lines, music) need that logic and are not exported.
+  (button presses, voice lines, music) are exported too, along with the
+  entities that start them; they play only once that logic runs.
+- **The map's logic**: Source's entity I/O runs on the server by the SDK's
+  rules. Triggers fire as players walk through them, buttons and doors
+  answer the use key, relays, branches, counters, timers and cases pass the
+  chain along, and `ambient_generic`s, soundscapes, INFRA's music and
+  choreographed scenes play what it tells them, voice lines with Source-style
+  captions; inside a map, Minecraft's own music stays silent and the Music
+  slider sets the map's music. A level change moves you to the next map if it is placed,
+  lined up on the shared landmark. Doors and lifts do not move yet; their
+  outputs fire on time. VScript is not run.
 
 ### Usage
 
@@ -101,6 +111,21 @@ comparisons. `/src2mc_audio` reports which soundscape plays and what else is
 sounding, and `/src2mc_audio soundscapes|ambient|surfaces on|off` switches each
 part of the sound; `/src2mc_audio steps <gain>` sets how loud footsteps play
 relative to Source's own levels (default 2).
+
+The map's logic does not run until it is started: `/src2mc logic start [map]`
+(from a player or a command block, acting on the placement holding or nearest
+the command's position) starts it as a new game, and `/src2mc logic stop [map]`
+discards it. It advances only while a player is inside the map and the tick
+rate is not frozen (`/tick freeze` pauses it). `/src2mc logic status` shows the
+clock, the queue and every input no entity handled yet; `/src2mc logic list
+<filter>` shows entities and their state; `/src2mc logic trace on` prints every
+output as it fires; `/src2mc logic fire <target> <input> [parameter]` is
+Source's `ent_fire`. `/src2mc_logic_show triggers|usable|all|off [filter]` draws
+the map's brush entities as wireframes of their exact shapes (triggers orange,
+level changes red, usable buttons and doors green, the rest grey), labelled
+with class, name and entity index up close. `/src2mc place_chain <map> <count>` places a map and the
+maps its level changes lead to, side by side, and `/src2mc_audio captions
+on|off` switches the captions.
 
 Building the mod and running its development client is described in
 [`mod/README.md`](mod/README.md). The bundle format is specified in
@@ -214,7 +239,7 @@ Output of `convert`:
 | `<map>_x<i>_y<j>_z<k>.schem` | Sponge v3 tiles, aligned to a global lattice |
 | `manifest.json` | Tile positions, sizes, block counts per block type |
 | `paste.txt` | WorldEdit macro pasting every tile at its position |
-| `entities.json` | Every Source entity, verbatim, with Minecraft coordinates |
+| `entities.json` | Every Source entity with all its keyvalues in lump order (repeated outputs included) and Minecraft coordinates |
 | `entities/<class>_<name>_<n>.schem` | Moving brush entities, one file each |
 | `dimension/` | A datapack dimension sized to the map (`--emit-dimension`) |
 | `kubejs/` | Generated textured blocks and their script (`--textures kubejs`) |

@@ -63,6 +63,14 @@ pub struct Vfs {
     sources: Vec<Source>,
 }
 
+/// Read a content file from the map's pakfile first, then the game, as
+/// Source's `GAME` search path does.
+pub fn read_file(vfs: &Vfs, pak: Option<&vbsp::Packfile>, path: &str) -> Option<Vec<u8>> {
+    let key = key(path);
+    pak.and_then(|pak| pak.get(&key).ok().flatten())
+        .or_else(|| vfs.open(&key))
+}
+
 /// Source paths are written in whatever case the mapper typed, VPK trees are
 /// lowercase, and Linux filesystems are case-sensitive. Everything is compared
 /// lowercased with forward slashes.
@@ -94,12 +102,13 @@ impl Vfs {
         vfs
     }
 
-    /// Index a game directory's loose `materials/`, `sound/` and `scripts/`
-    /// trees. Games ship their soundscapes and soundscripts loose even when
+    /// Index a game directory's loose `materials/`, `sound/`, `scripts/`,
+    /// `scenes/` and `resource/` trees. Games ship their soundscapes,
+    /// soundscripts, choreography scenes and caption files loose even when
     /// everything else is packed.
     pub fn add_dir(&mut self, root: &Path) {
         let mut files = HashMap::new();
-        for tree in ["materials", "sound", "scripts"] {
+        for tree in ["materials", "sound", "scripts", "scenes", "resource"] {
             let dir = root.join(tree);
             if dir.is_dir() {
                 index_dir(&dir, root, &mut files);

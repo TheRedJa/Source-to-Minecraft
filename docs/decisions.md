@@ -424,10 +424,75 @@ acoustics from the actual blocks.
   `Player.FallLight` and `Player.FallMedium`, whose triggers live in its
   closed player code; by the user's choice (2026-10-02) light plays on a rough
   landing and medium on a hurting one. Step gain 2 confirmed by the user.
-- **Scope.** Only sound that plays without the map's logic is exported:
-  soundscapes that do not start disabled, and `ambient_generic`s that start
-  playing at spawn. Everything the I/O system triggers waits on that logic.
+- **Scope.** Every soundscape entity and `ambient_generic` is exported with
+  its entity index and flags. Without the map's logic running, only what
+  Source starts at spawn plays; with it, the logic decides (D20).
   Standing on a prop plays its model's `$surfaceprop` when the prop's box
   (the mesh bounds, turned and scaled as placed) tops the map floor there by
   more than a sixteenth; flatter props sound like the floor, since the bundle
   does not say which props are solid.
+
+## D20 — The map's logic runs on the server, by Source's rules
+
+Almost everything a map does after it loads hangs on Source's entity I/O:
+triggered sounds, voice lines, buttons, doors, alarms, music. The survey of the
+ten test maps (2026-10-02) counted 9,359 output connections; on the INFRA maps
+the logic layer alone (triggers, buttons, relays, timers) reaches 85-98% of
+the `ambient_generic`, scene and music inputs, so it was built first, before
+anything that moves.
+
+- **Data.** The converter exports every entity of the lump with every
+  keyvalue and every output as written (format section 16), not a subset, so
+  later work (VScript, lights, movers) reads the map's own data. Brush
+  entities carry their brushes as plane sets; scenes are parsed from INFRA's
+  loose `.vcd` text, captions from `closecaption_english.txt` and
+  `subtitles_english.txt`.
+- **Where it runs.** On the server, one `MapLogic` per placement, so
+  multiplayer and saving work like any server state. The rules follow the
+  Source SDK 2013 code line by line where a chain can tell the difference:
+  the event queue fires in time order and in insertion order at equal times;
+  an output fires its connections in the reverse of the order the map lists
+  them (`AddEventAction` prepends); a connection's own parameter skips the
+  output's extra delay; a target name is looked up when the event fires, then
+  as a classname when no name matches; `!self`, `!caller`, `!activator`,
+  `!player` and trailing `*` resolve as in `FindEntityProcedural`. The logic
+  entities, triggers, buttons and doors keep their SDK state machines; a
+  button or door move is its duration (`speed`, `distance`, `lip`, the brush's
+  size), so outputs waiting for "fully open" wait as long as in Source while
+  nothing moves yet.
+- **When it runs** (user, 2026-10-02). A map starts only by command
+  (`/src2mc logic start`, usable from a command block) or by a level change
+  into it. Its clock advances only while a player is inside it and the
+  world's tick rate is not frozen: Source does not run a level nobody is in.
+  At about a millisecond per simulated second on the largest test maps, it
+  runs on the server thread; no worker thread is needed.
+- **Multiplayer** (user, 2026-10-02: "closest to Source"). `trigger_once`
+  fires for the first player; `!player` is the player who set the chain off,
+  else the first player inside; scenes, captions and sounds go to every
+  player in the dimension. Logic ignores broken blocks; a button whose blocks
+  are gone simply cannot be aimed at. A spectator is Minecraft's noclip, and
+  touches triggers as Source's noclipping player does; only a level change
+  ignores it, as `TouchChangeLevel` does (found 2026-10-03: a monologue was
+  missed by passing its trigger in spectator).
+- **Level changes** (user, 2026-10-02). A `trigger_changelevel` moves the
+  player to the nearest placement of the next map, keeping their position
+  relative to the shared `info_landmark`; that map starts as a transition
+  (`OnMapTransition`), and an empty running one is activated again, as a
+  Source level restore does. Unplaced, it only says so. `/src2mc place_chain`
+  places a map and its successors side by side. A player arriving inside a
+  volume does not touch it until they leave it once, so the reverse
+  changelevel does not bounce them back.
+- **Sound.** The server sends each sound entity's state (on, a serial that
+  changes per start, level, pitch) when it changes and a full copy to a player
+  who arrives; one-shots (button clicks, door noises, scene lines) are sent
+  as events. The clients play them through the D19 sound player. Captions
+  draw in Source's style above the hotbar.
+  Map music plays in Minecraft's Music category, and inside a placed map
+  Minecraft's own music never plays (user, 2026-10-03: "fully get rid of
+  minecrafts music"), through NeoForge's `SelectMusicEvent`.
+- **Out of scope for now, designed for.** VScript (`RunScriptCode` and
+  `logic_script` are counted, not run), lights, moving brushes and props
+  (phase B), and INFRA's camera, documents and corruption (with VScript).
+  Every input an entity does not handle is counted per class and input in
+  `/src2mc logic status`, which shows what the next phase must cover.
+
