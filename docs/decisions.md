@@ -363,7 +363,9 @@ probe` prints the shape of the block looked at and the cells stood in and on.
 
 Props join the same table (first version, 2026-09-27). Source's own `solid`
 setting decides: not solid, solid as the bounding box, or solid as the physics
-model. Props smaller than `props.collision_min_size` stay walk-through. The
+model. `props.collision_min_size` can leave small props walk-through; it is 0
+by default since DEV-0.26.0 (was 48 units; user: small things should be there
+and solid as in Source). The
 model's physics hull (`.phy`) is not read yet, so a physics prop collides as
 the shell of its drawn mesh, a sixteenth thick. A prop's piece in a map
 block's cell joins that block's shape, and one in an empty cell gets a carrier,
@@ -529,8 +531,38 @@ doesn't mean we have to do two systems"; Sable is a required dependency).
   without mass is removed.
 - **Drawing.** The plot's blocks are invisible. src2mc bakes each mover's
   surfaces and carried props into mover-local buffers and draws them with the
-  sub-level's interpolated render pose, lit as one by the world's light at
-  the mover's middle (first version; rebuilt when that light changes).
+  sub-level's interpolated render pose. Each vertex is lit by the world where
+  the mover is now (sampled as static surfaces are), again once it has moved
+  a quarter block or turned 5 degrees, at most every 6 frames. Normals stay
+  mover-local; the draw turns vanilla's two shading lights back by the
+  mover's rotation instead, which shades the same as turning every normal
+  and needs no rebuild while a fan spins (DEV-0.25.0).
+- **Hierarchy.** A child's pose is its own move followed by its parent's,
+  through any chain of `parentname`s, including parents that do not move
+  themselves (a gate parented to a prop that rides a lift). A train's path
+  and a parented train's nodes are in the parent's compiled frame, as Source
+  requires them to be.
+- **State.** The logic gives each mover two bits, hidden and not solid
+  (`func_brush` Enable/Disable and `solidity`, non-solid rotators, killed
+  entities), synced to the clients; hidden movers are not drawn, non-solid
+  ones collide as nothing. A `passable` train stays solid: in Source it is
+  walked on through the physics models of the props riding it, which a
+  mover's props do not have here, so its brushes stand in (user: the carts
+  lost their collision in DEV-0.25.0).
+- **Riding without moving.** Triggers and use volumes parented to a mover
+  are tested where the mover took them: a player's box goes into the
+  trigger's compiled frame through its parents' poses, and the use ray
+  through the nearest mover it is parented to. Small props are exported at
+  any size: the old 12-unit floor dropped a train's buttons and switches, and
+  the user asked for it gone everywhere (DEV-0.26.0).
+- **Trains and rotators.** `func_tracktrain` follows its `path_track`s as
+  `CFuncTrackTrain::Next` does, one logic tick at a time, firing `OnPass` at
+  each node and at the dead end; between ticks its pose is the same walk
+  along the path, so Sable's substeps follow the path exactly.
+  `func_rotating` keeps its speed between its own speed steps. A train turns
+  relative to its spawn angles: Source turns a brush model by its absolute
+  angles, but every train with spawn angles on the test maps was built
+  facing along its track already (awaiting the user's in-game comparison).
 - **Lifetime.** Sub-levels exist for every placed map, whether its logic runs
   or not; Sable saves and loads them with the world, and the dimension's saved
   data keeps which is which. A removed placement or a re-export that changes a

@@ -245,6 +245,69 @@ public class LogicEntity implements Actor {
      */
     MoverPose pose(double t) { return null; }
 
+    /**
+     * The entity's pose with its parents' moves applied, turning about {@code origin}: a door on
+     * a train rides the train, wheels turn on it, a brush follows the prop door it is parented
+     * to. A parent with no pose of its own passes on its own parent's. Null when nothing moves.
+     */
+    final MoverPose worldPose(double t, double[] origin) { return worldPose(t, origin, 0); }
+
+    private MoverPose worldPose(double t, double[] origin, int depth) {
+        MoverPose own = pose(t);
+        LogicEntity parent = depth < MAX_PARENT_DEPTH ? parent() : null;
+        double[] parentOrigin = parent == null ? null : parent.position();
+        MoverPose above = parentOrigin == null ? null : parent.worldPose(t, parentOrigin, depth + 1);
+        if (above == null || origin == null) return own;
+        return MoverPose.compose(above, parentOrigin, own == null ? MoverPose.IDENTITY : own, origin);
+    }
+
+    private static final int MAX_PARENT_DEPTH = 16;
+    private LogicEntity parent;
+    private boolean parentFound;
+
+    /** The entity named by {@code parentname}, without its attachment; looked up once. */
+    final LogicEntity parent() {
+        if (!parentFound) {
+            parentFound = true;
+            String name = key("parentname");
+            if (name != null && !name.isBlank()) {
+                LogicEntity found = map.findFirst(name.split(",", 2)[0].trim(), this, null, null);
+                parent = found == this ? null : found;
+            }
+        }
+        return parent == null || parent.removed ? null : parent;
+    }
+
+    /**
+     * A map-local box moved into the frame the volume was compiled in: a trigger parented to
+     * a train rides it, so a player is tested against where the trigger is now. The box
+     * around the turned box, which is the box itself while nothing moves.
+     */
+    final net.minecraft.world.phys.AABB compiled(net.minecraft.world.phys.AABB box) {
+        double[] origin = position();
+        MoverPose pose = origin == null ? null : worldPose(map.time(), origin);
+        if (pose == null || pose.equals(MoverPose.IDENTITY)) return box;
+        org.joml.Quaterniond back = pose.rotation().invert();
+        double minX = Double.POSITIVE_INFINITY, minY = minX, minZ = minX, maxX = Double.NEGATIVE_INFINITY, maxY = maxX, maxZ = maxX;
+        for (int corner = 0; corner < 8; corner++) {
+            org.joml.Vector3d p = back.transform(new org.joml.Vector3d(
+                ((corner & 1) == 0 ? box.minX : box.maxX) - origin[0] - pose.x(),
+                ((corner & 2) == 0 ? box.minY : box.maxY) - origin[1] - pose.y(),
+                ((corner & 4) == 0 ? box.minZ : box.maxZ) - origin[2] - pose.z()));
+            minX = Math.min(minX, p.x + origin[0]); minY = Math.min(minY, p.y + origin[1]); minZ = Math.min(minZ, p.z + origin[2]);
+            maxX = Math.max(maxX, p.x + origin[0]); maxY = Math.max(maxY, p.y + origin[1]); maxZ = Math.max(maxZ, p.z + origin[2]);
+        }
+        return new net.minecraft.world.phys.AABB(minX, minY, minZ, maxX, maxY, maxZ);
+    }
+
     /** Whether {@link #pose} changes around time {@code t}. */
     boolean moving(double t) { return false; }
+
+    /**
+     * The {@link dev.theredja.src2mc.world.MoverRegistry} state bits of a moving entity's
+     * sub-level: a removed entity is gone, so neither drawn nor solid.
+     */
+    int moverState() {
+        return removed ? dev.theredja.src2mc.world.MoverRegistry.HIDDEN | dev.theredja.src2mc.world.MoverRegistry.NOT_SOLID : 0;
+    }
 }

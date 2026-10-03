@@ -57,9 +57,7 @@ pub fn read_interval(text: &str, names: &[(&str, f64)]) -> Interval {
 fn leading_number(text: &str) -> f64 {
     let end = text
         .char_indices()
-        .take_while(|&(i, c)| {
-            c.is_ascii_digit() || c == '.' || (i == 0 && (c == '-' || c == '+'))
-        })
+        .take_while(|&(i, c)| c.is_ascii_digit() || c == '.' || (i == 0 && (c == '-' || c == '+')))
         .last()
         .map_or(0, |(i, c)| i + c.len_utf8());
     text[..end].parse().unwrap_or(0.0)
@@ -166,7 +164,10 @@ pub struct WaveRef {
 
 impl WaveRef {
     pub fn parse(raw: &str) -> WaveRef {
-        let prefix: String = raw.chars().take_while(|c| SOUND_CHARS.contains(c)).collect();
+        let prefix: String = raw
+            .chars()
+            .take_while(|c| SOUND_CHARS.contains(c))
+            .collect();
         WaveRef {
             path: raw[prefix.len()..]
                 .trim()
@@ -478,7 +479,11 @@ mod tests {
         assert_eq!(metal.step_right.as_deref(), Some("Default.StepRight"));
         assert_eq!(metal.break_sound.as_deref(), Some("Default.Break"));
         assert_eq!(
-            properties.get("no_such_surface").unwrap().step_left.as_deref(),
+            properties
+                .get("no_such_surface")
+                .unwrap()
+                .step_left
+                .as_deref(),
             Some("Default.StepLeft")
         );
     }

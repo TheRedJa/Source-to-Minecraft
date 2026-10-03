@@ -140,6 +140,7 @@ public final class MoverSystem {
     // ---- Keeping the sub-levels in step with the placements.
 
     public static void onServerTick(ServerTickEvent.Post event) {
+        for (ServerLevel level : event.getServer().getAllLevels()) updateStates(level);
         BundleGeneration generation = Src2mc.bundles().active();
         long epoch = PlacementIndex.epoch();
         boolean changed = epoch != ensureEpoch || generation.sequence() != ensureGeneration;
@@ -147,6 +148,34 @@ public final class MoverSystem {
         ensureEpoch = epoch;
         ensureGeneration = generation.sequence();
         for (ServerLevel level : event.getServer().getAllLevels()) ensure(level, generation);
+    }
+
+    /**
+     * Takes each running map's mover states -- shown, solid -- from its entities, and tells the
+     * dimension's players those that changed. A map whose logic stops keeps the last ones.
+     */
+    private static void updateStates(ServerLevel level) {
+        List<MapLogic> running = LogicSystem.runningMaps(level);
+        if (running.isEmpty()) return;
+        Map<Long, MapLogic> byAnchor = new HashMap<>();
+        for (MapLogic logic : running) byAnchor.put(logic.placement.anchorWorld().asLong(), logic);
+        List<UUID> changed = new ArrayList<>();
+        List<Integer> states = new ArrayList<>();
+        for (Entry entry : loaded(level).entries.values()) {
+            MapLogic logic = byAnchor.get(entry.instance.anchor());
+            LogicEntity entity = logic == null ? null : logic.entity(entry.instance.entity());
+            if (entity == null) continue;
+            int state = entity.moverState();
+            Integer stored = MoverRegistry.storedState(false, entry.instance.subLevel());
+            if (stored != null && stored == state) continue;
+            MoverRegistry.setState(false, entry.instance.subLevel(), state);
+            changed.add(entry.instance.subLevel());
+            states.add(state);
+        }
+        if (!changed.isEmpty()) {
+            PacketDistributor.sendToPlayersInDimension(level,
+                new MoverNetwork.StatePayload(changed, states.stream().mapToInt(Integer::intValue).toArray()));
+        }
     }
 
     /** Spawns the sub-levels placed maps lack, and removes those of maps no longer placed or re-exported. */
@@ -317,8 +346,9 @@ public final class MoverSystem {
             return live != null && live.pose != null ? live.pose : MoverPose.IDENTITY;
         }
         LogicEntity entity = logic.entity(instance.entity());
-        if (entity == null) return MoverPose.IDENTITY;
-        MoverPose pose = entity.pose(logic.time() + partialTick * MapLogic.TICK_SECONDS);
+        MoverRegistry.Resolved resolved = MoverRegistry.resolve(level, instance.subLevel());
+        if (entity == null || resolved == null) return MoverPose.IDENTITY;
+        MoverPose pose = entity.worldPose(logic.time() + partialTick * MapLogic.TICK_SECONDS, entityOrigin(resolved.map(), resolved.mover()));
         return pose == null ? MoverPose.IDENTITY : pose;
     }
 
@@ -422,11 +452,27 @@ public final class MoverSystem {
     static Vec3 toCompiled(ServerLevel level, long anchor, int entity, Vec3 world) {
         ServerSubLevelContainer container = SubLevelContainer.getContainer(level);
         if (container == null) return world;
+        // An entity that is no mover itself is aimed at on the nearest mover it is parented to.
+        MapLogic logic = null;
+        for (MapLogic running : LogicSystem.runningMaps(level)) if (running.placement.anchorWorld().asLong() == anchor) logic = running;
+        LogicEntity carried = logic == null ? null : logic.entity(entity);
+        java.util.Set<Integer> chain = new java.util.LinkedHashSet<>();
+        for (int depth = 0; carried != null && depth < 16; depth++, carried = carried.parent()) chain.add(carried.index);
+        if (chain.isEmpty()) chain.add(entity);
+        for (int link : chain) {
+            Vec3 moved = toCompiledOwn(container, level, anchor, link, world);
+            if (moved != null) return moved;
+        }
+        return world;
+    }
+
+    /** {@link #toCompiled} through the entity's own sub-level; null when it has none. */
+    private static Vec3 toCompiledOwn(ServerSubLevelContainer container, ServerLevel level, long anchor, int entity, Vec3 world) {
         for (MoverRegistry.Instance instance : MoverRegistry.instances(false)) {
             if (instance.anchor() != anchor || instance.entity() != entity) continue;
-            if (!(container.getSubLevel(instance.subLevel()) instanceof ServerSubLevel subLevel)) return world;
+            if (!(container.getSubLevel(instance.subLevel()) instanceof ServerSubLevel subLevel)) return null;
             MoverRegistry.Resolved resolved = MoverRegistry.resolve(level, instance.subLevel());
-            if (resolved == null) return world;
+            if (resolved == null) return null;
             Vec3 plot = subLevel.logicalPose().transformPositionInverse(world);
             BlockPos plotOrigin = MoverRegistry.plotOrigin(subLevel.getPlot());
             BlockPos translation = resolved.placement().translation();
@@ -434,11 +480,24 @@ public final class MoverSystem {
                 plot.y - plotOrigin.getY() + resolved.mover().originY() + translation.getY(),
                 plot.z - plotOrigin.getZ() + resolved.mover().originZ() + translation.getZ());
         }
-        return world;
+        return null;
     }
 
     private static void sync(ServerLevel level) {
-        PacketDistributor.sendToPlayersInDimension(level, payload(level));
+        PacketDistributor.sendToPlayersInDimension(level, payload(level), statePayload(level));
+    }
+
+    /** Every state the logic has set in the dimension; the client forgets them all on a sync. */
+    private static MoverNetwork.StatePayload statePayload(ServerLevel level) {
+        List<UUID> subLevels = new ArrayList<>();
+        List<Integer> states = new ArrayList<>();
+        for (Entry entry : loaded(level).entries.values()) {
+            Integer state = MoverRegistry.storedState(false, entry.instance.subLevel());
+            if (state == null) continue;
+            subLevels.add(entry.instance.subLevel());
+            states.add(state);
+        }
+        return new MoverNetwork.StatePayload(subLevels, states.stream().mapToInt(Integer::intValue).toArray());
     }
 
     private static MoverNetwork.SyncPayload payload(ServerLevel level) {
@@ -448,11 +507,11 @@ public final class MoverSystem {
     }
 
     public static void onPlayerLoggedIn(PlayerEvent.PlayerLoggedInEvent event) {
-        if (event.getEntity() instanceof ServerPlayer player) PacketDistributor.sendToPlayer(player, payload(player.serverLevel()));
+        if (event.getEntity() instanceof ServerPlayer player) PacketDistributor.sendToPlayer(player, payload(player.serverLevel()), statePayload(player.serverLevel()));
     }
 
     public static void onPlayerChangedDimension(PlayerEvent.PlayerChangedDimensionEvent event) {
-        if (event.getEntity() instanceof ServerPlayer player) PacketDistributor.sendToPlayer(player, payload(player.serverLevel()));
+        if (event.getEntity() instanceof ServerPlayer player) PacketDistributor.sendToPlayer(player, payload(player.serverLevel()), statePayload(player.serverLevel()));
     }
 
     public static void onServerStopped(net.neoforged.neoforge.event.server.ServerStoppedEvent event) {

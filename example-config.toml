@@ -138,10 +138,9 @@ solidify = 2
 # this a converted map is an accurate but empty shell. Needs the game's content
 # on the search path, since a map stores only the path to each model.
 enabled = true
-# Ignore props whose longest dimension is under this many Source units. At 16
-# units per block anything smaller cannot be more than a stray cube, and maps
-# are full of pebbles, cans and tufts of grass.
-min_size = 12.0
+# Ignore props whose longest dimension is under this many Source units; 0 keeps
+# every size. Props are drawn as their own meshes, so small ones are exact too.
+min_size = 0.0
 # Ignore props over this many units; 0 keeps every size. The lever for backdrop
 # scenery: distant architecture is placed as ordinary props thousands of units
 # across, and one of them can be tens of thousands of blocks of a single dark
@@ -220,10 +219,10 @@ bake_reach = 8.0
 # holding that block, so a mesh reaching far past it appears and disappears with
 # a section it is barely in.
 bake_max_size = 0.0
-# Props at least this many Source units across are solid, so you can stand on a
-# container and walk through a traffic cone. 0 makes everything solid; a huge
-# value nothing.
-collision_min_size = 48.0
+# Props at least this many Source units across are solid, as their Source
+# `solid` setting says. 0 keeps every size solid as Source has it; a huge value
+# makes nothing solid.
+collision_min_size = 0.0
 # What a solid prop is solid as.
 #
 # "shaped" gives each cell an invisible generated block shaped like the part of

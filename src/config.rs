@@ -391,9 +391,10 @@ pub struct Props {
     /// the path to each model. Without it this quietly does nothing, exactly
     /// as texture extraction does.
     pub enabled: bool,
-    /// Ignore props whose longest dimension is under this many Source units.
-    /// At 16 units per block anything smaller cannot be more than a stray
-    /// cube, and maps are full of pebbles, cans and tufts of grass.
+    /// Ignore props whose longest dimension is under this many Source units;
+    /// 0 keeps every size. Off by default: props are drawn as their own
+    /// meshes, so a button, lever or wheel is as exact as anything else, and
+    /// dropping them lost controls the map's logic uses.
     pub min_size: f64,
     /// Ignore props whose longest dimension is over this many Source units;
     /// 0 keeps every size.
@@ -445,8 +446,8 @@ pub struct Props {
     /// position rather than recover one.
     pub settle_max: f64,
     /// Props whose longest dimension is at least this many Source units are
-    /// solid. Smaller clutter is left walk-through; 0 makes everything solid,
-    /// and a huge value nothing.
+    /// solid, as their Source `solid` setting says. 0, the default, keeps every
+    /// size solid as Source has it; a huge value makes nothing solid.
     pub collision_min_size: f64,
     /// What a solid prop is solid as.
     pub collision: CollisionMode,
@@ -529,7 +530,7 @@ impl Default for Props {
     fn default() -> Self {
         Props {
             enabled: true,
-            min_size: 12.0,
+            min_size: 0.0,
             max_size: 0.0,
             // Real mesh export has a cutout path, so foliage is included by
             // default. A user can still exclude a family explicitly.
@@ -541,7 +542,7 @@ impl Default for Props {
             texture_repeat_max: 4,
             settle: true,
             settle_max: 1.0,
-            collision_min_size: 48.0,
+            collision_min_size: 0.0,
             collision: CollisionMode::Shaped,
             collision_max_shapes: 16_384,
             bake: true,

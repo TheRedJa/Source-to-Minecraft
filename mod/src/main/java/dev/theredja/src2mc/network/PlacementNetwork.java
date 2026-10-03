@@ -19,7 +19,8 @@ public final class PlacementNetwork {
         // "2": surface-change payload added alongside the v2 exact-fragment surface table.
         // "3": map logic's sound sync and use payloads.
         // "4": mover sync (which Sable sub-level carries which map's mover).
-        var registrar = event.registrar("4");
+        // "5": mover state (shown, solid).
+        var registrar = event.registrar("5");
         registrar.playToClient(PlacementSyncPayload.TYPE, PlacementSyncPayload.STREAM_CODEC,
             (payload, context) -> {
                 PlacementIndex index = new PlacementIndex();

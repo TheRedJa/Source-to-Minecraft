@@ -30,6 +30,33 @@ public record MoverPose(double x, double y, double z, double qx, double qy, doub
             .rotateX(Math.toRadians(roll));
     }
 
+    /**
+     * A child's pose with its parent's applied: Source moves a child in its parent's frame, so a
+     * compiled point goes through the child's own move and then the parent's. Each pose turns
+     * about its own entity's origin; the result turns about the child's.
+     */
+    static MoverPose compose(MoverPose parent, double[] parentOrigin, MoverPose child, double[] childOrigin) {
+        Quaterniond parentRotation = parent.rotation();
+        // Where the child's origin ends up: its own move, then the parent's.
+        org.joml.Vector3d moved = new org.joml.Vector3d(childOrigin[0] + child.x - parentOrigin[0],
+            childOrigin[1] + child.y - parentOrigin[1], childOrigin[2] + child.z - parentOrigin[2]);
+        parentRotation.transform(moved);
+        double[] offset = {moved.x + parentOrigin[0] + parent.x - childOrigin[0], moved.y + parentOrigin[1] + parent.y - childOrigin[1],
+            moved.z + parentOrigin[2] + parent.z - childOrigin[2]};
+        return of(offset, parentRotation.mul(child.rotation()));
+    }
+
+    /** Source's {@code VectorAngles} of a map-local direction: pitch (down positive) and yaw, in degrees; roll 0. */
+    static double[] vectorAngles(double x, double y, double z) {
+        double sx = x, sy = -z, sz = y;
+        if (sx == 0 && sy == 0) return new double[]{sz > 0 ? 270 : 90, 0, 0};
+        double yaw = Math.toDegrees(Math.atan2(sy, sx));
+        if (yaw < 0) yaw += 360;
+        double pitch = Math.toDegrees(Math.atan2(-sz, Math.sqrt(sx * sx + sy * sy)));
+        if (pitch < 0) pitch += 360;
+        return new double[]{pitch, yaw, 0};
+    }
+
     /** A Source direction or offset, in Source units, as map-local blocks. */
     static double[] sourceToBlocks(double[] source) {
         return new double[]{source[0] / 32.0, source[2] / 32.0, -source[1] / 32.0};

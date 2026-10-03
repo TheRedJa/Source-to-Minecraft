@@ -101,11 +101,23 @@ public final class LogicOverlay {
             if (map == null || map.logic() == null) continue;
             List<Shape> shapes = SHAPES.computeIfAbsent(map.logic(), LogicOverlay::shapes);
             double tx = placement.translation().getX(), ty = placement.translation().getY(), tz = placement.translation().getZ();
+            var movers = Carriers.movers(placement.anchorWorld().asLong());
+            float partialTick = event.getPartialTick().getGameTimeDeltaPartialTick(false);
             for (Shape shape : shapes) {
                 if (!shown(shape)) continue;
+                // A volume riding a mover is drawn where the mover has it now.
+                var carrier = Carriers.carrier(map.logic(), movers, shape.entity);
+                Carriers.Frame frame = carrier == null ? null : Carriers.frame(minecraft.level, carrier, placement, partialTick);
                 double[] b = shape.bounds;
-                double dx = Math.max(0, Math.max(b[0] + tx - eye.x, eye.x - b[3] - tx)), dy = Math.max(0, Math.max(b[1] + ty - eye.y, eye.y - b[4] - ty)),
+                double dx, dy, dz;
+                if (frame == null) {
+                    dx = Math.max(0, Math.max(b[0] + tx - eye.x, eye.x - b[3] - tx));
+                    dy = Math.max(0, Math.max(b[1] + ty - eye.y, eye.y - b[4] - ty));
                     dz = Math.max(0, Math.max(b[2] + tz - eye.z, eye.z - b[5] - tz));
+                } else {
+                    Vec3 centre = frame.toWorld(new Vec3(shape.centre[0] + tx, shape.centre[1] + ty, shape.centre[2] + tz));
+                    dx = centre.x - eye.x; dy = centre.y - eye.y; dz = centre.z - eye.z;
+                }
                 double distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
                 if (distance > RANGE) continue;
                 int r = shape.colour >> 16 & 255, g = shape.colour >> 8 & 255, bl = shape.colour & 255;
@@ -113,6 +125,10 @@ public final class LogicOverlay {
                 for (int i = 0; i + 5 < e.length; i += 6) {
                     float x0 = (float) (e[i] + tx), y0 = (float) (e[i + 1] + ty), z0 = (float) (e[i + 2] + tz);
                     float x1 = (float) (e[i + 3] + tx), y1 = (float) (e[i + 4] + ty), z1 = (float) (e[i + 5] + tz);
+                    if (frame != null) {
+                        Vec3 a = frame.toWorld(new Vec3(x0, y0, z0)), c = frame.toWorld(new Vec3(x1, y1, z1));
+                        x0 = (float) a.x; y0 = (float) a.y; z0 = (float) a.z; x1 = (float) c.x; y1 = (float) c.y; z1 = (float) c.z;
+                    }
                     float nx = x1 - x0, ny = y1 - y0, nz = z1 - z0;
                     float length = (float) Math.sqrt(nx * nx + ny * ny + nz * nz);
                     if (length == 0) continue;
@@ -121,9 +137,10 @@ public final class LogicOverlay {
                     lines.addVertex(matrix, x1, y1, z1).setColor(r, g, bl, 255).setNormal(matrix, nx, ny, nz);
                 }
                 if (distance <= LABEL_RANGE) {
-                    double[] c = shape.centre;
+                    Vec3 c = new Vec3(shape.centre[0] + tx, shape.centre[1] + ty, shape.centre[2] + tz);
+                    Vec3 at = frame == null ? c : frame.toWorld(c);
                     labels.add(() -> DebugRenderer.renderFloatingText(event.getPoseStack(), buffers, shape.label,
-                        c[0] + tx, c[1] + ty, c[2] + tz, shape.colour | 0xFF000000, 0.02F, true, 0, true));
+                        at.x, at.y, at.z, shape.colour | 0xFF000000, 0.02F, true, 0, true));
                 }
             }
         }

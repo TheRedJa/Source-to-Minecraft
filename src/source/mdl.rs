@@ -283,8 +283,8 @@ impl<'a> Models<'a> {
                     .collect()
             })
             .collect();
-        let surface_prop = Some(model.surface_prop().trim().to_ascii_lowercase())
-            .filter(|prop| !prop.is_empty());
+        let surface_prop =
+            Some(model.surface_prop().trim().to_ascii_lowercase()).filter(|prop| !prop.is_empty());
         Model {
             parts: parts
                 .into_iter()

@@ -39,6 +39,8 @@ import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.common.EventBusSubscriber;
 import net.neoforged.neoforge.client.event.RenderLevelStageEvent;
 import org.joml.Matrix4f;
+import org.joml.Quaterniond;
+import org.joml.Vector3d;
 import org.joml.Quaternionf;
 
 /**
@@ -46,8 +48,12 @@ import org.joml.Quaternionf;
  * props it carries, baked once into mover-local buffers per atlas page, and drawn with the
  * sub-level's interpolated pose. The blocks in the plot are invisible; this is all that is seen.
  *
- * <p>A mover is lit as one: by the world's light at its middle, where it is now. The buffers are
- * baked again when that light changes, which a sliding door does a few times on its way.
+ * <p>Each vertex takes the world's light where the mover has it now, sampled as the static
+ * surfaces sample theirs; a moving mover is lit again as it gets somewhere new, a few times a
+ * second at most. The vertices keep their mover-local normals, so the draw turns vanilla's two
+ * shading lights back by the mover's rotation instead: the same shading as turning every normal.
+ * {@code /src2mc_movers} switches both, for comparison, to the old one light per mover and
+ * unturned shading.
  */
 @EventBusSubscriber(modid = Src2mc.MOD_ID, value = Dist.CLIENT)
 public final class MoverRenderer {
@@ -59,29 +65,65 @@ public final class MoverRenderer {
         final MoverTable.Mover mover;
         final BundleManifest bundle;
         final AtlasIndex atlas;
+        final Map<PageClass, PackedVertices> meshes;
         final Map<PageClass, VertexBuffer> buffers = new HashMap<>();
-        final int light;
         final boolean shaders;
         final boolean complete;
         final double[] bounds;
-        Built(MoverTable.Mover mover, BundleManifest bundle, AtlasIndex atlas, int light, boolean shaders, boolean complete, double[] bounds) {
-            this.mover = mover; this.bundle = bundle; this.atlas = atlas; this.light = light; this.shaders = shaders;
+        /** The light at the mover's middle, and where the mover was, when it was last lit. */
+        int light = Integer.MIN_VALUE;
+        Vector3d litPosition;
+        Quaterniond litOrientation;
+        long litFrame = Long.MIN_VALUE;
+        boolean litPerVertex;
+        Built(MoverTable.Mover mover, BundleManifest bundle, AtlasIndex atlas, Map<PageClass, PackedVertices> meshes, boolean shaders,
+              boolean complete, double[] bounds) {
+            this.mover = mover; this.bundle = bundle; this.atlas = atlas; this.meshes = meshes; this.shaders = shaders;
             this.complete = complete; this.bounds = bounds;
         }
-        @Override public void close() { buffers.values().forEach(VertexBuffer::close); }
+        @Override public void close() { buffers.values().forEach(VertexBuffer::close); buffers.clear(); }
     }
 
     private static final Map<UUID, Built> BUILT = new HashMap<>();
     private static long frame, generationSequence = -1;
-    private static boolean enabled = true;
-    private static long drawnLast, triangles;
+    private static boolean enabled = true, perVertexLight = true, turnShading = true;
+    private static long drawnLast, relights;
+    /** A moving mover is lit again at most this often, in frames, once it moved or turned this far. */
+    private static final int RELIGHT_FRAMES = 6, LIGHT_CHECK_FRAMES = 20;
+    private static final double RELIGHT_DISTANCE = 0.25, RELIGHT_ANGLE = Math.toRadians(5);
+    private static final org.joml.Vector3f LIGHT_0 = new org.joml.Vector3f(0.2F, 1.0F, -0.7F).normalize();
+    private static final org.joml.Vector3f LIGHT_1 = new org.joml.Vector3f(-0.2F, 1.0F, 0.7F).normalize();
+    private static final org.joml.Vector3f NETHER_LIGHT_1 = new org.joml.Vector3f(-0.2F, -1.0F, 0.7F).normalize();
 
     public static void setEnabled(boolean value) { enabled = value; }
 
     public static String status() {
         return "src2mc movers: " + MoverRegistry.instances(true).size() + " known, " + BUILT.size() + " built, "
-            + drawnLast + " drawn last frame" + (enabled ? "" : " (drawing off)");
+            + drawnLast + " drawn last frame, " + relights + " relit; light " + (perVertexLight ? "per vertex" : "one per mover")
+            + ", shading " + (turnShading ? "turned" : "unturned") + (enabled ? "" : " (drawing off)");
     }
+
+    @SubscribeEvent
+    public static void registerCommand(net.neoforged.neoforge.client.event.RegisterClientCommandsEvent event) {
+        event.getDispatcher().register(net.minecraft.commands.Commands.literal("src2mc_movers")
+            .then(net.minecraft.commands.Commands.literal("status").executes(context -> reply(context.getSource(), status())))
+            .then(net.minecraft.commands.Commands.literal("draw")
+                .then(net.minecraft.commands.Commands.literal("on").executes(context -> { enabled = true; return reply(context.getSource(), status()); }))
+                .then(net.minecraft.commands.Commands.literal("off").executes(context -> { enabled = false; return reply(context.getSource(), status()); })))
+            .then(net.minecraft.commands.Commands.literal("light")
+                .then(net.minecraft.commands.Commands.literal("vertex").executes(context -> { perVertexLight = true; relightAll(); return reply(context.getSource(), status()); }))
+                .then(net.minecraft.commands.Commands.literal("single").executes(context -> { perVertexLight = false; relightAll(); return reply(context.getSource(), status()); })))
+            .then(net.minecraft.commands.Commands.literal("shading")
+                .then(net.minecraft.commands.Commands.literal("turned").executes(context -> { turnShading = true; return reply(context.getSource(), status()); }))
+                .then(net.minecraft.commands.Commands.literal("unturned").executes(context -> { turnShading = false; return reply(context.getSource(), status()); }))));
+    }
+
+    private static int reply(net.minecraft.commands.CommandSourceStack source, String text) {
+        source.sendSuccess(() -> net.minecraft.network.chat.Component.literal(text), false);
+        return 1;
+    }
+
+    private static void relightAll() { for (Built built : BUILT.values()) built.litFrame = Long.MIN_VALUE; }
 
     @SubscribeEvent
     public static void render(RenderLevelStageEvent event) {
@@ -116,15 +158,64 @@ public final class MoverRenderer {
             if (!(container.getSubLevel(instance.subLevel()) instanceof ClientSubLevel subLevel)) continue;
             MoverRegistry.Resolved resolved = MoverRegistry.resolve(level, instance.subLevel());
             if (resolved == null) continue;
-            int light = lightAt(level, subLevel, resolved);
-            Built old = BUILT.get(instance.subLevel());
-            if (old != null && old.mover == resolved.mover() && old.light == light && old.shaders == shaders && old.complete) continue;
-            var located = generation.findLocatedMap(instance.campaignId(), instance.mapId()).orElse(null);
-            if (located == null) continue;
-            Built built = build(generation, located.bundle(), resolved, light, shaders);
-            if (old != null) old.close();
-            BUILT.put(instance.subLevel(), built);
+            Built built = BUILT.get(instance.subLevel());
+            if (built == null || built.mover != resolved.mover() || built.shaders != shaders || !built.complete) {
+                var located = generation.findLocatedMap(instance.campaignId(), instance.mapId()).orElse(null);
+                if (located == null) continue;
+                Built fresh = build(generation, located.bundle(), resolved, shaders);
+                if (built != null) built.close();
+                BUILT.put(instance.subLevel(), fresh);
+                built = fresh;
+            }
+            if (needsLight(level, subLevel, resolved, built)) light(level, subLevel, built);
         }
+    }
+
+    /**
+     * Whether a mover is due to be lit again: never lit, switched between the two ways, its
+     * middle's light changed, or -- lit per vertex -- moved or turned enough since.
+     */
+    private static boolean needsLight(ClientLevel level, ClientSubLevel subLevel, MoverRegistry.Resolved resolved, Built built) {
+        if (built.litFrame == Long.MIN_VALUE || built.litPerVertex != perVertexLight) return true;
+        if (!perVertexLight) return lightAt(level, subLevel, resolved) != built.light;
+        if (frame - built.litFrame < RELIGHT_FRAMES) return false;
+        Pose3dc pose = subLevel.logicalPose();
+        if (built.litPosition.distance(pose.position().x(), pose.position().y(), pose.position().z()) > RELIGHT_DISTANCE
+            || built.litOrientation.difference(new Quaterniond(pose.orientation()), new Quaterniond()).angle() > RELIGHT_ANGLE) return true;
+        return frame - built.litFrame >= LIGHT_CHECK_FRAMES && lightAt(level, subLevel, resolved) != built.light;
+    }
+
+    /** Lights every vertex where the mover is now, and uploads its buffers again. */
+    private static void light(ClientLevel level, ClientSubLevel subLevel, Built built) {
+        Pose3dc pose = subLevel.logicalPose();
+        BlockPos plotOrigin = MoverRegistry.plotOrigin(subLevel.getPlot());
+        MoverRegistry.Resolved resolved = MoverRegistry.resolve(level, subLevel.getUniqueId());
+        int middle = resolved == null ? 0 : lightAt(level, subLevel, resolved);
+        Quaterniond orientation = new Quaterniond(pose.orientation());
+        Map<Long, Integer> cache = new HashMap<>();
+        Vector3d normal = new Vector3d();
+        built.close();
+        for (var entry : built.meshes.entrySet()) {
+            PackedVertices vertices = entry.getValue();
+            for (int i = 0; i < vertices.vertices(); i++) {
+                int light = middle;
+                if (perVertexLight) {
+                    Vec3 world = pose.transformPosition(new Vec3(plotOrigin.getX() + vertices.x(i), plotOrigin.getY() + vertices.y(i),
+                        plotOrigin.getZ() + vertices.z(i)));
+                    orientation.transform(normal.set(vertices.nx(i), vertices.ny(i), vertices.nz(i)));
+                    light = LightSampler.smooth(level, world.x, world.y, world.z, (float) normal.x, (float) normal.y, (float) normal.z, cache);
+                }
+                vertices.setLight(i, light);
+            }
+            vertices.index();
+            built.buffers.put(entry.getKey(), vertices.upload(MapSurfaceRenderer.neutralEntityId(), MapSurfaceRenderer.indexedMeshes()).buffer());
+        }
+        built.light = middle;
+        built.litPosition = new Vector3d(pose.position().x(), pose.position().y(), pose.position().z());
+        built.litOrientation = orientation;
+        built.litFrame = frame;
+        built.litPerVertex = perVertexLight;
+        relights++;
     }
 
     /** The world's light at the middle of the mover, where its sub-level has it now. */
@@ -136,7 +227,8 @@ public final class MoverRenderer {
         return LevelRenderer.getLightColor(level, BlockPos.containing(middle));
     }
 
-    private static Built build(BundleGeneration generation, BundleManifest bundle, MoverRegistry.Resolved resolved, int light, boolean shaders) {
+    private static Built build(BundleGeneration generation, BundleManifest bundle, MoverRegistry.Resolved resolved, boolean shaders) {
+        int light = 0;
         BundleMap map = resolved.map();
         MoverTable.Mover mover = resolved.mover();
         Map<PageClass, PackedVertices> meshes = new HashMap<>();
@@ -187,23 +279,17 @@ public final class MoverRenderer {
             }
         }
         double[] bounds = null;
-        Built built = new Built(mover, bundle, map.atlas(), light, shaders, complete, null);
+        Map<PageClass, PackedVertices> kept = new HashMap<>();
         for (var entry : meshes.entrySet()) {
             PackedVertices vertices = entry.getValue();
             if (vertices.isEmpty()) continue;
-            vertices.index();
-            built.buffers.put(entry.getKey(), vertices.upload(MapSurfaceRenderer.neutralEntityId(), MapSurfaceRenderer.indexedMeshes()).buffer());
+            kept.put(entry.getKey(), vertices);
             double[] b = vertices.bounds();
             if (bounds == null) bounds = b.clone();
             else for (int axis = 0; axis < 3; axis++) { bounds[axis] = Math.min(bounds[axis], b[axis]); bounds[axis + 3] = Math.max(bounds[axis + 3], b[axis + 3]); }
         }
-        return bounds == null ? built : withBounds(built, bounds);
-    }
-
-    private static Built withBounds(Built built, double[] bounds) {
-        Built copy = new Built(built.mover, built.bundle, built.atlas, built.light, built.shaders, built.complete, bounds);
-        copy.buffers.putAll(built.buffers);
-        return copy;
+        // Uploaded once it is lit, in the same frame.
+        return new Built(mover, bundle, map.atlas(), kept, shaders, complete, bounds);
     }
 
     private static void addSurface(PackedVertices out, SurfaceTessellator.Triangle triangle, int light, boolean back) {
@@ -230,11 +316,15 @@ public final class MoverRenderer {
         Vec3 camera = event.getCamera().getPosition();
         BundleGeneration generation = Src2mc.bundles().active();
         boolean suppressDepthWrite = translucent && !MapSurfaceRenderer.translucentDepthWrite();
+        // Vanilla's level shading lights, as LevelRenderer sets them for this dimension.
+        boolean netherLighting = level.effects().constantAmbientLight();
         long drawn = 0;
         for (Map.Entry<UUID, Built> entry : BUILT.entrySet()) {
             SubLevel subLevel = container.getSubLevel(entry.getKey());
             if (!(subLevel instanceof ClientSubLevel client)) continue;
             Built built = entry.getValue();
+            MoverRegistry.Resolved resolved = MoverRegistry.resolve(level, entry.getKey());
+            if (resolved == null || (MoverRegistry.state(true, resolved) & MoverRegistry.HIDDEN) != 0) continue;
             Pose3dc pose = client.renderPose(partialTick);
             BlockPos plotOrigin = MoverRegistry.plotOrigin(client.getPlot());
             if (built.bounds != null && !shadowPass && MapSurfaceRenderer.frustumCulling()) {
@@ -242,6 +332,12 @@ public final class MoverRenderer {
                 if (!event.getFrustum().isVisible(box)) continue;
             }
             // Mover-local vertex v is plot point plotOrigin + v, drawn at R (plot - C) + position.
+            if (turnShading) {
+                // Normals stay mover-local: the shading lights turn back instead.
+                Quaternionf back = new Quaternionf(pose.orientation()).conjugate();
+                RenderSystem.setShaderLights(back.transform(LIGHT_0, new org.joml.Vector3f()),
+                    back.transform(netherLighting ? NETHER_LIGHT_1 : LIGHT_1, new org.joml.Vector3f()));
+            }
             Matrix4f modelView = new Matrix4f(event.getModelViewMatrix())
                 .translate((float) (pose.position().x() - camera.x), (float) (pose.position().y() - camera.y), (float) (pose.position().z() - camera.z))
                 .rotate(new Quaternionf(pose.orientation()))
@@ -268,6 +364,7 @@ public final class MoverRenderer {
             }
         }
         VertexBuffer.unbind();
+        if (turnShading) RenderSystem.setShaderLights(LIGHT_0, netherLighting ? NETHER_LIGHT_1 : LIGHT_1);
         if (!shadowPass && !translucent) drawnLast = drawn;
     }
 

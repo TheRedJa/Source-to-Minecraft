@@ -208,6 +208,132 @@ final class LogicRuntimeTest {
         assertEquals(3, MoverSystem.connected(new int[0]).length, "an empty mover still gets one block");
     }
 
+    /** {@code entity} standing at a map-local point. */
+    private static LogicTable.Entity at(LogicTable.Entity entity, double x, double y, double z) {
+        return new LogicTable.Entity(entity.classname(), entity.keyvalues(), entity.outputs(), new double[]{x, y, z}, -1, -1);
+    }
+
+    private static org.joml.Vector3d forward(MoverPose pose) { return pose.rotation().transform(new org.joml.Vector3d(1, 0, 0)); }
+
+    @Test void aTrainRunsAlongItsPathPassingNodesAndStopsAtTheEnd() {
+        // 320 units a second is 10 blocks a second; the path goes 10 blocks along +z, then 10 along +x.
+        MapLogic logic = run(
+            at(entity("func_tracktrain", "targetname", "train", "target", "a", "startspeed", "320", "wheels", "16", "orientationtype", "1"), 0, 0, 0),
+            at(entity("path_track", "targetname", "a", "target", "b"), 0, 0, 0),
+            at(entity("path_track", "targetname", "b", "target", "c", "OnPass", "hits,Add,1,0,-1"), 0, 0, 10),
+            at(entity("path_track", "targetname", "c", "OnPass", "ends,Add,1,0,-1"), 10, 0, 10),
+            entity("math_counter", "targetname", "hits"),
+            entity("math_counter", "targetname", "ends"));
+        LogicEntity train = logic.findFirst("train", null, null, null);
+        seconds(logic, 0.1);
+        logic.queue(0, "train", null, "StartForward", null, null, null);
+        seconds(logic, 0.55);
+        MoverPose half = train.pose(logic.time());
+        assertEquals(5, half.z(), 0.6, "half way along the first leg after half a second");
+        assertEquals(0, half.x(), 1e-9);
+        // Along +z is Source's -y: it faces yaw 270, its forward turned to +z.
+        assertEquals(1, forward(half).z, 1e-6);
+        // Between ticks the pose runs on at the train's speed.
+        assertEquals(half.z() + 0.25, train.pose(logic.time() + 0.025).z(), 1e-6);
+        seconds(logic, 1.0);
+        assertTrue(state(logic, "hits").startsWith("1 "), state(logic, "hits"));
+        seconds(logic, 1.0);
+        MoverPose end = train.pose(logic.time());
+        assertEquals(10, end.x(), 1e-6);
+        assertEquals(10, end.z(), 1e-6);
+        assertEquals(1, forward(end).x, 1e-6, "faces along the last leg");
+        assertTrue(!train.moving(logic.time()), state(logic, "train"));
+        assertTrue(state(logic, "ends").startsWith("1 "), "the dead end counts as passed: " + state(logic, "ends"));
+    }
+
+    @Test void aTrainSavedMidPathCarriesOnFromWhereItWas() {
+        LogicTable.Entity[] map = {
+            at(entity("func_tracktrain", "targetname", "train", "target", "a", "startspeed", "320", "spawnflags", "16"), 0, 0, 0),
+            at(entity("path_track", "targetname", "a", "target", "b"), 0, 0, 0),
+            at(entity("path_track", "targetname", "b"), 0, 0, 20)};
+        MapLogic logic = run(map);
+        seconds(logic, 0.1);
+        logic.queue(0, "train", null, "StartForward", null, null, null);
+        seconds(logic, 1.0);
+        double z = logic.findFirst("train", null, null, null).pose(logic.time()).z();
+        CompoundTag saved = logic.save();
+        MapLogic loaded = run(map);
+        assertTrue(loaded.load(saved));
+        assertEquals(z, loaded.findFirst("train", null, null, null).pose(loaded.time()).z(), 1e-9);
+        seconds(loaded, 0.5);
+        assertEquals(z + 5, loaded.findFirst("train", null, null, null).pose(loaded.time()).z(), 1e-6);
+    }
+
+    @Test void aRotatorTurnsAtItsSpeedAndSpinsDownWithFriction() {
+        MapLogic logic = run(at(entity("func_rotating", "targetname", "fan", "maxspeed", "90", "spawnflags", "0"), 0, 0, 0),
+            at(entity("func_rotating", "targetname", "slow", "maxspeed", "100", "fanfriction", "50", "spawnflags", "16"), 0, 0, 0));
+        LogicEntity fan = logic.findFirst("fan", null, null, null);
+        logic.queue(0, "fan", null, "Start", null, null, null);
+        logic.queue(0, "slow", null, "Start", null, null, null);
+        seconds(logic, 0.05);
+        double start = logic.time();
+        seconds(logic, 1.0);
+        // 90 degrees a second about up: forward turns from +x to Source's +y, Minecraft's -z.
+        org.joml.Vector3d turned = forward(fan.pose(start + 1.0));
+        assertEquals(-1, turned.z, 1e-6);
+        // Acc/Dcc: up by a tenth of max speed times friction twice per step of a tenth of a second.
+        assertTrue(state(logic, "slow").equals("100 deg/s"), state(logic, "slow"));
+        logic.queue(0, "slow", null, "Stop", null, null, null);
+        seconds(logic, 0.15);
+        assertTrue(state(logic, "slow").equals("95 deg/s"), state(logic, "slow"));
+        seconds(logic, 3.0);
+        assertEquals("stopped", state(logic, "slow"));
+    }
+
+    @Test void aChildRidesItsMovingParent() {
+        MapLogic logic = run(at(entity("func_rotating", "targetname", "turntable", "maxspeed", "90"), 0, 0, 0),
+            at(entity("prop_dynamic", "targetname", "base", "parentname", "turntable"), 2, 0, 0),
+            at(entity("func_rotating", "targetname", "wheel", "parentname", "base,attachment", "maxspeed", "0"), 4, 0, 0));
+        logic.queue(0, "turntable", null, "Start", null, null, null);
+        seconds(logic, 0.05);
+        double start = logic.time();
+        // A quarter turn about up at the origin carries the wheel at x 4 to Source's +y, Minecraft's z -4.
+        MoverPose wheel = logic.findFirst("wheel", null, null, null).worldPose(start + 1.0, new double[]{4, 0, 0});
+        assertEquals(-4, wheel.x(), 1e-6);
+        assertEquals(-4, wheel.z(), 1e-6);
+        assertEquals(-1, forward(wheel).z, 1e-6);
+    }
+
+    @Test void aTriggerParentedToATrainIsTouchedWhereTheTrainTookIt() {
+        MapLogic logic = run(
+            at(entity("func_tracktrain", "targetname", "car", "target", "a", "startspeed", "320", "spawnflags", "16"), 0, 0, 0),
+            at(entity("path_track", "targetname", "a", "target", "b"), 0, 0, 0),
+            at(entity("path_track", "targetname", "b"), 0, 0, 20),
+            at(entity("trigger_multiple", "targetname", "bumper", "parentname", "car"), 0, 0, 2));
+        seconds(logic, 0.1);
+        logic.queue(0, "car", null, "StartForward", null, null, null);
+        seconds(logic, 1.05);
+        double moved = logic.findFirst("car", null, null, null).pose(logic.time()).z();
+        assertTrue(moved > 9, "the car moved: " + moved);
+        // A player box where the bumper is now lands on its compiled place.
+        net.minecraft.world.phys.AABB box = logic.findFirst("bumper", null, null, null)
+            .compiled(new net.minecraft.world.phys.AABB(-0.3, 0, 2 + moved - 0.3, 0.3, 1.8, 2 + moved + 0.3));
+        assertEquals(2, (box.minZ + box.maxZ) / 2, 1e-6);
+    }
+
+    @Test void aBrushHidesWhenDisabledAndCollidesByItsSolidity() {
+        MapLogic logic = run(entity("func_brush", "targetname", "wall", "solidity", "0"),
+            entity("func_brush", "targetname", "always", "solidity", "2", "StartDisabled", "1"),
+            entity("func_brush", "targetname", "never", "solidity", "1"));
+        int hidden = dev.theredja.src2mc.world.MoverRegistry.HIDDEN, notSolid = dev.theredja.src2mc.world.MoverRegistry.NOT_SOLID;
+        assertEquals(0, logic.findFirst("wall", null, null, null).moverState());
+        assertEquals(hidden, logic.findFirst("always", null, null, null).moverState());
+        assertEquals(notSolid, logic.findFirst("never", null, null, null).moverState());
+        logic.queue(0, "wall", null, "Disable", null, null, null);
+        logic.queue(0, "always", null, "Toggle", null, null, null);
+        seconds(logic, 0.05);
+        assertEquals(hidden | notSolid, logic.findFirst("wall", null, null, null).moverState());
+        assertEquals(0, logic.findFirst("always", null, null, null).moverState());
+        logic.queue(0, "never", null, "Kill", null, null, null);
+        seconds(logic, 0.05);
+        assertEquals(hidden | notSolid, logic.findFirst("never", null, null, null) == null ? hidden | notSolid : -1);
+    }
+
     /** With {@code -Dsrc2mc.testBundle}: spawns each map, presses every button it has, and runs it for two minutes. */
     @Test void realMapsRun() throws Exception {
         String path = System.getProperty("src2mc.testBundle");
@@ -224,11 +350,27 @@ final class LogicRuntimeTest {
             for (int i = 0; i < map.logic().entities().size(); i++) {
                 if (logic.entity(i) instanceof Movers.Usable usable && usable.usable()) { usable.use(player, true); pressed++; }
             }
+            int started2 = 0;
+            for (int i = 0; i < map.logic().entities().size(); i++) {
+                String input = logic.entity(i) instanceof Trains.TrackTrain ? "StartForward" : logic.entity(i) instanceof Trains.Rotating ? "Start" : null;
+                if (input != null) { logic.queue(0, null, logic.entity(i), input, null, player, null); started2++; }
+            }
             for (int second = 0; second < 120; second++) {
                 seconds(logic, 1);
                 LogicNetwork.Update update = logic.drainUpdate(false);
                 sounds += update.events().size();
+                // Every mover's pose, parents and all, stays a real place.
+                if (map.movers() == null) continue;
+                for (var mover : map.movers().movers()) {
+                    LogicEntity entity = logic.entity(mover.entity());
+                    MoverPose pose = entity == null ? null : entity.worldPose(logic.time() + 0.02, new double[]{mover.originX(), mover.originY(), mover.originZ()});
+                    if (pose == null) continue;
+                    for (double v : new double[]{pose.x(), pose.y(), pose.z(), pose.qx(), pose.qy(), pose.qz(), pose.qw()}) {
+                        assertTrue(Double.isFinite(v), entity.describe() + " " + pose);
+                    }
+                }
             }
+            System.out.println(map.mapId() + ": started " + started2 + " trains and rotators");
             // Every scene, started once: each speak event must reach the clients as a voice line.
             int expected = 0, voices = 0;
             for (int i = 0; i < map.logic().entities().size(); i++) {
@@ -240,7 +382,8 @@ final class LogicRuntimeTest {
                 for (LogicNetwork.SoundEvent event : logic.drainUpdate(false).events()) if (event.voice()) voices++;
             }
             System.out.println(map.mapId() + ": scene lines " + voices + " of " + expected);
-            assertEquals(expected, voices, "every line of every scene plays");
+            // More is fine: a scene's outputs, or a train still running, can start further lines.
+            assertTrue(voices >= expected, "every line of every scene plays: " + voices + " of " + expected);
             double millis = (System.nanoTime() - started) / 1e6;
             System.out.println(map.mapId() + ": pressed " + pressed + ", one-shot sounds " + sounds
                 + String.format(java.util.Locale.ROOT, ", %.1f ms per simulated second\n", millis / 130) + logic.status());
