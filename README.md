@@ -33,9 +33,10 @@ There are two ways to get a map into Minecraft:
   resolution. Fences and grates stay see-through with distance, and `$nocull`
   materials are drawn from both sides.
 - **Every prop, as its real mesh**, at its exact Source origin and angle, with
-  its skin (the rusted or dirty variant the map chose) and every material
-  slot. Props are merged into per-section batches, so millions of triangles
-  cost a few hundred draw calls.
+  its skin (the rusted or dirty variant the map chose), its colour tint
+  (`rendercolor`, such as Portal 2's orange and blue gel tubes) and every
+  material slot. Props are merged into per-section batches, so millions of
+  triangles cost a few hundred draw calls.
 - **Sub-block collision** for map geometry and props, in sixteenths of a block:
   you walk on the floor you see, under the ceiling you see, and along railings
   rather than invisible cubes.
@@ -137,6 +138,12 @@ its logic runs or not; `/src2mc movers status` counts them and
 `/src2mc movers respawn` rebuilds them. `/src2mc_movers light vertex|single`
 and `shading turned|unturned` switch how they are lit, for comparison. They
 cannot be broken yet.
+
+Props the map's logic changes are drawn one by one instead of merged: a
+lamp's `Skin` switches, `Color` retints, `Enable`/`Disable` shows and hides a
+`prop_dynamic` (it stays solid, as in Source), and `Kill` removes a prop with
+its collision, and everything parented to it. `/src2mc_logic_props
+status|draw on|off` counts them and switches their drawing off for comparison.
 
 Building the mod and running its development client is described in
 [`mod/README.md`](mod/README.md). The bundle format is specified in

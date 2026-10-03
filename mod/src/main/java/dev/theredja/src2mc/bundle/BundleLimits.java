@@ -16,6 +16,8 @@ final class BundleLimits {
     static final int MAX_AUDIO_RECORDS = 1_000_000;
     static final int MAX_LOGIC_RECORDS = 1_000_000;
     static final int MAX_MOVERS_PER_MAP = 65_536;
+    static final int MAX_LOGIC_PROPS_PER_MAP = 16_384;
+    static final int MAX_LOGIC_PROP_SKINS = 1_024;
     /** A train's path is not part of its mover; a mover is the entity itself, at most a large hall's worth of cells. */
     static final long MAX_CELLS_PER_MOVER = 16_777_216;
     static final int MAX_MODELS_PER_CAMPAIGN = 1_000_000;

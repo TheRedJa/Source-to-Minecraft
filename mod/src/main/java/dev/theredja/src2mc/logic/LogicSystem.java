@@ -63,6 +63,7 @@ public final class LogicSystem {
                 List<ServerPlayer> inside = playersInside(level, logic.placement);
                 OCCUPIED.put(logic, !inside.isEmpty());
                 if (ticking && !inside.isEmpty()) logic.tick(level, inside);
+                PropSync.update(level, logic);
                 LogicNetwork.Update update = logic.drainUpdate(false);
                 if (!update.isEmpty()) send(level, logic, update, false);
                 if (logic.dirty()) data.setDirty();
@@ -87,6 +88,7 @@ public final class LogicSystem {
             data.pending().remove(anchor);
             data.setDirty();
             send(level, logic, logic.drainUpdate(true), true);
+            PropSync.update(level, logic);
         }
     }
 
@@ -121,6 +123,7 @@ public final class LogicSystem {
 
     public static void onServerStopped(ServerStoppedEvent event) {
         RUNNING.clear();
+        dev.theredja.src2mc.world.PropStates.clear(false);
         OCCUPIED.clear();
         generationSequence = -1;
     }

@@ -19,6 +19,8 @@ final class PackedVertices {
     private static final int FLOATS = 8;
     private float[] data = new float[FLOATS * 96];
     private int[] light = new int[96];
+    /** Each vertex's tint, {@code 0xRRGGBB}; white leaves the texture as it is. */
+    private int[] color = new int[96];
     private int vertices;
     /** From {@link #index}: each vertex's slot among the distinct ones, and each distinct one's
      * first vertex. Null until indexed. */
@@ -29,10 +31,16 @@ final class PackedVertices {
     private float maxX = Float.NEGATIVE_INFINITY, maxY = Float.NEGATIVE_INFINITY, maxZ = Float.NEGATIVE_INFINITY;
 
     void add(float x, float y, float z, float u, float v, float nx, float ny, float nz, int packedLight) {
+        add(x, y, z, u, v, nx, ny, nz, packedLight, 0xFFFFFF);
+    }
+
+    void add(float x, float y, float z, float u, float v, float nx, float ny, float nz, int packedLight, int tint) {
         if (vertices == light.length) {
             light = Arrays.copyOf(light, vertices * 2);
+            color = Arrays.copyOf(color, vertices * 2);
             data = Arrays.copyOf(data, vertices * 2 * FLOATS);
         }
+        color[vertices] = tint;
         int at = vertices * FLOATS;
         data[at] = x; data[at + 1] = y; data[at + 2] = z; data[at + 3] = u; data[at + 4] = v;
         data[at + 5] = nx; data[at + 6] = ny; data[at + 7] = nz;
@@ -94,13 +102,13 @@ final class PackedVertices {
     int remapped(int i) { return remap[i]; }
 
     private int hash(int vertex) {
-        int at = vertex * FLOATS, result = light[vertex];
+        int at = vertex * FLOATS, result = light[vertex] * 31 + color[vertex];
         for (int i = 0; i < FLOATS; i++) result = result * 31 + Float.floatToIntBits(data[at + i]);
         return result ^ (result >>> 16);
     }
 
     private boolean same(int left, int right) {
-        if (light[left] != light[right]) return false;
+        if (light[left] != light[right] || color[left] != color[right]) return false;
         int a = left * FLOATS, b = right * FLOATS;
         for (int i = 0; i < FLOATS; i++) if (Float.floatToIntBits(data[a + i]) != Float.floatToIntBits(data[b + i])) return false;
         return true;
@@ -127,7 +135,7 @@ final class PackedVertices {
                 for (int i = 0; i < vertices; i++) {
                     int at = i * FLOATS;
                     builder.addVertex(data[at], data[at + 1], data[at + 2])
-                        .setColor(255, 255, 255, 255).setUv(data[at + 3], data[at + 4]).setOverlay(OverlayTexture.NO_OVERLAY)
+                        .setColor(color[i] >> 16 & 0xFF, color[i] >> 8 & 0xFF, color[i] & 0xFF, 255).setUv(data[at + 3], data[at + 4]).setOverlay(OverlayTexture.NO_OVERLAY)
                         .setLight(light[i]).setNormal(data[at + 5], data[at + 6], data[at + 7]);
                 }
                 try (var mesh = builder.buildOrThrow()) {

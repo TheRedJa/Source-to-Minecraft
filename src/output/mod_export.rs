@@ -14,8 +14,13 @@ pub struct ModelAsset {
     pub source_model: String,
     pub bytes: Vec<u8>,
     pub materials: Vec<u32>,
+    /// The tint, RGB; white for none.
+    pub color: [u8; 3],
     pub surface_prop: Option<String>,
 }
+
+/// What identifies a model reference: mesh, provenance, materials and tint.
+pub type ModelKey = (String, String, Vec<u32>, [u8; 3]);
 
 pub struct TextureAsset {
     pub content_id: String,
@@ -32,6 +37,31 @@ pub struct Prop {
     pub rotation: [f64; 4],
     pub scale: f64,
     pub material_ids: Vec<u32>,
+    pub color: [u8; 3],
+}
+
+/// A prop the map's logic changes (format section 18).
+pub struct LogicPropExport {
+    pub entity: usize,
+    pub placed: LogicPlacement,
+    /// The model reference of each skin family, family 0 first.
+    pub skins: Vec<ModelKey>,
+    /// The skin the map gives it, as written; may name no family.
+    pub skin: i32,
+    pub start_hidden: bool,
+    /// Its own collision table, map-local, when it has collision the logic
+    /// can take away.
+    pub collision: Option<Vec<u8>>,
+}
+
+pub enum LogicPlacement {
+    /// In `props.s2props`, identified as its stable ID is derived.
+    World {
+        source_ordinal: u64,
+        source_model: String,
+    },
+    /// Riding on this mover.
+    Mover(usize),
 }
 
 pub struct MapExport {
@@ -61,6 +91,8 @@ pub struct MapExport {
     pub logic: Option<crate::output::logic::LogicTable>,
     /// The map's moving entities, in entity lump order (format section 17).
     pub movers: Vec<MoverExport>,
+    /// The props the logic changes, in entity lump order (format section 18).
+    pub logic_props: Vec<LogicPropExport>,
     pub diagnostics: metadata::Diagnostics,
 }
 
@@ -96,6 +128,7 @@ pub struct MoverPropExport {
     pub rotation: [f64; 4],
     pub scale: f64,
     pub skin: i32,
+    pub color: [u8; 3],
 }
 
 pub struct WrittenCampaign {
@@ -158,14 +191,35 @@ pub fn from_conversion(
     let extracted = placed;
     let mut collision = conversion.collision.clone();
     let (mut solid_props, mut prop_cells) = (0, 0);
+    // A prop the logic can remove keeps its collision in a table of its own,
+    // added to the map's cells at runtime while it stands.
+    let removable =
+        |item: &crate::source::extract::ModProp| item.logic.is_some_and(|role| role.collision);
+    let mut logic_collision: BTreeMap<usize, Vec<u8>> = BTreeMap::new();
     if let Some(collision) = collision.as_mut() {
+        let (merged, apart): (Vec<_>, Vec<_>) = extracted.iter().partition(|item| !removable(item));
         (solid_props, prop_cells) = add_prop_collision(
             config,
             &conversion.transform,
             &conversion.grid,
-            &extracted,
+            &merged,
             collision,
         );
+        for item in apart {
+            let Some(volume) = prop_volume(config, &conversion.transform, item) else {
+                continue;
+            };
+            let shapes = separate_prop_collision(collision, &conversion.grid, volume);
+            if shapes.is_empty() {
+                continue;
+            }
+            let entity = item.prop.entity.context("logic prop without an entity")?;
+            logic_collision.insert(
+                entity,
+                crate::output::cell_collision::encode(&shapes)
+                    .context("encoding a logic prop's collision")?,
+            );
+        }
     }
     crate::timing::mark("export: prop collision");
     // Carriers are blocks too, and may sit a cell outside the grid: the anchor
@@ -257,15 +311,34 @@ pub fn from_conversion(
                 ids.entry(m.source_material.clone()).or_insert(i as u32);
                 ids
             });
-    // Keyed by skin as well: one mesh, but each skin its own material slots.
-    let mut model_by_path: BTreeMap<(String, i32), (String, Vec<u32>, Vec<u8>, Option<String>)> =
-        BTreeMap::new();
-    for item in extracted.iter().chain(riding.values().flatten()) {
-        let key = (item.prop.model.clone(), item.prop.skin);
+    // Keyed by skin and tint as well: one mesh, but each skin its own
+    // material slots, and each tint its own reference. A prop the logic
+    // changes brings every skin family of its model.
+    #[allow(clippy::type_complexity)]
+    let mut model_by_path: BTreeMap<
+        (String, i32, [u8; 3]),
+        (String, Vec<u32>, Vec<u8>, Option<String>),
+    > = BTreeMap::new();
+    let wanted = extracted
+        .iter()
+        .chain(riding.values().flatten())
+        .flat_map(|item| {
+            std::iter::once((
+                (item.prop.model.clone(), item.prop.skin, item.prop.color),
+                &item.model,
+            ))
+            .chain(item.skins.iter().enumerate().map(|(family, model)| {
+                (
+                    (item.prop.model.clone(), family as i32, item.prop.color),
+                    model,
+                )
+            }))
+        });
+    for (key, model) in wanted {
         if model_by_path.contains_key(&key) {
             continue;
         }
-        let (mesh, slots) = crate::output::mesh::from_source_model(&item.model, UNITS_PER_BLOCK)?;
+        let (mesh, slots) = crate::output::mesh::from_source_model(model, UNITS_PER_BLOCK)?;
         let slot_ids = slots
             .into_iter()
             .map(|name| {
@@ -291,7 +364,7 @@ pub fn from_conversion(
             .collect::<Vec<_>>();
         let bytes = crate::output::mesh::encode(&mesh)?;
         let id = bundle::content_id(&bytes);
-        model_by_path.insert(key, (id, slot_ids, bytes, item.model.surface_prop.clone()));
+        model_by_path.insert(key, (id, slot_ids, bytes, model.surface_prop.clone()));
     }
     crate::timing::mark("export: prop meshes");
     // Props go exactly where the map puts them. They used to be settled onto
@@ -305,7 +378,35 @@ pub fn from_conversion(
     let mut diagnostics = Vec::new();
     let mut cell_max = grid_max;
     let mut cell_min = anchor_cell;
+    let mut logic_props = Vec::new();
+    let logic_skins = |item: &crate::source::extract::ModProp| -> Vec<ModelKey> {
+        (0..item.skins.len())
+            .map(|family| {
+                let (id, slots, _, _) =
+                    &model_by_path[&(item.prop.model.clone(), family as i32, item.prop.color)];
+                (
+                    id.clone(),
+                    item.prop.model.clone(),
+                    slots.clone(),
+                    item.prop.color,
+                )
+            })
+            .collect()
+    };
     for item in extracted {
+        if let (Some(role), Some(entity)) = (item.logic, item.prop.entity) {
+            logic_props.push(LogicPropExport {
+                entity,
+                placed: LogicPlacement::World {
+                    source_ordinal: item.source_ordinal,
+                    source_model: item.prop.model.clone(),
+                },
+                skins: logic_skins(&item),
+                skin: item.prop.skin,
+                start_hidden: role.start_hidden,
+                collision: logic_collision.remove(&entity),
+            });
+        }
         let transformed_bounds = conversion.transform.transform_bounds(item.bounds);
         let root_cell = crate::output::bake::anchor(&conversion.grid, transformed_bounds, &taken)
             .with_context(|| {
@@ -336,7 +437,7 @@ pub fn from_conversion(
             cell_min[axis] = cell_min[axis].min(root_cell[axis]);
         }
         let (model_content_id, slots, _, _) =
-            &model_by_path[&(item.prop.model.clone(), item.prop.skin)];
+            &model_by_path[&(item.prop.model.clone(), item.prop.skin, item.prop.color)];
         let origin = conversion.transform.to_block_space(item.prop.origin);
         props.push(Prop {
             source_ordinal: item.source_ordinal,
@@ -347,6 +448,7 @@ pub fn from_conversion(
             rotation: crate::output::display::rotation(&item.prop, &conversion.transform),
             scale: item.prop.scale,
             material_ids: slots.clone(),
+            color: item.prop.color,
         });
     }
     if let Some(collision) = collision.as_mut() {
@@ -372,15 +474,25 @@ pub fn from_conversion(
             config,
             &conversion.transform,
             grid,
-            &riders,
+            &riders.iter().collect::<Vec<_>>(),
             &mut mover_collision,
         );
         let mut props = Vec::with_capacity(riders.len());
         for item in &riders {
             let (model_content_id, slots, _, _) =
-                &model_by_path[&(item.prop.model.clone(), item.prop.skin)];
+                &model_by_path[&(item.prop.model.clone(), item.prop.skin, item.prop.color)];
             let origin = conversion.transform.to_block_space(item.prop.origin);
             let bounds = conversion.transform.transform_bounds(item.bounds);
+            if let (Some(role), Some(prop_entity)) = (item.logic, item.prop.entity) {
+                logic_props.push(LogicPropExport {
+                    entity: prop_entity,
+                    placed: LogicPlacement::Mover(entity),
+                    skins: logic_skins(item),
+                    skin: item.prop.skin,
+                    start_hidden: role.start_hidden,
+                    collision: None,
+                });
+            }
             props.push((
                 MoverPropExport {
                     entity: item.prop.entity.context("mover prop without an entity")?,
@@ -391,6 +503,7 @@ pub fn from_conversion(
                     rotation: crate::output::display::rotation(&item.prop, &conversion.transform),
                     scale: item.prop.scale,
                     skin: item.prop.skin,
+                    color: item.prop.color,
                 },
                 bounds,
             ));
@@ -522,10 +635,11 @@ pub fn from_conversion(
     let models: Vec<ModelAsset> = model_by_path
         .into_iter()
         .map(
-            |((source_model, _), (_, materials, bytes, surface_prop))| ModelAsset {
+            |((source_model, _, color), (_, materials, bytes, surface_prop))| ModelAsset {
                 source_model,
                 bytes,
                 materials,
+                color,
                 surface_prop,
             },
         )
@@ -651,6 +765,7 @@ pub fn from_conversion(
         audio,
         logic,
         movers,
+        logic_props,
         diagnostics: metadata::Diagnostics::new(diagnostics)?,
     })
 }
@@ -789,34 +904,14 @@ fn add_prop_collision(
     config: &crate::config::Config,
     transform: &crate::voxel::transform::Transform,
     grid: &crate::voxel::grid::VoxelGrid,
-    extracted: &[crate::source::extract::ModProp],
+    extracted: &[&crate::source::extract::ModProp],
     collision: &mut crate::voxel::collision::CellCollision,
 ) -> (usize, usize) {
-    use crate::bsp::props::{SOLID_BBOX, SOLID_NONE};
-    use crate::voxel::collision::{SubCells, box_volume, shell_volume};
+    use crate::voxel::collision::SubCells;
     use rayon::prelude::*;
     let volumes: Vec<std::collections::HashMap<IVec3, SubCells>> = extracted
         .par_iter()
-        .filter_map(|item| {
-            let size = item.bounds.size();
-            if item.prop.solid == SOLID_NONE
-                || size.x.max(size.y).max(size.z) < config.props.collision_min_size
-            {
-                return None;
-            }
-            if item.prop.solid == SOLID_BBOX {
-                let bounds = transform.transform_bounds(item.bounds);
-                return Some(box_volume(bounds.min, bounds.max));
-            }
-            let triangles: Vec<[crate::geom::Vec3; 3]> = item
-                .model
-                .parts
-                .iter()
-                .flat_map(|part| &part.triangles)
-                .map(|tri| tri.map(|v| transform.to_block_space(item.prop.place(v))))
-                .collect();
-            Some(shell_volume(&triangles))
-        })
+        .filter_map(|item| prop_volume(config, transform, item))
         .collect();
     crate::timing::mark("  prop collision: shell volumes");
     let solid = volumes.len();
@@ -833,6 +928,57 @@ fn add_prop_collision(
     let added = crate::voxel::collision::add_props(collision, grid, cells);
     crate::timing::mark("  prop collision: add to table");
     (solid, added)
+}
+
+/// The solid volume of one prop, per cell, by its Source `solid`; `None`
+/// for a prop that is not solid or is below the collision size floor.
+fn prop_volume(
+    config: &crate::config::Config,
+    transform: &crate::voxel::transform::Transform,
+    item: &crate::source::extract::ModProp,
+) -> Option<std::collections::HashMap<IVec3, crate::voxel::collision::SubCells>> {
+    use crate::bsp::props::{SOLID_BBOX, SOLID_NONE};
+    use crate::voxel::collision::{box_volume, shell_volume};
+    let size = item.bounds.size();
+    if item.prop.solid == SOLID_NONE
+        || size.x.max(size.y).max(size.z) < config.props.collision_min_size
+    {
+        return None;
+    }
+    if item.prop.solid == SOLID_BBOX {
+        let bounds = transform.transform_bounds(item.bounds);
+        return Some(box_volume(bounds.min, bounds.max));
+    }
+    let triangles: Vec<[crate::geom::Vec3; 3]> = item
+        .model
+        .parts
+        .iter()
+        .flat_map(|part| &part.triangles)
+        .map(|tri| tri.map(|v| transform.to_block_space(item.prop.place(v))))
+        .collect();
+    Some(shell_volume(&triangles))
+}
+
+/// A removable prop's collision as a table of its own, per cell, by the
+/// rules [`crate::voxel::collision::add_props`] merges the others by: a cell
+/// whose map block is already a full cube gains nothing, and a cell with no
+/// block gets a carrier, which collides as nothing until the prop is added.
+fn separate_prop_collision(
+    collision: &mut crate::voxel::collision::CellCollision,
+    grid: &crate::voxel::grid::VoxelGrid,
+    volume: std::collections::HashMap<IVec3, crate::voxel::collision::SubCells>,
+) -> BTreeMap<IVec3, Vec<crate::voxel::collision::Box16>> {
+    let mut shapes = BTreeMap::new();
+    for (cell, bits) in volume {
+        if bits.is_empty() || (grid.is_solid(cell) && !collision.shapes.contains_key(&cell)) {
+            continue;
+        }
+        if !grid.is_solid(cell) {
+            collision.carriers.insert(cell);
+        }
+        shapes.insert(cell, bits.boxes());
+    }
+    shapes
 }
 
 /// A single face or prop use contributing texel demand to a material.
@@ -1353,6 +1499,7 @@ pub fn write_campaign(
                 content_id,
                 source_model: model.source_model,
                 materials: model.materials,
+                color: (model.color != [255; 3]).then_some(model.color),
                 surface_prop: model.surface_prop,
             });
         }
@@ -1367,6 +1514,7 @@ pub fn write_campaign(
                         model.content_id.clone(),
                         model.source_model.clone(),
                         model.materials.clone(),
+                        model.color.unwrap_or([255; 3]),
                     ),
                     index as u32,
                 )
@@ -1413,6 +1561,7 @@ pub fn write_campaign(
                     prop.model_content_id.clone(),
                     prop.source_model.clone(),
                     prop.material_ids.clone(),
+                    prop.color,
                 ))
                 .with_context(|| format!("prop {stable_id:x?} references a missing model"))?;
             blocks.push((prop.root_cell, root_id));
@@ -1497,6 +1646,7 @@ pub fn write_campaign(
                             prop.model_content_id.clone(),
                             prop.source_model.clone(),
                             prop.material_ids.clone(),
+                            prop.color,
                         ))
                         .with_context(|| {
                             format!(
@@ -1532,6 +1682,62 @@ pub fn write_campaign(
                 movers::MoverTable::new(records).encode(&map.map_id, model_refs.len() as u32)?,
             )?;
         }
+        let has_logic_props = !map.logic_props.is_empty();
+        if has_logic_props {
+            use crate::output::logic_props;
+            let mut records = Vec::with_capacity(map.logic_props.len());
+            for prop in map.logic_props {
+                let entity = u32::try_from(prop.entity).context("logic prop entity index")?;
+                let (stable_id, mover) = match &prop.placed {
+                    LogicPlacement::World {
+                        source_ordinal,
+                        source_model,
+                    } => {
+                        let id = stable_prop_id(&map.map_id, *source_ordinal, source_model)?;
+                        (
+                            Some(id.iter().map(|b| format!("{b:02x}")).collect::<String>()),
+                            None,
+                        )
+                    }
+                    LogicPlacement::Mover(mover) => (
+                        None,
+                        Some(u32::try_from(*mover).context("mover entity index")?),
+                    ),
+                };
+                let skins = prop
+                    .skins
+                    .iter()
+                    .map(|key| {
+                        model_ids.get(key).copied().with_context(|| {
+                            format!("logic prop entity {entity} references a missing model")
+                        })
+                    })
+                    .collect::<Result<Vec<u32>>>()?;
+                let collision = match prop.collision {
+                    Some(bytes) => {
+                        let path = logic_props::LogicProp::collision_path(&map.map_id, entity);
+                        archive.add(&path, bytes)?;
+                        Some(path)
+                    }
+                    None => None,
+                };
+                records.push(logic_props::LogicProp {
+                    entity,
+                    stable_id,
+                    mover,
+                    skins,
+                    skin: prop.skin,
+                    start_hidden: prop.start_hidden,
+                    collision,
+                });
+            }
+            records.sort_by_key(|record| record.entity);
+            archive.add(
+                format!("{prefix}/logic_props.json"),
+                logic_props::LogicPropTable::new(records)
+                    .encode(&map.map_id, model_refs.len() as u32)?,
+            )?;
+        }
         archive.add(
             format!("{prefix}/diagnostics.json"),
             map.diagnostics.encode()?,
@@ -1556,6 +1762,7 @@ pub fn write_campaign(
             audio: has_audio.then(|| format!("{prefix}/audio.json")),
             logic: has_logic.then(|| format!("{prefix}/logic.json")),
             movers: has_movers.then(|| format!("{prefix}/movers.json")),
+            logic_props: has_logic_props.then(|| format!("{prefix}/logic_props.json")),
             diagnostics: format!("{prefix}/diagnostics.json"),
         };
         archive.add(&metadata_path, meta.encode()?)?;
@@ -1710,6 +1917,7 @@ mod tests {
                 source_model: source_model.into(),
                 bytes: mesh_bytes,
                 materials: vec![0],
+                color: [255; 3],
                 surface_prop: None,
             }],
             pvs: None,
@@ -1718,6 +1926,7 @@ mod tests {
             audio: None,
             logic: None,
             movers: Vec::new(),
+            logic_props: Vec::new(),
             props: vec![Prop {
                 source_ordinal: 0,
                 source_model: source_model.into(),
@@ -1727,6 +1936,7 @@ mod tests {
                 rotation: [0.0, 0.0, 0.0, 1.0],
                 scale: 1.0,
                 material_ids: vec![0],
+                color: [255; 3],
             }],
             diagnostics: metadata::Diagnostics::new(Vec::new()).unwrap(),
         }
@@ -1930,6 +2140,7 @@ mod tests {
             source_model: "models/b.mdl".into(),
             bytes,
             materials: vec![1],
+            color: [255; 3],
             surface_prop: None,
         });
         map.props.push(Prop {
@@ -1941,6 +2152,7 @@ mod tests {
             rotation: [0.0, 0.0, 0.0, 1.0],
             scale: 1.0,
             material_ids: vec![1],
+            color: [255; 3],
         });
         let dir = temp_dir("material-bindings");
         let written = write_campaign(&dir, "fixture", vec![map]).unwrap();
@@ -1956,6 +2168,98 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// A tinted prop the logic changes: its model reference carries the tint,
+    /// and the logic prop table names its placement by stable ID, every skin
+    /// by reference and its own collision table.
+    #[test]
+    fn logic_props_and_tints_are_written() {
+        let bytes = triangle_mesh();
+        let content_id = bundle::content_id(&bytes);
+        let mut map = fixture_map("map", "models/a.mdl", bytes.clone());
+        map.cell_max[0] = 2;
+        let red = [200, 10, 10];
+        for materials in [vec![0], vec![1]] {
+            map.models.push(ModelAsset {
+                source_model: "models/b.mdl".into(),
+                bytes: bytes.clone(),
+                materials,
+                color: red,
+                surface_prop: None,
+            });
+        }
+        map.materials.push(map.materials[0].clone());
+        map.materials[1].source_material = "fixture/lit".into();
+        map.props.push(Prop {
+            source_ordinal: 1,
+            source_model: "models/b.mdl".into(),
+            model_content_id: content_id.clone(),
+            root_cell: [2, 0, 0],
+            translation: [1.5, 0.0, 0.5],
+            rotation: [0.0, 0.0, 0.0, 1.0],
+            scale: 1.0,
+            material_ids: vec![1],
+            color: red,
+        });
+        let mut shapes = BTreeMap::new();
+        shapes.insert([2, 0, 0], vec![[0, 0, 0, 16, 8, 16]]);
+        map.logic_props.push(LogicPropExport {
+            entity: 40,
+            placed: LogicPlacement::World {
+                source_ordinal: 1,
+                source_model: "models/b.mdl".into(),
+            },
+            skins: [vec![0], vec![1]]
+                .into_iter()
+                .map(|materials| {
+                    (
+                        content_id.clone(),
+                        "models/b.mdl".to_string(),
+                        materials,
+                        red,
+                    )
+                })
+                .collect(),
+            skin: 1,
+            start_hidden: true,
+            collision: Some(crate::output::cell_collision::encode(&shapes).unwrap()),
+        });
+        let dir = temp_dir("logic-props");
+        let written = write_campaign(&dir, "fixture", vec![map]).unwrap();
+        let mut zip = zip::ZipArchive::new(std::fs::File::open(&written.bundle).unwrap()).unwrap();
+        let mut read = |name: &str| {
+            let mut text = String::new();
+            std::io::Read::read_to_string(&mut zip.by_name(name).unwrap(), &mut text).unwrap();
+            text
+        };
+        let meta = read("maps/map.json");
+        assert!(
+            meta.contains(r#""materials":[0],"color":[200,10,10]"#),
+            "{meta}"
+        );
+        assert!(meta.contains(r#""logic_props":"maps/map/logic_props.json","diagnostics""#));
+        let id: String = stable_prop_id("map", 1, "models/b.mdl")
+            .unwrap()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        // References sort by content ID, model path, materials and tint: a.mdl
+        // first, then b.mdl's two skins.
+        assert_eq!(
+            read("maps/map/logic_props.json"),
+            format!(
+                "{{\"format\":\"src2mc-logic-props\",\"version\":1,\"props\":[{{\"entity\":40,\"stable_id\":\"{id}\",\"skins\":[1,2],\"skin\":1,\"start_hidden\":true,\"collision\":\"maps/map/logic_props/40.s2coll\"}}]}}\n"
+            )
+        );
+        assert!(
+            written
+                .manifest
+                .entries
+                .iter()
+                .any(|entry| entry.path == "maps/map/logic_props/40.s2coll")
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     fn rider(translation: [f64; 3]) -> MoverPropExport {
         MoverPropExport {
             entity: 573,
@@ -1966,6 +2270,7 @@ mod tests {
             rotation: [0.0, 0.0, 0.0, 1.0],
             scale: 1.0,
             skin: 1,
+            color: [255; 3],
         }
     }
 
@@ -2069,6 +2374,7 @@ mod tests {
             source_model: "models/b.mdl".into(),
             bytes,
             materials: vec![0],
+            color: [255; 3],
             surface_prop: None,
         });
         let mut grid = crate::voxel::grid::VoxelGrid::new();

@@ -22,6 +22,17 @@ public final class Variant {
 
     public static int integer(String value) { return (int) number(value); }
 
+    /**
+     * {@code UTIL_StringToColor32}, how {@code rendercolor} and the {@code Color} input are read:
+     * up to three integers, any missing zero, each kept to its low byte. {@code 0xRRGGBB}.
+     */
+    public static int color(String value) {
+        String[] parts = value == null ? new String[0] : value.trim().split("\\s+");
+        int color = 0;
+        for (int i = 0; i < 3; i++) color = color << 8 | (i < parts.length ? integer(parts[i]) & 0xFF : 0);
+        return color;
+    }
+
     /** {@code variant_t::Convert} to a boolean: a number other than zero, or "true". */
     public static boolean bool(String value) {
         if (value == null) return false;

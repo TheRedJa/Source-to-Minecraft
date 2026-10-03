@@ -99,6 +99,10 @@ pub struct MapMetadata {
     /// Optional mover table. Absent when the map has no moving entities.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub movers: Option<String>,
+    /// Optional table of the props the logic changes. Absent when there are
+    /// none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub logic_props: Option<String>,
     pub diagnostics: String,
 }
 
@@ -145,6 +149,9 @@ pub struct ModelReference {
     pub source_model: String,
     /// Map-local material IDs indexed by the mesh's material slots.
     pub materials: Vec<u32>,
+    /// RGB tint the model is drawn with; absent for white, which is none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<[u8; 3]>,
     /// The model's Source `$surfaceprop`, when it declares one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub surface_prop: Option<String>,
@@ -565,12 +572,14 @@ mod tests {
                     content_id: id('a'),
                     source_model: "a.mdl".into(),
                     materials: vec![0],
+                    color: None,
                     surface_prop: None,
                 },
                 ModelReference {
                     content_id: id('b'),
                     source_model: "b.mdl".into(),
                     materials: vec![0],
+                    color: None,
                     surface_prop: Some("metal".into()),
                 },
             ],
@@ -581,6 +590,7 @@ mod tests {
             audio: None,
             logic: None,
             movers: None,
+            logic_props: None,
             diagnostics: "maps/d1_01/diagnostics.json".into(),
         };
         let value: serde_json::Value =

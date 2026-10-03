@@ -23,7 +23,7 @@ import net.neoforged.neoforge.network.PacketDistributor;
 
 /**
  * The use key on a running map's buttons and doors, Source's {@code +use}: the look ray within
- * block reach is tested against every usable entity's brushes, or a prop door's model box, and a hit nothing nearer blocks
+ * block reach is tested against every usable entity's brushes, or a prop door's model, and a hit nothing nearer blocks
  * goes to the server instead of Minecraft's own use. A momentary button, or an INFRA button that
  * can be held, keeps receiving the use while the key stays down on it.
  */
@@ -75,7 +75,8 @@ public final class UseInput {
         for (MapPlacement placement : PlacementNetwork.clientIndex(dimension).view()) {
             long anchor = placement.anchorWorld().asLong();
             if (!ClientLogic.running(dimension, anchor) || !near(placement, eye, reach)) continue;
-            BundleMap map = generation.findMap(placement.campaignId(), placement.mapId()).orElse(null);
+            var located = generation.findLocatedMap(placement.campaignId(), placement.mapId()).orElse(null);
+            BundleMap map = located == null ? null : located.map();
             LogicTable logic = map == null ? null : map.logic();
             if (logic == null) continue;
             Map<Integer, MoverRegistry.Instance> movers = Carriers.movers(anchor);
@@ -97,7 +98,10 @@ public final class UseInput {
                     if (!crosses(volume.bounds(), fx, fy, fz, segment)) continue;
                     fraction = volume.clip(fx, fy, fz, segment.x, segment.y, segment.z);
                 } else {
-                    fraction = box.clip(fx, fy, fz, segment.x, segment.y, segment.z);
+                    // The door's own triangles: a button on its face sits inside its box.
+                    var mesh = dev.theredja.src2mc.client.render.PropRenderer.mesh(located.bundle(), map.models().get(box.model()).contentId());
+                    fraction = mesh.isPresent() ? box.clip(mesh.get(), fx, fy, fz, segment.x, segment.y, segment.z)
+                        : box.clip(fx, fy, fz, segment.x, segment.y, segment.z);
                 }
                 if (fraction >= 0 && fraction < bestFraction) {
                     bestFraction = fraction;

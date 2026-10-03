@@ -334,6 +334,95 @@ final class LogicRuntimeTest {
         assertEquals(hidden | notSolid, logic.findFirst("never", null, null, null) == null ? hidden | notSolid : -1);
     }
 
+    /**
+     * CDynamicProp: StartDisabled and Disable only hide it, DisableCollision only stops it
+     * colliding; Skin and Color are every model's; a removed entity takes its children with it
+     * (UpdateOnRemove), and a removed prop is neither drawn nor solid.
+     */
+    @Test void aDynamicPropShowsHidesSkinsTintsAndGoesWithItsParent() {
+        MapLogic logic = run(entity("prop_dynamic", "targetname", "fuse", "StartDisabled", "1", "skin", "2"),
+            entity("prop_dynamic", "targetname", "lamp", "rendercolor", "255 128 0"),
+            entity("func_brush", "targetname", "cart"),
+            entity("prop_dynamic", "targetname", "lever", "parentname", "cart"),
+            entity("prop_dynamic", "targetname", "knob", "parentname", "lever,attachment"));
+        int hidden = dev.theredja.src2mc.world.PropStates.HIDDEN, notSolid = dev.theredja.src2mc.world.PropStates.NOT_SOLID;
+        LogicEntity fuse = logic.findFirst("fuse", null, null, null), lamp = logic.findFirst("lamp", null, null, null);
+        LogicEntity lever = logic.findFirst("lever", null, null, null), knob = logic.findFirst("knob", null, null, null);
+        assertEquals(new dev.theredja.src2mc.world.PropStates.State(hidden, 2, 0xFFFFFF), fuse.propState());
+        assertEquals(new dev.theredja.src2mc.world.PropStates.State(0, 0, 0xFF8000), lamp.propState());
+        logic.queue(0, "fuse", null, "Enable", null, null, null);
+        logic.queue(0, "lamp", null, "Skin", "3", null, null);
+        logic.queue(0, "lamp", null, "Color", "10 20", null, null);
+        logic.queue(0, "lamp", null, "DisableCollision", null, null, null);
+        logic.queue(0, "cart", null, "Kill", null, null, null);
+        seconds(logic, 0.05);
+        assertEquals(new dev.theredja.src2mc.world.PropStates.State(0, 2, 0xFFFFFF), fuse.propState());
+        assertEquals(new dev.theredja.src2mc.world.PropStates.State(notSolid, 3, 0x0A1400), lamp.propState());
+        assertEquals(hidden | notSolid, lever.propState().flags(), "a child goes with its parent");
+        assertEquals(hidden | notSolid, knob.propState().flags(), "and a grandchild");
+        logic.queue(0, "lamp", null, "TurnOff", null, null, null);
+        seconds(logic, 0.05);
+        assertEquals(hidden | notSolid, lamp.propState().flags());
+
+        // What the inputs changed survives a save.
+        CompoundTag saved = logic.save();
+        MapLogic loaded = run(entity("prop_dynamic", "targetname", "fuse", "StartDisabled", "1", "skin", "2"),
+            entity("prop_dynamic", "targetname", "lamp", "rendercolor", "255 128 0"),
+            entity("func_brush", "targetname", "cart"),
+            entity("prop_dynamic", "targetname", "lever", "parentname", "cart"),
+            entity("prop_dynamic", "targetname", "knob", "parentname", "lever,attachment"));
+        assertTrue(loaded.load(saved));
+        assertEquals(new dev.theredja.src2mc.world.PropStates.State(hidden | notSolid, 3, 0x0A1400), loaded.entity(2).propState());
+        assertEquals(new dev.theredja.src2mc.world.PropStates.State(0, 2, 0xFFFFFF), loaded.entity(1).propState());
+    }
+
+    /**
+     * With {@code -Dsrc2mc.testBundle}: a button parented to a prop door (furnace's locked fence
+     * doors, {@code mahma_entry2b}) is aimed at before the door when looked at straight on. The
+     * door's box holds the button, so only its triangles may stand in its way.
+     */
+    @Test void aButtonOnADoorIsAimedAtBeforeTheDoor() throws Exception {
+        String path = System.getProperty("src2mc.testBundle");
+        Assumptions.assumeTrue(path != null, "set -Dsrc2mc.testBundle to aim at a real map's doors");
+        BundleManifest manifest = new BundleValidator().validate(Path.of(path));
+        try (java.util.zip.ZipFile zip = new java.util.zip.ZipFile(path)) {
+            for (BundleMap map : manifest.maps()) {
+                if (map.logic() == null) continue;
+                LogicTable table = map.logic();
+                for (int i = 0; i < table.entities().size(); i++) {
+                    LogicTable.Entity button = table.entities().get(i);
+                    String parent = button.value("parentname");
+                    if (button.volume() < 0 || parent == null) continue;
+                    for (int d = 0; d < table.entities().size(); d++) {
+                        LogicTable.Entity door = table.entities().get(d);
+                        if (!door.classname().equals("prop_door_rotating") || !parent.equalsIgnoreCase(door.targetname())) continue;
+                        PropUseBox box = PropUseBox.of(map, d);
+                        if (box == null) continue;
+                        var entry = zip.getEntry("meshes/" + map.models().get(box.model()).contentId() + ".s2mesh");
+                        var mesh = dev.theredja.src2mc.bundle.RuntimeMesh.decode(zip.getInputStream(entry).readAllBytes());
+                        LogicTable.Volume volume = table.volumes().get(button.volume());
+                        double[] b = volume.bounds();
+                        double cx = (b[0] + b[3]) / 2, cy = (b[1] + b[4]) / 2, cz = (b[2] + b[5]) / 2;
+                        int seen = 0, boxSeen = 0, rays = 0;
+                        for (int k = 0; k < 16; k++) {
+                            double angle = k * Math.PI / 8, dx = Math.cos(angle) * 2, dz = Math.sin(angle) * 2;
+                            double fx = cx - dx, fz = cz - dz;
+                            double hit = volume.clip(fx, cy, fz, dx, 0, dz);
+                            if (hit < 0) continue;
+                            rays++;
+                            double mesh_ = box.clip(mesh, fx, cy, fz, dx, 0, dz), whole = box.clip(fx, cy, fz, dx, 0, dz);
+                            if (mesh_ < 0 || hit <= mesh_) seen++;
+                            if (whole < 0 || hit <= whole) boxSeen++;
+                        }
+                        System.out.println(map.mapId() + ": " + button.targetname() + " on " + door.targetname() + ": button first on "
+                            + seen + " of " + rays + " rays (box alone: " + boxSeen + ")");
+                        assertTrue(seen > 0, button.targetname() + " can be aimed at past " + door.targetname());
+                    }
+                }
+            }
+        }
+    }
+
     /** With {@code -Dsrc2mc.testBundle}: spawns each map, presses every button it has, and runs it for two minutes. */
     @Test void realMapsRun() throws Exception {
         String path = System.getProperty("src2mc.testBundle");
@@ -371,6 +460,19 @@ final class LogicRuntimeTest {
                 }
             }
             System.out.println(map.mapId() + ": started " + started2 + " trains and rotators");
+            // Every logic prop names a model in each skin, and its state is one the client can draw.
+            if (map.logicProps() != null) {
+                int changed = 0;
+                for (var prop : map.logicProps().props()) {
+                    LogicEntity entity = logic.entity(prop.entity());
+                    assertTrue(entity != null, "logic prop entity " + prop.entity());
+                    var state = entity.propState();
+                    assertTrue(prop.model(state.skin()) < map.models().size());
+                    if (!state.equals(dev.theredja.src2mc.world.PropStates.initial(map, prop)) && changed++ < 3)
+                        System.out.println("  " + entity.describe() + ": " + dev.theredja.src2mc.world.PropStates.initial(map, prop) + " -> " + state);
+                }
+                System.out.println(map.mapId() + ": " + map.logicProps().props().size() + " logic props, " + changed + " changed by the logic");
+            }
             // Every scene, started once: each speak event must reach the clients as a voice line.
             int expected = 0, voices = 0;
             for (int i = 0; i < map.logic().entities().size(); i++) {
