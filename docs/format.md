@@ -170,6 +170,7 @@ fields in order:
 | `audio` | optional canonical `maps/<map-id>/audio.json` path (section 15) |
 | `logic` | optional canonical `maps/<map-id>/logic.json` path (section 16) |
 | `movers` | optional canonical `maps/<map-id>/movers.json` path (section 17); absent when the map has no movers |
+| `logic_props` | optional canonical `maps/<map-id>/logic_props.json` path (section 18); absent when the logic changes no prop |
 | `diagnostics` | canonical `maps/<map-id>/diagnostics.json` path |
 
 Surface-table material IDs index `materials` directly. This array therefore
@@ -195,14 +196,23 @@ payloads. `atlas.json` records the fixed 4096 page size, mip levels 0 through 4,
 16-pixel base gutter, every page mip and its dimensions, and every logical
 texture's lossless source-to-page rectangles. A model reference
 similarly contains its content ID, diagnostic normalized Source model path,
-a `materials` array mapping mesh material slots to map-local material IDs, and
-an optional lowercase `surface_prop`, the model's `$surfaceprop`.
+a `materials` array mapping mesh material slots to map-local material IDs, an
+optional `color`, and an optional lowercase `surface_prop`, the model's
+`$surfaceprop`. `color` is the `[r, g, b]` tint, each 0 to 255, the model is
+drawn with: every texel's colour is multiplied by it, as Source's colour
+modulation does. It is absent for white, which is no tint, and never written
+as `[255, 255, 255]`. A `prop_static` takes it from the static prop lump's
+diffuse modulation (Hammer's `rendercolor`; read for lump versions 7 to 9,
+whose record keeps it at byte 64; other versions are drawn white), an entity
+prop from its `rendercolor` keyvalue, read as `UTIL_StringToColor32` reads it:
+up to three integers, missing ones 0, each kept to its low byte.
 Model bytes live at `meshes/<content-id>.s2mesh`.
 
 Multiple model references may name the same content ID when their Source-model
-provenance or map-local material-slot arrays differ. References are uniquely
-sorted by `(content_id, source_model, materials)`; prop placement records select
-the reference index. The mesh payload still occurs only once. This is how a
+provenance, map-local material-slot arrays or tints differ. References are
+uniquely sorted by `(content_id, source_model, materials, color)`, a reference
+without `color` before every one with it and colours by red, green, then blue;
+prop placement records select the reference index. The mesh payload still occurs only once. This is how a
 Source skin family is carried: props of one model wearing different skins share
 the mesh and each select a reference whose `materials` are that skin's. A skin
 the model does not have is exported as the default skin, as Source draws it.
@@ -314,6 +324,8 @@ residency budgets:
 | cells per mover axis (`size`) | 4,096 |
 | blocks per mover, surface and carrier together | 1,000,000 |
 | props per mover | 65,536 |
+| logic props per map | 16,384 |
+| skin families per logic prop | 1,024 |
 | uncompressed entry | 2 GiB |
 | uncompressed bundle payload | 64 GiB |
 | ZIP expansion ratio | 200:1 after a 1 MiB small-entry allowance |
@@ -691,3 +703,59 @@ map's models whether or not anything in `props.s2props` uses them.
 
 Limits are in section 10. Each mover adds at most two bundle entries, which
 count against the ZIP entry limit.
+
+## 18. Logic prop table
+
+`maps/<map-id>/logic_props.json` optionally records the props the map's logic
+changes, so the mod can draw and collide each of them on its own while every
+other prop stays merged. Map metadata references it through the optional
+`logic_props` field, which sits between `movers` and `diagnostics`. It is
+absent when there are none.
+
+A *logic prop* is an entity of the lump with a `.mdl` model that some output
+of the map sends `Skin`, `Color`, `Enable`, `Disable`, `TurnOn`, `TurnOff`,
+`Kill`, `KillHierarchy`, `DisableCollision` or `EnableCollision`, or that is a
+`prop_dynamic`, `prop_dynamic_override` or `prop_dynamic_ornament` with a
+non-zero `StartDisabled`. Targets resolve as `CEventQueue::ServiceEvents`
+resolves them, ignoring ASCII case: every entity whose `targetname` matches, a
+trailing `*` matching every name it begins; failing any, every entity of that
+classname. Targets starting with `!` depend on who fires and are not followed.
+Removing an entity removes its children (`UpdateOnRemove`), so every entity
+whose `parentname` chain leads to a `Kill` or `KillHierarchy` target counts as
+one too. A logic prop is still a placed prop in `props.s2props`, or a riding
+prop of its mover in `movers.json`; this table adds to it.
+
+The payload is canonical JSON with `format` `src2mc-logic-props`, `version` 1,
+and `props`, an array in strictly ascending entity order. Each record has
+these fields in order:
+
+| Field | Meaning |
+| --- | --- |
+| `entity` | the prop's index in the BSP entity lump |
+| `stable_id` | 64 lowercase hex digits, the `props.s2props` record of a placed prop; absent for a riding prop |
+| `mover` | the entity of the mover whose `props` hold it; absent for a placed prop |
+| `skins` | non-empty array of model-reference indices, one per skin family of the model, family 0 first; each reference wears that family's materials and the prop's tint |
+| `skin` | the skin the map spawns it with, as written; a skin the model lacks is drawn as family 0 |
+| `start_hidden` | present, and `true`, when the prop spawns hidden (`StartDisabled` on a dynamic prop) |
+| `collision` | optional `maps/<map-id>/logic_props/<entity>.s2coll`; only for a placed prop |
+
+Exactly one of `stable_id` and `mover` is present. A prop that some input
+removes or switches the collision of (`Kill`, `KillHierarchy`,
+`DisableCollision`, `EnableCollision`, or a removed ancestor) and is solid by
+the rules of section 14 keeps its volume out of the map's collision table: its
+cells are the section 14 S2COLL format of its own, map-local, and the mod adds
+each cell's shape to the cell's own while the prop is solid. Its cells follow
+the same rules as the merged ones: a cell whose map block is a full cube needs
+nothing, and a cell with no map block gets an `src2mc:carrier`, which collides
+as nothing while the prop is gone. A riding prop's collision stays merged in
+its mover's.
+
+The logic sets each logic prop's state, which the server sends its clients:
+hidden (`EF_NODRAW`, or removed), not solid (`FSOLID_NOT_SOLID`, or removed),
+the skin, and the tint. `Enable`, `Disable`, `TurnOn` and `TurnOff` only show
+and hide a dynamic prop, which stays solid, as `CDynamicProp` does; `Skin`
+reads its parameter as `atoi`, `Color` as `UTIL_StringToColor32`. A prop with
+no state yet is as the map spawns it.
+
+Each logic prop adds at most one bundle entry, which counts against the ZIP
+entry limit.

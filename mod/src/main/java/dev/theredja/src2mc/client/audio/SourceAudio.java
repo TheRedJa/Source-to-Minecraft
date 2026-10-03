@@ -60,6 +60,7 @@ public final class SourceAudio {
                 dev.theredja.src2mc.client.logic.ClientLogic.clear();
                 dev.theredja.src2mc.client.logic.CaptionOverlay.clear();
                 dev.theredja.src2mc.world.MoverRegistry.clear(true);
+                dev.theredja.src2mc.world.PropStates.clear(true);
                 dev.theredja.src2mc.client.render.MoverRenderer.clear();
             }
             return;

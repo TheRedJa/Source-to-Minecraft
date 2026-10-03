@@ -96,6 +96,7 @@ final class BundleSchemaValidator {
         if (map.has("audio")) expected.add("audio");
         if (map.has("logic")) expected.add("logic");
         if (map.has("movers")) expected.add("movers");
+        if (map.has("logic_props")) expected.add("logic_props");
         expected.add("diagnostics");
         keys(map, expected.toArray(String[]::new));
         format(map, "src2mc-map", path);
@@ -121,8 +122,10 @@ final class BundleSchemaValidator {
         BundleModel prior = null;
         for (JsonElement value : models) {
             JsonObject model = object(value, "model");
-            if (model.has("surface_prop")) keys(model, "content_id", "source_model", "materials", "surface_prop");
-            else keys(model, "content_id", "source_model", "materials");
+            List<String> modelKeys = new ArrayList<>(List.of("content_id", "source_model", "materials"));
+            if (model.has("color")) modelKeys.add("color");
+            if (model.has("surface_prop")) modelKeys.add("surface_prop");
+            keys(model, modelKeys.toArray(String[]::new));
             String contentId = digest(string(model, "content_id"), "model content ID");
             String source = string(model, "source_model");
             if (source.isEmpty()) fail(BundleErrorCode.INVALID_SCHEMA, "empty source model");
@@ -131,7 +134,14 @@ final class BundleSchemaValidator {
             int[] ids = new int[slots.size()];
             for (int i = 0; i < ids.length; i++) { ids[i] = uintIndex(slots.get(i), "material ID"); if (ids[i] >= materials.size()) fail(BundleErrorCode.INVALID_REFERENCE, "model material ID out of range"); }
             String surfaceProp = model.has("surface_prop") ? string(model, "surface_prop") : null;
-            BundleModel current = new BundleModel(contentId, source, ids, surfaceProp);
+            int color = BundleModel.WHITE;
+            if (model.has("color")) {
+                int[] rgb = vector3i(model.get("color"), "model color");
+                for (int channel : rgb) if (channel < 0 || channel > 255) fail(BundleErrorCode.INVALID_SCHEMA, "model color channel out of range");
+                color = rgb[0] << 16 | rgb[1] << 8 | rgb[2];
+                if (color == BundleModel.WHITE) fail(BundleErrorCode.INVALID_SCHEMA, "a white model color must be left out");
+            }
+            BundleModel current = new BundleModel(contentId, source, ids, surfaceProp, null, color);
             if (prior != null && compareModels(prior, current) >= 0) fail(BundleErrorCode.DUPLICATE_IDENTITY, "model references are not uniquely sorted");
             prior = current;
             modelRefs.add(current);
@@ -185,6 +195,13 @@ final class BundleSchemaValidator {
         referenced.addAll(List.of(surfaces, props, diagnostics));
         SurfaceTable surfaceTable = validateFaces(zip, required(entries, surfaces), materials.size());
         List<BundleProp> propRecords = validateProps(zip, required(entries, props), modelRefs.size());
+        LogicPropTable logicProps = null;
+        if (map.has("logic_props")) {
+            String logicPropsPath = exactPath(map, "logic_props", prefix + "logic_props.json");
+            referenced.add(logicPropsPath);
+            logicProps = validateLogicProps(zip, entries, json(zip, required(entries, logicPropsPath), logicPropsPath), prefix,
+                modelRefs.size(), logic, movers, propRecords, referenced);
+        }
         validateDiagnostics(json(zip, required(entries, diagnostics), diagnostics));
 
         // A map's meshes are the bulk of its validation and each is walked on
@@ -206,7 +223,70 @@ final class BundleSchemaValidator {
         }
         long mapHeight = (long) max[1] - min[1] + 1;
         return new BundleMap(mapId, sourceName, min, max, anchor, loadedMaterials, modelRefs, propRecords, mapHeight > 384,
-            surfaceTable, modelRefs.stream().map(BundleModel::contentId).collect(java.util.stream.Collectors.toUnmodifiableSet()), atlas, pvs, occlusion, collision, audio, logic, movers);
+            surfaceTable, modelRefs.stream().map(BundleModel::contentId).collect(java.util.stream.Collectors.toUnmodifiableSet()), atlas, pvs, occlusion, collision, audio, logic, movers,
+            logicProps);
+    }
+
+    /** Parses and validates the optional logic prop table (format.md section 18). */
+    private static LogicPropTable validateLogicProps(ZipFile zip, Map<String, ZipEntry> entries, JsonObject root, String prefix,
+                                                     int modelCount, LogicTable logic, MoverTable movers, List<BundleProp> placed,
+                                                     Set<String> referenced) throws IOException {
+        keys(root, "format", "version", "props");
+        format(root, "src2mc-logic-props", "logic_props.json");
+        JsonArray array = array(root, "props");
+        limit(array.size(), BundleLimits.MAX_LOGIC_PROPS_PER_MAP, "logic prop count");
+        Set<String> placedIds = new java.util.HashSet<>();
+        for (BundleProp prop : placed) placedIds.add(prop.stableId());
+        List<LogicPropTable.Prop> props = new ArrayList<>(array.size());
+        int priorEntity = -1;
+        for (JsonElement element : array) {
+            JsonObject prop = object(element, "logic prop");
+            List<String> expected = new ArrayList<>(List.of("entity"));
+            if (prop.has("stable_id")) expected.add("stable_id");
+            if (prop.has("mover")) expected.add("mover");
+            expected.addAll(List.of("skins", "skin"));
+            if (prop.has("start_hidden")) expected.add("start_hidden");
+            if (prop.has("collision")) expected.add("collision");
+            keys(prop, expected.toArray(String[]::new));
+            int entity = uintIndex(prop.get("entity"), "logic prop entity");
+            if (entity <= priorEntity) fail(BundleErrorCode.DUPLICATE_IDENTITY, "logic props are not in strictly ascending entity order");
+            priorEntity = entity;
+            if (logic != null && entity >= logic.entities().size()) fail(BundleErrorCode.INVALID_REFERENCE, "logic prop entity out of range");
+            if (prop.has("stable_id") == prop.has("mover")) fail(BundleErrorCode.INVALID_SCHEMA, "a logic prop is either placed or riding a mover");
+            String stableId = null;
+            int mover = -1;
+            if (prop.has("stable_id")) {
+                stableId = digest(string(prop, "stable_id"), "logic prop stable ID");
+                if (!placedIds.contains(stableId)) fail(BundleErrorCode.INVALID_REFERENCE, "logic prop names no placed prop");
+            } else {
+                mover = uintIndex(prop.get("mover"), "logic prop mover");
+                int index = movers == null ? -1 : movers.indexOfEntity(mover);
+                if (index < 0 || movers.movers().get(index).props().stream().noneMatch(rider -> rider.entity() == entity))
+                    fail(BundleErrorCode.INVALID_REFERENCE, "logic prop does not ride the mover it names");
+            }
+            JsonArray skinArray = array(prop, "skins");
+            if (skinArray.isEmpty()) fail(BundleErrorCode.INVALID_SCHEMA, "a logic prop has at least one skin");
+            limit(skinArray.size(), BundleLimits.MAX_LOGIC_PROP_SKINS, "logic prop skin count");
+            int[] skins = new int[skinArray.size()];
+            for (int i = 0; i < skins.length; i++) skins[i] = index(skinArray.get(i), modelCount, "logic prop skin model");
+            int skin = integer(prop.get("skin"), "logic prop skin");
+            boolean startHidden = false;
+            if (prop.has("start_hidden")) {
+                JsonElement value = prop.get("start_hidden");
+                if (!value.isJsonPrimitive() || !value.getAsJsonPrimitive().isBoolean() || !value.getAsBoolean())
+                    fail(BundleErrorCode.INVALID_SCHEMA, "start_hidden is present only as true");
+                startHidden = true;
+            }
+            CollisionTable collision = null;
+            if (prop.has("collision")) {
+                if (mover >= 0) fail(BundleErrorCode.INVALID_SCHEMA, "a riding prop's collision is its mover's");
+                String path = exactPath(prop, "collision", prefix + "logic_props/" + entity + ".s2coll");
+                referenced.add(path);
+                collision = validateCollision(zip, required(entries, path));
+            }
+            props.add(new LogicPropTable.Prop(entity, stableId, mover, skins, skin, startHidden, collision));
+        }
+        return new LogicPropTable(props);
     }
 
     /** Parses and validates the optional mover table (format.md section 17). */
@@ -960,7 +1040,9 @@ final class BundleSchemaValidator {
     private static long u32(byte[]b,int o){return Integer.toUnsignedLong(ByteBuffer.wrap(b,o,4).order(ByteOrder.LITTLE_ENDIAN).getInt());}
     private static void fail(BundleErrorCode code,String message)throws BundleValidationException{throw new BundleValidationException(code,message);}
 
-    private static int compareModels(BundleModel left, BundleModel right) { int c=left.contentId().compareTo(right.contentId());if(c==0)c=left.sourceModel().compareTo(right.sourceModel());if(c==0){int[] a=left.materialIds(),b=right.materialIds();for(int i=0;i<Math.min(a.length,b.length);i++){c=Integer.compareUnsigned(a[i],b[i]);if(c!=0)return c;}c=Integer.compare(a.length,b.length);}return c; }
+    private static int compareModels(BundleModel left, BundleModel right) { int c=left.contentId().compareTo(right.contentId());if(c==0)c=left.sourceModel().compareTo(right.sourceModel());if(c==0){int[] a=left.materialIds(),b=right.materialIds();for(int i=0;i<Math.min(a.length,b.length);i++){c=Integer.compareUnsigned(a[i],b[i]);if(c!=0)return c;}c=Integer.compare(a.length,b.length);}if(c==0)c=Integer.compare(colorOrder(left),colorOrder(right));return c; }
+    /** A model without a tint sorts before every tinted one, as the converter's absent field does. */
+    private static int colorOrder(BundleModel model) { return model.color() == BundleModel.WHITE ? -1 : model.color(); }
     private record FaceOrder(int local,int provenance,long primary,long secondary) implements Comparable<FaceOrder>{public int compareTo(FaceOrder o){int c=Integer.compare(local,o.local);if(c==0)c=Integer.compare(provenance,o.provenance);if(c==0)c=Long.compareUnsigned(primary,o.primary);if(c==0)c=Long.compareUnsigned(secondary,o.secondary);return c;}}
     private record DiagnosticOrder(int severity,String code,String message,String context) implements Comparable<DiagnosticOrder>{public int compareTo(DiagnosticOrder o){int c=Integer.compare(severity,o.severity);if(c==0)c=code.compareTo(o.code);if(c==0)c=message.compareTo(o.message);if(c==0)c=context.compareTo(o.context);return c;}}
 

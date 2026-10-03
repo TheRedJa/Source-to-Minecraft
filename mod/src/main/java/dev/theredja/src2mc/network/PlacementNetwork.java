@@ -20,7 +20,8 @@ public final class PlacementNetwork {
         // "3": map logic's sound sync and use payloads.
         // "4": mover sync (which Sable sub-level carries which map's mover).
         // "5": mover state (shown, solid).
-        var registrar = event.registrar("5");
+        // "6": logic prop state (shown, solid, skin, tint).
+        var registrar = event.registrar("6");
         registrar.playToClient(PlacementSyncPayload.TYPE, PlacementSyncPayload.STREAM_CODEC,
             (payload, context) -> {
                 PlacementIndex index = new PlacementIndex();
@@ -39,6 +40,7 @@ public final class PlacementNetwork {
             (payload, context) -> dev.theredja.src2mc.client.ClientLightRefresh.onSurfaceBlocksChanged(payload.dimension(), payload.sections()));
         dev.theredja.src2mc.logic.LogicNetwork.register(registrar);
         dev.theredja.src2mc.logic.MoverNetwork.register(registrar);
+        dev.theredja.src2mc.logic.PropSync.register(registrar);
     }
 
     public static PlacementIndex clientIndex(ResourceLocation dimension) { return CLIENT.getOrDefault(dimension, new PlacementIndex()); }

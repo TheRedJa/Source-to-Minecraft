@@ -5,6 +5,7 @@
 
 pub mod displacement;
 pub mod entities;
+pub mod logic_props;
 pub mod lumps;
 pub mod props;
 pub mod pvs;

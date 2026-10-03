@@ -125,6 +125,13 @@ public final class MapLogic {
         dirty = true;
     }
 
+    /** Every entity whose {@code parentname} names {@code parent}, looked up while the parent still stands. */
+    List<LogicEntity> childrenOf(LogicEntity parent) {
+        List<LogicEntity> children = new ArrayList<>();
+        for (LogicEntity entity : entities) if (entity != null && entity != parent && !entity.removed && entity.parent() == parent) children.add(entity);
+        return children;
+    }
+
     void rename(LogicEntity entity, String name) {
         List<LogicEntity> named = byName.get(entity.name().toLowerCase(Locale.ROOT));
         if (named != null) named.remove(entity);

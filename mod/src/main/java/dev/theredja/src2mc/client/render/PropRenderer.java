@@ -282,6 +282,19 @@ public final class PropRenderer {
         return seen.size();
     }
 
+    /** A model's mesh when it is loaded; asking starts loading it. For aiming at a prop. */
+    public static java.util.Optional<RuntimeMesh> mesh(BundleManifest bundle, String contentId) {
+        return RUNTIME_MESHES.request(Src2mc.bundles().active().sequence(), bundle, contentId);
+    }
+
+    /** Whether a placed prop's root block stands where the map put it, as last checked. */
+    static boolean rootActive(MapPlacement placement, String stableId) { return ROOTS.getOrDefault(new PropKey(placement, stableId), false); }
+
+    /** {@link #tessellateProp} for another renderer: one prop's triangles in map-local batches. */
+    static Map<BatchKey, List<PropTessellator.Triangle>> tessellate(BundleManifest bundle, BundleMap map, MapPlacement placement, BundleProp prop, RuntimeMesh mesh) {
+        return tessellateProp(new PropSource(bundle, map, placement, prop), mesh);
+    }
+
     private static RootStatus rootStatus(ClientLevel clientLevel, MapPlacement placement, BundleMap map, BundleProp prop) {
         int[] root = prop.rootCell();
         BlockPos position = placement.translation().offset(root[0], root[1], root[2]);
@@ -322,6 +335,8 @@ public final class PropRenderer {
             for (BundleProp prop : map.props()) {
                 PropKey key = new PropKey(placement, prop.stableId());
                 if (!ROOTS.getOrDefault(key, false)) continue;
+                // The logic changes these; LogicPropRenderer draws them one by one.
+                if (map.logicProps() != null && map.logicProps().byStableId(prop.stableId()) != null) continue;
                 double[] translation = prop.translation();
                 int sx = SectionPos.blockToSectionCoord(placement.translation().getX() + translation[0]);
                 int sz = SectionPos.blockToSectionCoord(placement.translation().getZ() + translation[2]);
@@ -497,6 +512,7 @@ public final class PropRenderer {
         Map<Long, Integer> lightCache = new HashMap<>();
         Map<PageClass, PackedVertices> result = new HashMap<>();
         for (Contributor contributor : in.contributors) {
+            int tint = contributor.source.map().models().get(contributor.source.prop().modelIndex()).color();
             for (var batch : tessellateProp(contributor.source, contributor.mesh).entrySet()) {
                 if (!batch.getKey().section().equals(at)) continue;
                 PackedVertices out = result.computeIfAbsent(new PageClass(batch.getKey().page(), batch.getKey().renderClass()), ignored -> new PackedVertices());
@@ -504,7 +520,7 @@ public final class PropRenderer {
                     for (PropTessellator.Vertex vertex : List.of(triangle.a(), triangle.b(), triangle.c())) {
                         int light = sampleVertexLight(in, section.placement(), vertex, lightCache);
                         out.add((float) (vertex.x() - baseX), (float) (vertex.y() - baseY), (float) (vertex.z() - baseZ),
-                            (float) vertex.u(), (float) vertex.v(), (float) vertex.nx(), (float) vertex.ny(), (float) vertex.nz(), light);
+                            (float) vertex.u(), (float) vertex.v(), (float) vertex.nx(), (float) vertex.ny(), (float) vertex.nz(), light, tint);
                     }
                 }
             }
@@ -809,8 +825,8 @@ public final class PropRenderer {
                                 SurfaceOcclusion occlusion, boolean smooth) {}
     private record SectionFlight(SectionInput input, int version, java.util.concurrent.CompletableFuture<Map<PageClass, PackedVertices>> result) {}
     private record PropSource(BundleManifest bundle, BundleMap map, MapPlacement placement, BundleProp prop) {}
-    private record Section(int x, int y, int z) {}
-    private record BatchKey(Section section, int page, BundleMaterial.RenderClass renderClass) {}
+    record Section(int x, int y, int z) {}
+    record BatchKey(Section section, int page, BundleMaterial.RenderClass renderClass) {}
     private record AggregateKey(MapPlacement placement, int sectionX, int sectionY, int sectionZ, int page, BundleMaterial.RenderClass renderClass) {}
     private record BuildCandidate(PropSource source, double distanceSquared) {}
     private enum RootStatus { ACTIVE, UNLOADED, MISSING, SCHEMA, CAMPAIGN, MAP, IDENTITY }

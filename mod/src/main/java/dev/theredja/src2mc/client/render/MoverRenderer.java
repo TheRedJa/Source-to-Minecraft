@@ -70,6 +70,8 @@ public final class MoverRenderer {
         final boolean shaders;
         final boolean complete;
         final double[] bounds;
+        /** The logic prop states it was built with; see {@link #propStates}. */
+        final List<dev.theredja.src2mc.world.PropStates.State> propStates;
         /** The light at the mover's middle, and where the mover was, when it was last lit. */
         int light = Integer.MIN_VALUE;
         Vector3d litPosition;
@@ -77,9 +79,9 @@ public final class MoverRenderer {
         long litFrame = Long.MIN_VALUE;
         boolean litPerVertex;
         Built(MoverTable.Mover mover, BundleManifest bundle, AtlasIndex atlas, Map<PageClass, PackedVertices> meshes, boolean shaders,
-              boolean complete, double[] bounds) {
+              boolean complete, double[] bounds, List<dev.theredja.src2mc.world.PropStates.State> propStates) {
             this.mover = mover; this.bundle = bundle; this.atlas = atlas; this.meshes = meshes; this.shaders = shaders;
-            this.complete = complete; this.bounds = bounds;
+            this.complete = complete; this.bounds = bounds; this.propStates = propStates;
         }
         @Override public void close() { buffers.values().forEach(VertexBuffer::close); buffers.clear(); }
     }
@@ -159,10 +161,12 @@ public final class MoverRenderer {
             MoverRegistry.Resolved resolved = MoverRegistry.resolve(level, instance.subLevel());
             if (resolved == null) continue;
             Built built = BUILT.get(instance.subLevel());
-            if (built == null || built.mover != resolved.mover() || built.shaders != shaders || !built.complete) {
+            List<dev.theredja.src2mc.world.PropStates.State> propStates = propStates(level, resolved);
+            if (built == null || built.mover != resolved.mover() || built.shaders != shaders || !built.complete
+                || !built.propStates.equals(propStates)) {
                 var located = generation.findLocatedMap(instance.campaignId(), instance.mapId()).orElse(null);
                 if (located == null) continue;
-                Built fresh = build(generation, located.bundle(), resolved, shaders);
+                Built fresh = build(generation, located.bundle(), resolved, shaders, level);
                 if (built != null) built.close();
                 BUILT.put(instance.subLevel(), fresh);
                 built = fresh;
@@ -227,7 +231,26 @@ public final class MoverRenderer {
         return LevelRenderer.getLightColor(level, BlockPos.containing(middle));
     }
 
-    private static Built build(BundleGeneration generation, BundleManifest bundle, MoverRegistry.Resolved resolved, boolean shaders) {
+    /**
+     * The state of every logic prop riding the mover (format.md section 18), in the order of its
+     * props: a {@code Skin}, {@code Color} or {@code Disable} on one builds the mover again.
+     */
+    private static List<dev.theredja.src2mc.world.PropStates.State> propStates(ClientLevel level, MoverRegistry.Resolved resolved) {
+        BundleMap map = resolved.map();
+        if (map.logicProps() == null) return List.of();
+        var key = dev.theredja.src2mc.world.PropStates.key(level, resolved.placement());
+        List<dev.theredja.src2mc.world.PropStates.State> states = new ArrayList<>();
+        for (MoverTable.Prop moverProp : resolved.mover().props()) {
+            var logicProp = map.logicProps().byEntity(moverProp.entity());
+            if (logicProp != null && logicProp.mover() == resolved.mover().entity())
+                states.add(dev.theredja.src2mc.world.PropStates.effective(true, key, map, logicProp));
+        }
+        return states;
+    }
+
+    private static Built build(BundleGeneration generation, BundleManifest bundle, MoverRegistry.Resolved resolved, boolean shaders,
+                               ClientLevel level) {
+        List<dev.theredja.src2mc.world.PropStates.State> propStates = propStates(level, resolved);
         int light = 0;
         BundleMap map = resolved.map();
         MoverTable.Mover mover = resolved.mover();
@@ -253,12 +276,23 @@ public final class MoverRenderer {
             }
         }
         boolean complete = true;
+        var stateKey = dev.theredja.src2mc.world.PropStates.key(level, resolved.placement());
         for (MoverTable.Prop moverProp : mover.props()) {
-            BundleModel model = map.models().get(moverProp.model());
+            int modelIndex = moverProp.model();
+            BundleModel model = map.models().get(modelIndex);
+            int tint = model.color();
+            var logicProp = map.logicProps() == null ? null : map.logicProps().byEntity(moverProp.entity());
+            if (logicProp != null && logicProp.mover() == mover.entity()) {
+                var state = dev.theredja.src2mc.world.PropStates.effective(true, stateKey, map, logicProp);
+                if (state.hidden()) continue;
+                modelIndex = logicProp.model(state.skin());
+                model = map.models().get(modelIndex);
+                tint = state.color();
+            }
             RuntimeMesh mesh = PropRenderer.runtimeMeshes().request(generation.sequence(), bundle, model.contentId()).orElse(null);
             // Still loading: built without it now, and again once it is there.
             if (mesh == null) { complete = false; continue; }
-            BundleProp prop = new BundleProp("", moverProp.model(), new int[3], moverProp.translation(), moverProp.rotation(), moverProp.scale());
+            BundleProp prop = new BundleProp("", modelIndex, new int[3], moverProp.translation(), moverProp.rotation(), moverProp.scale());
             for (RuntimeMesh.Submesh submesh : mesh.submeshes()) {
                 if (submesh.materialSlot() < 0 || submesh.materialSlot() >= model.materialSlotCount()) continue;
                 int materialId = model.materialIds()[submesh.materialSlot()];
@@ -273,7 +307,7 @@ public final class MoverRenderer {
                     PackedVertices out = meshes.computeIfAbsent(new PageClass(triangle.page(), material.renderClass()), ignored -> new PackedVertices());
                     for (PropTessellator.Vertex vertex : List.of(triangle.a(), triangle.b(), triangle.c())) {
                         out.add((float) vertex.x(), (float) vertex.y(), (float) vertex.z(), (float) vertex.u(), (float) vertex.v(),
-                            (float) vertex.nx(), (float) vertex.ny(), (float) vertex.nz(), light);
+                            (float) vertex.nx(), (float) vertex.ny(), (float) vertex.nz(), light, tint);
                     }
                 }
             }
@@ -289,7 +323,7 @@ public final class MoverRenderer {
             else for (int axis = 0; axis < 3; axis++) { bounds[axis] = Math.min(bounds[axis], b[axis]); bounds[axis + 3] = Math.max(bounds[axis + 3], b[axis + 3]); }
         }
         // Uploaded once it is lit, in the same frame.
-        return new Built(mover, bundle, map.atlas(), kept, shaders, complete, bounds);
+        return new Built(mover, bundle, map.atlas(), kept, shaders, complete, bounds, propStates);
     }
 
     private static void addSurface(PackedVertices out, SurfaceTessellator.Triangle triangle, int light, boolean back) {

@@ -110,6 +110,12 @@ pub struct ModProp {
     pub prop: crate::bsp::props::Prop,
     pub model: Arc<crate::source::mdl::Model>,
     pub bounds: crate::geom::Aabb,
+    /// What the map's logic may do to the prop; `None` for one it never
+    /// changes, which is nearly all of them.
+    pub logic: Option<crate::bsp::logic_props::Role>,
+    /// The model in each of its skin families, for a prop the logic changes;
+    /// empty otherwise. A `Skin` input can pick any of them.
+    pub skins: Vec<Arc<crate::source::mdl::Model>>,
 }
 
 pub fn extract_mod_props(map: &Map, config: &Config) -> Vec<ModProp> {
@@ -127,6 +133,11 @@ pub fn extract_mod_props(map: &Map, config: &Config) -> Vec<ModProp> {
     // A parented prop may ride a mover: a train's buttons and levers are small,
     // but they are its controls and move with it, so the size floor spares them.
     let parented = crate::bsp::props::parented_entities(&map.bsp);
+    let roles = if config.props.entity_props {
+        crate::bsp::logic_props::roles(&map.bsp)
+    } else {
+        Default::default()
+    };
     props
         .into_iter()
         .enumerate()
@@ -140,8 +151,9 @@ pub fn extract_mod_props(map: &Map, config: &Config) -> Vec<ModProp> {
             let model = models.get_skin(&prop.model, prop.skin)?;
             let size = model.bounds.size() * prop.scale;
             let longest = size.x.max(size.y).max(size.z);
+            let logic = prop.entity.and_then(|entity| roles.get(&entity).copied());
             let rides = prop.entity.is_some_and(|entity| parented.contains(&entity));
-            if (longest < config.props.min_size && !rides)
+            if (longest < config.props.min_size && !rides && logic.is_none())
                 || (config.props.max_size > 0.0 && longest > config.props.max_size)
             {
                 return None;
@@ -167,11 +179,19 @@ pub fn extract_mod_props(map: &Map, config: &Config) -> Vec<ModProp> {
                 );
                 bounds.extend(prop.place(p));
             }
+            let skins = match logic {
+                Some(_) => (0..model.skins.len().max(1))
+                    .filter_map(|family| models.get_skin(&prop.model, family as i32))
+                    .collect(),
+                None => Vec::new(),
+            };
             Some(ModProp {
                 source_ordinal: ordinal as u64,
                 prop,
                 model,
                 bounds,
+                logic,
+                skins,
             })
         })
         .collect()

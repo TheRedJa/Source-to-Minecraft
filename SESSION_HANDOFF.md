@@ -1,37 +1,35 @@
 # src2mc implementation handoff
 
-Updated: 2026-10-03 (Europe/Berlin), DEV-0.26.0 (fixes from the DEV-0.25.0 in-game test)
+Updated: 2026-10-03 (Europe/Berlin), DEV-0.27.1 (B2: logic props, prop tint; door button aim fix)
 
-## NEXT TASK: map logic phase B, continued (B2 next)
+## NEXT TASK: B3 (B2 and the DEV-0.27.1 aim fix user-confirmed 2026-10-03)
 
-User test of DEV-0.25.0 (2026-10-03): prop doors, func_brush, elevator, fans, lighting and
-the old doors all fine. Trains moved and faced right, but: no wheel spin (the checklist fired
-`StartForward` on the train directly, which skips the relays that start the wheels; the map's
-relays spin them at 800 deg/s, checked in a simulation), carts lost collision (passable flag;
-now solid again), the second minitrain's buttons stayed behind (their button and switch
-models were under the converter's 12-unit size floor and never rode; use volumes and triggers
-parented to movers did not move). The second minitrain jumping forward on logic start is
-Source's `Find` (teleports to its first node, `path_5`, 6 blocks ahead of where it was
-compiled); ask the user to compare with INFRA if it still looks wrong.
-DEV-0.26.0: triggers, use aim and the `/src2mc_logic_show` wireframes follow the mover
-carrying them (client helper `Carriers`); passable trains solid. User test of the first
-DEV-0.26.0 build: wheels spin, collision back, buttons work, train 2's jump confirmed as
-INFRA's own behaviour (user checked the real game). User then asked to drop the prop size
-floor altogether ("various missing buttons, levers, wheels, rocks"): `[props] min_size` now
-defaults to 0 (was 12 units). All 10 bundles regenerated and installed. User confirmed the fixes
-in game, then asked to drop the collision floor too: `collision_min_size` now defaults to 0
-(was 48), so props are solid by their Source `solid` setting at any size. Bundles
-regenerated and installed again. User: all fixes work, performance not noticeably impacted
-(2026-10-03); committed as DEV-0.26.0.
+User test of DEV-0.27.0 (2026-10-03): all B2 points fine, except furnace's fence-door buttons
+`mahma_entry2b`/`mahma_entry2b1` could not be used: the use ray took the locked
+`prop_door_rotating`'s model box, which holds the button. DEV-0.27.1 aims at the door's mesh
+triangles (box only while the mesh loads); test `aButtonOnADoorIsAimedAtBeforeTheDoor`: 0 of 16
+rays reached the buttons before, 9 of 16 now (also the button on `ladle_controlroom_dr`).
+
+
+B2 is implemented and all 10 bundles are regenerated and installed; nothing of it is
+user-tested yet. Decisions taken with the user (2026-10-03): removable collision for props
+the logic kills ("A"), and `rendercolor` tint on every prop, static props from the lump too
+("Option A"). See D22 and format section 18.
+
+Checklist for the user (fresh `/src2mc reload`, maps re-placed):
+1. Tint: Portal 2 `sp_a3_end` gel tubes orange/blue; INFRA metro binders black/blue,
+   benches and trash cans tinted. Anything wrongly dark?
+2. Furnace: `secret_exit_key_button1` and the other key buttons make the key vanish, and no
+   invisible collision is left where it lay. `plant_exit_door_cut` swaps the whole chain for
+   the broken one and shows the bolt cutter.
+3. Skins: furnace `defect_buttons_mdl` and other panels switch skin; waterplant pump lamps
+   (`pump_floc_2_light_*`) change colour; tunnel4 light switches swap on/off models.
+4. Start-disabled props (furnace `inserted_fuse*`, `chain_broken`) are hidden at start.
+5. Logic props look lit like their neighbours (`/src2mc_logic_props draw off` to compare);
+   no fps change.
 
 Then, in the agreed order:
 
-6. B2: `prop_dynamic` Skin, Enable/Disable, color (biggest unhandled inputs; furnace: 122
-   Skin, 11 Kill, 6 Enable, 1 Disable). Needs the converter: static props carry no entity
-   index, and only skins some prop wears are exported as model references. Plan: tag
-   props.s2props records (or a side table) with their entity index for named
-   prop_dynamics, export every skin family's material array for those models, then the
-   mod rebuilds the prop's section aggregate (or the mover's buffers) on a change.
 7. B3: INFRA chapter titles (`game_text`), `env_fade`, `env_shake`.
 Later (user): skeletal animation (test case: furnace `cellardoor1` #2209, a prop_dynamic
 slid by `SetAnimation open/close`; its `func_door` #2112 is an invisible clip, not exported),
@@ -40,7 +38,27 @@ Also open: train/rotator sounds (MoveSound, StartSound, rotator `message` loop) 
 played; `MoveToPathNode`/`TeleportToPathNode`/`LockOrientation` (INFRA FGD extras) unhandled;
 props riding a hidden func_brush hide with it (Source would still draw them); triggers are
 touched by players only, so INFRA's cart bumpers (`car_multiple*`, "everything" flag, touched
-by the other carts' props in Source) never fire from cart contact.
+by the other carts' props in Source) never fire from cart contact. B2 leftovers: a riding
+logic prop's collision stays merged in its mover's; `Alpha`/`renderamt` ignored; static prop
+tint only read for lump versions 7-9; `trigger_remove` with carried props needs gameplay.
+
+## DONE: B2 (DEV-0.27.0, awaiting user test)
+
+- Converter: `bsp::logic_props::roles` finds model entities targeted by Skin/Color/Enable/
+  Disable/TurnOn/TurnOff/Kill/KillHierarchy/Enable-/DisableCollision (names, `*` wildcard,
+  classname fallback; children of killed entities) plus StartDisabled dynamic props. Those
+  bring every skin family as a model reference; removable ones keep their collision in
+  `logic_props/<entity>.s2coll` (carriers for blockless cells). Model references carry
+  `color` (rendercolor / static lump diffuse modulation v7-9 at byte 64). Counts: furnace 66
+  logic props (8 with collision), metro 144, waterplant 150, tunnel4 79.
+- Mod: `LogicPropTable`, `BundleModel.color`; `LogicEntity` skin/renderColor/noDraw/notSolid
+  and `propState()`, `Movers.DynamicProp`; `remove()` removes children; `PropStates`
+  (server/client, version counters) synced by `PropSync.StatePayload` (protocol "6");
+  `CollisionShapes` adds solid logic props' shapes per cell; `PropRenderer` leaves logic props
+  out of aggregates and tints the rest; `LogicPropRenderer` draws them per prop
+  (`/src2mc_logic_props status|draw on|off`); `MoverRenderer` rebuilds on riding prop states.
+- Tests: converter logic_props roles/table/write; mod dynamic prop states, children removal,
+  save/load; realMapsRun checks every logic prop's model and prints the ones the logic changed.
 
 ## DONE: map logic phase B steps 1-5 (DEV-0.25.0/0.26.0, user-confirmed 2026-10-03)
 

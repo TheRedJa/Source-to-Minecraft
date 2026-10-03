@@ -43,6 +43,10 @@ const SOLID: usize = 30;
 const FLAGS: usize = 31;
 /// `m_Skin`, the model's skin family, right after the flags since version 4.
 const SKIN: usize = 32;
+/// `m_DiffuseModulation`, the prop's colour tint as RGBA bytes, in versions 7
+/// to 9: after the fade distances, the lighting origin, the forced fade scale
+/// and the four bytes of DX (version 7) or CPU/GPU (8 and 9) levels.
+const DIFFUSE_MODULATION: usize = 64;
 /// The shortest record any version has: version 4.
 const MIN_STRIDE: usize = 56;
 /// Longer than any known version's record. Version 11 is 80 bytes; the limit
@@ -66,6 +70,9 @@ pub struct RawProp {
     pub scale: f32,
     /// Which of the model's skin families the prop wears; 0 is the default.
     pub skin: i32,
+    /// The colour the model is tinted with (Hammer's `rendercolor` on a
+    /// `prop_static`), RGB; white for the versions that do not carry one.
+    pub color: [u8; 3],
 }
 
 /// `STATIC_PROP_NO_DRAW`: the compiler kept the prop for its collision and
@@ -196,6 +203,12 @@ fn parse(lump: &[u8], version: u16) -> Result<StaticProps> {
     // enough to hold one. Both have to be true: a version 11 lump written by a
     // branch that left the field out would otherwise read the byte after it.
     let scale_at = (version >= 11 && stride >= 80).then_some(76);
+    // The tint is only read where its place is known: versions 7 to 9, whose
+    // records are long enough to hold it. Versions 10 and 11 come in branch
+    // variants that disagree about what sits at this offset, and none of the
+    // test maps has one, so they keep white rather than a guess.
+    let color_at = ((7..=9).contains(&version) && stride >= DIFFUSE_MODULATION + 4)
+        .then_some(DIFFUSE_MODULATION);
 
     let mut props = Vec::with_capacity(count);
     for record in lump[at..].chunks_exact(stride) {
@@ -214,6 +227,10 @@ fn parse(lump: &[u8], version: u16) -> Result<StaticProps> {
             // some maps do carry one; treat it as the default rather than
             // collapsing the model to a point.
             .max(f32::MIN_POSITIVE),
+            color: match color_at {
+                Some(at) => [record[at], record[at + 1], record[at + 2]],
+                None => [255; 3],
+            },
         });
     }
 
@@ -369,6 +386,22 @@ mod tests {
             let props = static_props(&bsp(version, stride, &["models/a.mdl"], &[r])).unwrap();
             assert_eq!(props.props[0].skin, 3, "version {version}");
         }
+    }
+
+    /// Portal 2's `sp_a3_end` tints its gel tubes orange and blue through
+    /// this field; a version that has no such field stays white.
+    #[test]
+    fn the_tint_is_read_where_versions_seven_to_nine_keep_it() {
+        let mut tinted = record(72, [0.0; 3], [0.0; 3], 0, 0);
+        tinted[64..68].copy_from_slice(&[0xff, 0x6a, 0x00, 0xff]);
+        let props = static_props(&bsp(9, 72, &["models/a.mdl"], &[tinted.clone()])).unwrap();
+        assert_eq!(props.props[0].color, [0xff, 0x6a, 0x00]);
+        let props = static_props(&bsp(6, 64, &["models/a.mdl"], &[tinted[..64].to_vec()])).unwrap();
+        assert_eq!(props.props[0].color, [255; 3]);
+        let mut long = record(80, [0.0; 3], [0.0; 3], 0, 0);
+        long[64..68].copy_from_slice(&[0, 0, 0, 0xff]);
+        let props = static_props(&bsp(11, 80, &["models/a.mdl"], &[long])).unwrap();
+        assert_eq!(props.props[0].color, [255; 3]);
     }
 
     #[test]

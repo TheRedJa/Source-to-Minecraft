@@ -371,6 +371,7 @@ mod tests {
             classname: "prop_static".into(),
             solid: crate::bsp::props::SOLID_VPHYSICS,
             skin: 0,
+            color: [255; 3],
             entity: None,
         }
     }

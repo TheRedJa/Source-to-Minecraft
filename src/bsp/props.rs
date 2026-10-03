@@ -27,6 +27,9 @@ pub struct Prop {
     pub solid: u8,
     /// The model's skin family to wear; 0 is the default.
     pub skin: i32,
+    /// The colour the model is tinted with, RGB: a `prop_static`'s from the
+    /// lump, an entity's `rendercolor`. White leaves the textures as they are.
+    pub color: [u8; 3],
     /// Index of the entity in the BSP entity lump; `None` for a `prop_static`,
     /// which has none. What a prop parented to a moving entity is found by.
     pub entity: Option<usize>,
@@ -104,6 +107,7 @@ pub fn extract(map: &crate::bsp::Map) -> Vec<Prop> {
                 classname: "prop_static".to_string(),
                 solid: prop.solid,
                 skin: prop.skin,
+                color: prop.color,
                 entity: None,
             })
         })
@@ -136,6 +140,7 @@ pub fn extract_entities(bsp: &vbsp::Bsp) -> Vec<Prop> {
             // The engine's default for every model entity that leaves it out.
             let mut solid = SOLID_VPHYSICS;
             let mut skin = 0;
+            let mut color = [255; 3];
             for (key, value) in raw.properties() {
                 match key {
                     "model" => model = Some(value.to_string()),
@@ -144,6 +149,7 @@ pub fn extract_entities(bsp: &vbsp::Bsp) -> Vec<Prop> {
                     "angles" => angles = triple(value).unwrap_or([0.0; 3]),
                     "solid" => solid = value.trim().parse().unwrap_or(SOLID_VPHYSICS),
                     "skin" => skin = value.trim().parse().unwrap_or(0),
+                    "rendercolor" => color = render_color(value),
                     // Two spellings, one meaning; whichever is present wins.
                     "uniformscale" | "modelscale" => {
                         scale = value.parse().ok().filter(|s| *s > 0.0).unwrap_or(1.0)
@@ -164,6 +170,7 @@ pub fn extract_entities(bsp: &vbsp::Bsp) -> Vec<Prop> {
                 classname,
                 solid,
                 skin,
+                color,
                 entity: Some(index),
             })
         })
@@ -183,6 +190,29 @@ pub fn parented_entities(bsp: &vbsp::Bsp) -> std::collections::HashSet<usize> {
         })
         .map(|(index, _)| index)
         .collect()
+}
+
+/// `UTIL_StringToColor32`, as `CBaseEntity::KeyValue` reads `rendercolor`
+/// and the `Color` input reads its parameter: up to three integers, any that
+/// are missing zero, each kept to its low byte as Source's `color32` keeps it.
+pub fn render_color(value: &str) -> [u8; 3] {
+    let mut parts = value.split_whitespace().map(|p| atoi(p) as u8);
+    std::array::from_fn(|_| parts.next().unwrap_or(0))
+}
+
+/// C's `atoi`: an optional sign and the leading digits, 0 when there are none.
+fn atoi(text: &str) -> i32 {
+    let (sign, digits) = match text.strip_prefix('-') {
+        Some(rest) => (-1i64, rest),
+        None => (1, text.strip_prefix('+').unwrap_or(text)),
+    };
+    let value = digits
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .fold(0i64, |acc, d| {
+            (acc * 10 + i64::from(d as u8 - b'0')).min(i64::from(i32::MAX))
+        });
+    (sign * value) as i32
 }
 
 fn triple(value: &str) -> Option<[f64; 3]> {
@@ -205,6 +235,7 @@ mod tests {
             classname: "prop_static".into(),
             solid: SOLID_VPHYSICS,
             skin: 0,
+            color: [255; 3],
             entity: None,
         }
     }

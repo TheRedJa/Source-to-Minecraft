@@ -34,6 +34,7 @@ final class LogicEntities {
             case "trigger_changelevel" -> new Triggers.ChangeLevel(map, index, entity);
             case "func_button", "func_rot_button", "momentary_rot_button" -> new Movers.Button(map, index, entity);
             case "func_brush" -> new Movers.Brush(map, index, entity);
+            case "prop_dynamic", "prop_dynamic_override", "prop_dynamic_ornament" -> new Movers.DynamicProp(map, index, entity);
             case "func_tracktrain" -> new Trains.TrackTrain(map, index, entity);
             case "path_track" -> new Trains.PathTrack(map, index, entity);
             case "func_rotating" -> new Trains.Rotating(map, index, entity);

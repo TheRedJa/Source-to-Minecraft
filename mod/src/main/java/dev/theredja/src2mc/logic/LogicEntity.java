@@ -35,6 +35,11 @@ public class LogicEntity implements Actor {
     boolean removed;
     double nextThink = NEVER;
     int spawnflags;
+    /** {@code m_nSkin} and {@code m_clrRender}: what a model entity wears and its tint, {@code 0xRRGGBB}. */
+    int skin, renderColor = 0xFFFFFF;
+    /** {@code EF_NODRAW} and {@code FSOLID_NOT_SOLID}, as the inputs of the classes that have them set them. */
+    boolean noDraw, notSolid;
+    private boolean lookChanged;
 
     LogicEntity(MapLogic map, int index, LogicTable.Entity entity) {
         this.map = map;
@@ -50,6 +55,8 @@ public class LogicEntity implements Actor {
                 .add(0, new Connection(output.target(), output.input(), output.parameter(), output.delay(), output.times()));
         }
         spawnflags = (int) number("spawnflags", 0);
+        skin = Variant.integer(keys.get("skin"));
+        if (keys.containsKey("rendercolor")) renderColor = Variant.color(keys.get("rendercolor"));
     }
 
     @Override public String name() { return targetname == null ? "" : targetname; }
@@ -80,6 +87,9 @@ public class LogicEntity implements Actor {
     private boolean common(String input, String value, Actor activator, LogicEntity caller) {
         switch (input) {
             case "kill", "killhierarchy" -> remove();
+            // CBaseAnimating's skin and CBaseEntity::InputColor; only a model shows either.
+            case "skin" -> { skin = Variant.integer(value); lookChanged = true; }
+            case "color" -> { renderColor = Variant.color(value); lookChanged = true; }
             case "fireuser1", "fireuser2", "fireuser3", "fireuser4" -> fire("onuser" + input.charAt(8), activator, null);
             case "addoutput" -> addOutput(value);
             case "runscriptcode", "runscriptfile", "callscriptfunction" -> map.scriptCall(this, input);
@@ -157,13 +167,28 @@ public class LogicEntity implements Actor {
         return max;
     }
 
-    /** {@code UTIL_Remove}. */
+    /**
+     * {@code UTIL_Remove}. {@code UpdateOnRemove} deletes the entity's children with it, so
+     * whatever is parented to it goes too.
+     */
     void remove() {
         if (removed) return;
+        List<LogicEntity> children = map.childrenOf(this);
         removed = true;
         nextThink = NEVER;
         map.removed(this);
+        for (LogicEntity child : children) child.remove();
     }
+
+    /** The {@link dev.theredja.src2mc.world.PropStates} state of a model entity. */
+    final dev.theredja.src2mc.world.PropStates.State propState() {
+        int flags = (removed || noDraw ? dev.theredja.src2mc.world.PropStates.HIDDEN : 0)
+            | (removed || notSolid ? dev.theredja.src2mc.world.PropStates.NOT_SOLID : 0);
+        return new dev.theredja.src2mc.world.PropStates.State(flags, skin, renderColor);
+    }
+
+    /** Marks the look or solidity changed since spawn, so a save keeps it. */
+    final void lookChanged() { lookChanged = true; }
 
     String key(String key) { return keys.get(key); }
 
@@ -190,6 +215,12 @@ public class LogicEntity implements Actor {
         if (renamed) tag.putString("targetname", name());
         if (nextThink != NEVER) tag.putDouble("next_think", nextThink);
         tag.putInt("spawnflags", spawnflags);
+        if (lookChanged) {
+            tag.putInt("skin", skin);
+            tag.putInt("render_color", renderColor);
+            tag.putBoolean("no_draw", noDraw);
+            tag.putBoolean("not_solid", notSolid);
+        }
         if (outputsChanged) {
             CompoundTag saved = new CompoundTag();
             for (Map.Entry<String, List<Connection>> entry : outputs.entrySet()) {
@@ -214,6 +245,13 @@ public class LogicEntity implements Actor {
         if (tag.contains("targetname")) setName(tag.getString("targetname"));
         nextThink = tag.contains("next_think") ? tag.getDouble("next_think") : NEVER;
         if (tag.contains("spawnflags")) spawnflags = tag.getInt("spawnflags");
+        if (tag.contains("skin")) {
+            skin = tag.getInt("skin");
+            renderColor = tag.getInt("render_color");
+            noDraw = tag.getBoolean("no_draw");
+            notSolid = tag.getBoolean("not_solid");
+            lookChanged = true;
+        }
         if (tag.contains("outputs")) {
             outputs.clear();
             CompoundTag saved = tag.getCompound("outputs");

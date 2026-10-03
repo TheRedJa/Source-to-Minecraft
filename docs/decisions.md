@@ -569,3 +569,39 @@ doesn't mean we have to do two systems"; Sable is a required dependency).
   mover replaces its sub-level. `/src2mc movers status|respawn`.
 - **Not yet.** Skeletal animation (`SetAnimation`), `env_sprite`, lights and
   VScript come later (user, 2026-10-03). Movers cannot be broken for now.
+
+## D22 — Props the logic changes are drawn and collide on their own
+
+A map's I/O switches a lamp's `Skin`, `Kill`s a key a button picks up and
+`Enable`s a broken chain in place of a whole one (B2; furnace: 122 `Skin`,
+11 `Kill`, 6 `Enable`). Every other prop is merged into its section's
+aggregate and its collision into the map's cells, so the converter marks the
+props some input changes (format section 18) and the mod keeps those apart.
+
+- **Which props.** Every model entity some output sends a look or solidity
+  input, resolved as Source resolves targets, plus dynamic props that start
+  disabled; up to 150 per test map. Removing an entity removes its children
+  (`UpdateOnRemove`), so props parented to a killed entity count too, and the
+  mod's `Kill` now removes children as well.
+- **Drawing.** Each is built alone, in the skin and tint its state names, and
+  built again when that changes, so no change rebuilds a section aggregate.
+  Props riding a mover rebuild their mover's buffers instead. A hidden prop is
+  not drawn; one past the render distance is not built.
+- **Collision.** A prop that can be removed or switched to not solid keeps its
+  volume in a collision table of its own, which the mod adds to the cell's
+  shape while the prop is solid (user, 2026-10-03: "A" — remove the collision
+  with the prop rather than leaving an invisible box). Cells without a map
+  block get carriers that collide as nothing while it is gone. A riding prop's
+  collision stays merged into its mover's.
+- **Source's rules.** `Enable`/`Disable`/`TurnOn`/`TurnOff` only toggle
+  `EF_NODRAW` on `CDynamicProp`; it stays solid. `Enable`/`DisableCollision`
+  toggle `FSOLID_NOT_SOLID`. `Skin` is `atoi`, `Color` and `rendercolor`
+  `UTIL_StringToColor32`.
+- **Tint everywhere.** `rendercolor` tints every prop, not only logic props
+  (user, 2026-10-03: option A): entity props by the keyvalue, static props by
+  the lump's diffuse modulation, read for versions 7 to 9 only, the layout the
+  test maps were checked against (Portal 2's gel tubes are orange and blue).
+  The tint is part of the model reference, so placement records are unchanged.
+- **Not yet.** `SetAnimation` (skeletal animation), `Alpha`/`renderamt`, and
+  `trigger_remove` taking a carried prop.
+

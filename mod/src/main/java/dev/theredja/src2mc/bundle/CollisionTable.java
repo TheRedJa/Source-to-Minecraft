@@ -40,6 +40,17 @@ public final class CollisionTable {
 
     public int shapeCount() { return shapes.length; }
 
+    /** Receives one map-local cell and its shape index. */
+    @FunctionalInterface public interface CellVisitor { void visit(int x, int y, int z, int shape); }
+
+    /** Visits every cell with an entry, in no particular order. */
+    public void forEachCell(CellVisitor visitor) {
+        for (var entry : cells.long2IntEntrySet()) {
+            long key = entry.getLongKey();
+            visitor.visit((int) (key << 1 >> 43), (int) (key << 22 >> 43), (int) (key << 43 >> 43), entry.getIntValue());
+        }
+    }
+
     public int cellCount() { return cells.size(); }
 
     /** Boxes of one shape: six signed sixteenths per box, x1 y1 z1 x2 y2 z2. */

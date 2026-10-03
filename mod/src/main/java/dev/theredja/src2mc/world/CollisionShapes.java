@@ -56,8 +56,83 @@ public final class CollisionShapes {
     static final LongAdder BUILT_SHAPES = new LongAdder();
 
     private record Entry(MapPlacement placement, CollisionTable table, AtomicReferenceArray<VoxelShape> shapes,
-                         dev.theredja.src2mc.bundle.SurfaceTable surfaces) {}
-    private record Snapshot(BundleGeneration generation, long epoch, Entry[] entries) {}
+                         dev.theredja.src2mc.bundle.SurfaceTable surfaces, LogicProps logicProps) {}
+    private record Snapshot(BundleGeneration generation, long epoch, Entry[] entries, boolean client) {}
+
+    /**
+     * The collision of a map's logic props (format.md section 18), added to a cell's own while the
+     * prop is solid. {@code cells} maps a packed map-local cell to pairs of prop index and shape
+     * index; {@code combined} caches a cell's whole shape for one {@link PropStates#version}.
+     */
+    private static final class LogicProps {
+        final dev.theredja.src2mc.bundle.BundleMap map;
+        final PropStates.Key key;
+        final dev.theredja.src2mc.bundle.LogicPropTable.Prop[] props;
+        final AtomicReferenceArray<VoxelShape>[] shapes;
+        final it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap<int[]> cells = new it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap<>();
+        final it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap<VoxelShape> combined = new it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap<>();
+        long version = Long.MIN_VALUE;
+
+        @SuppressWarnings("unchecked")
+        LogicProps(dev.theredja.src2mc.bundle.BundleMap map, PropStates.Key key, List<dev.theredja.src2mc.bundle.LogicPropTable.Prop> solid) {
+            this.map = map;
+            this.key = key;
+            this.props = solid.toArray(dev.theredja.src2mc.bundle.LogicPropTable.Prop[]::new);
+            this.shapes = new AtomicReferenceArray[props.length];
+            for (int i = 0; i < props.length; i++) {
+                CollisionTable table = props[i].collision();
+                shapes[i] = BUILT.computeIfAbsent(table, ignored -> new AtomicReferenceArray<>(table.shapeCount()));
+                int prop = i;
+                table.forEachCell((x, y, z, shape) -> {
+                    long cell = BlockPos.asLong(x, y, z);
+                    int[] previous = cells.get(cell);
+                    int[] next = previous == null ? new int[2] : java.util.Arrays.copyOf(previous, previous.length + 2);
+                    next[next.length - 2] = prop;
+                    next[next.length - 1] = shape;
+                    cells.put(cell, next);
+                });
+            }
+        }
+
+        static LogicProps of(Level level, MapPlacement placement, dev.theredja.src2mc.bundle.BundleMap map) {
+            if (map.logicProps() == null) return null;
+            List<dev.theredja.src2mc.bundle.LogicPropTable.Prop> solid = map.logicProps().props().stream()
+                .filter(prop -> prop.collision() != null).toList();
+            return solid.isEmpty() ? null : new LogicProps(map, PropStates.key(level, placement), solid);
+        }
+
+        /** The cell's shape with every solid logic prop in it added; {@code base} when none reaches it. */
+        synchronized VoxelShape apply(boolean client, int x, int y, int z, VoxelShape base) {
+            long cell = BlockPos.asLong(x, y, z);
+            int[] pairs = cells.get(cell);
+            // A full cube already holds whatever a prop could add.
+            if (pairs == null || base == Shapes.block()) return base;
+            long now = PropStates.version(client);
+            if (now != version) {
+                combined.clear();
+                version = now;
+            }
+            VoxelShape cached = combined.get(cell);
+            if (cached != null) return cached;
+            VoxelShape shape = base == null ? Shapes.empty() : base;
+            boolean any = false;
+            for (int i = 0; i < pairs.length; i += 2) {
+                var prop = props[pairs[i]];
+                if (!PropStates.effective(client, key, map, prop).solid()) continue;
+                int id = pairs[i + 1];
+                VoxelShape part = shapes[pairs[i]].get(id);
+                if (part == null) {
+                    part = build(prop.collision().boxes(id));
+                    shapes[pairs[i]].compareAndSet(id, null, part);
+                }
+                shape = Shapes.or(shape, part);
+                any = true;
+            }
+            VoxelShape result = any ? shape.optimize() : base;
+            if (result != null) combined.put(cell, result);
+            return result;
+        }
+    }
 
     private CollisionShapes() {}
 
@@ -66,10 +141,10 @@ public final class CollisionShapes {
     /** Off makes every map block a full cube and every carrier nothing, which is what collision was before. */
     public static void setExact(boolean value) { exact = value; }
 
-    /** A map block: its table shape, else a full cube. */
+    /** A map block: its table shape, else a full cube; with any solid logic prop in its cell added. */
     public static VoxelShape surface(BlockGetter getter, BlockPos pos) {
         if (!exact) return Shapes.block();
-        VoxelShape shape = lookup(getter, pos);
+        VoxelShape shape = lookup(getter, pos, Shapes.block());
         return shape == null ? Shapes.block() : shape;
     }
 
@@ -126,10 +201,10 @@ public final class CollisionShapes {
             : getter instanceof LevelChunk chunk ? chunk.getLevel() : null;
     }
 
-    /** A carrier: its table shape, else nothing. */
+    /** A carrier: its table shape, else nothing; with any solid logic prop in its cell added. */
     public static VoxelShape carrier(BlockGetter getter, BlockPos pos) {
         if (!exact) return Shapes.empty();
-        VoxelShape shape = lookup(getter, pos);
+        VoxelShape shape = lookup(getter, pos, Shapes.empty());
         return shape == null ? Shapes.empty() : shape;
     }
 
@@ -139,38 +214,43 @@ public final class CollisionShapes {
         CLIENT.clear();
     }
 
-    private static VoxelShape lookup(BlockGetter getter, BlockPos pos) {
+    /** The shape at {@code pos}, {@code fallback} standing for a cell without an entry; null when no map has anything to say. */
+    private static VoxelShape lookup(BlockGetter getter, BlockPos pos, VoxelShape fallback) {
         QUERIES.increment();
         Level level = levelOf(getter);
-        if (level != null) return find(snapshot(level), pos);
+        if (level != null) return find(snapshot(level), pos, fallback);
         UNKNOWN_GETTER.increment();
         for (Snapshot snapshot : CLIENT.values()) {
-            VoxelShape shape = find(snapshot, pos);
+            VoxelShape shape = find(snapshot, pos, fallback);
             if (shape != null) return shape;
         }
         for (Snapshot snapshot : SERVER.values()) {
-            VoxelShape shape = find(snapshot, pos);
+            VoxelShape shape = find(snapshot, pos, fallback);
             if (shape != null) return shape;
         }
         return null;
     }
 
-    private static VoxelShape find(Snapshot snapshot, BlockPos pos) {
+    private static VoxelShape find(Snapshot snapshot, BlockPos pos, VoxelShape fallback) {
         if (snapshot == null) return null;
         int x = pos.getX(), y = pos.getY(), z = pos.getZ();
         for (Entry entry : snapshot.entries) {
             MapPlacement placement = entry.placement;
             if (!placement.contains(pos)) continue;
             BlockPos translation = placement.translation();
-            int id = entry.table.shapeAt(x - translation.getX(), y - translation.getY(), z - translation.getZ());
-            if (id < 0) return null;
-            SHAPED.increment();
-            VoxelShape shape = entry.shapes.get(id);
-            if (shape == null) {
-                shape = build(entry.table.boxes(id));
-                if (entry.shapes.compareAndSet(id, null, shape)) BUILT_SHAPES.increment();
-                else shape = entry.shapes.get(id);
+            int lx = x - translation.getX(), ly = y - translation.getY(), lz = z - translation.getZ();
+            int id = entry.table.shapeAt(lx, ly, lz);
+            VoxelShape shape = null;
+            if (id >= 0) {
+                SHAPED.increment();
+                shape = entry.shapes.get(id);
+                if (shape == null) {
+                    shape = build(entry.table.boxes(id));
+                    if (entry.shapes.compareAndSet(id, null, shape)) BUILT_SHAPES.increment();
+                    else shape = entry.shapes.get(id);
+                }
             }
+            if (entry.logicProps != null) return entry.logicProps.apply(snapshot.client, lx, ly, lz, shape == null ? fallback : shape);
             return shape;
         }
         return null;
@@ -219,9 +299,9 @@ public final class CollisionShapes {
                 java.util.concurrent.CompletableFuture.runAsync(() -> prebuild(table, fresh));
                 return fresh;
             });
-            entries.add(new Entry(placement, table, shapes, map.surfaces()));
+            entries.add(new Entry(placement, table, shapes, map.surfaces(), LogicProps.of(level, placement, map)));
         }
-        Snapshot snapshot = new Snapshot(generation, epoch, entries.toArray(Entry[]::new));
+        Snapshot snapshot = new Snapshot(generation, epoch, entries.toArray(Entry[]::new), level.isClientSide());
         side.put(level.dimension(), snapshot);
         REBUILDS.increment();
         return snapshot;
