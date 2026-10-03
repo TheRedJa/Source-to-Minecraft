@@ -26,6 +26,10 @@ public final class Src2mcWorldContent {
         "surface", Src2mcSurfaceBlock::new, properties().dynamicShape().forceSolidOn());
     public static final DeferredBlock<Src2mcCarrierBlock> CARRIER = BLOCKS.registerBlock(
         "carrier", Src2mcCarrierBlock::new, properties().dynamicShape().forceSolidOn().noOcclusion().replaceable());
+    // A moving entity's cells, inside a Sable plot. Unbreakable: movers are not editable yet.
+    public static final DeferredBlock<Src2mcMoverBlock> MOVER = BLOCKS.registerBlock(
+        "mover", Src2mcMoverBlock::new, BlockBehaviour.Properties.of().strength(-1.0F, 3_600_000.0F).noLootTable()
+            .sound(SoundType.STONE).dynamicShape().forceSolidOn().noOcclusion());
     public static final DeferredBlock<Src2mcDataBlock> MAP_ANCHOR = BLOCKS.registerBlock(
         "map_anchor",
         props -> new Src2mcDataBlock(props, Src2mcWorldContent::newDataBlockEntity, false, true),

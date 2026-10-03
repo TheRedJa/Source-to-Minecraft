@@ -95,6 +95,7 @@ final class BundleSchemaValidator {
         if (map.has("collision")) expected.add("collision");
         if (map.has("audio")) expected.add("audio");
         if (map.has("logic")) expected.add("logic");
+        if (map.has("movers")) expected.add("movers");
         expected.add("diagnostics");
         keys(map, expected.toArray(String[]::new));
         format(map, "src2mc-map", path);
@@ -174,6 +175,13 @@ final class BundleSchemaValidator {
             for (AudioTable.Emitter emitter : audio.emitters()) if (emitter.entity() >= logic.entities().size()) fail(BundleErrorCode.INVALID_REFERENCE, "soundscape entity out of range");
             for (AudioTable.Ambient ambient : audio.ambients()) if (ambient.entity() >= logic.entities().size()) fail(BundleErrorCode.INVALID_REFERENCE, "ambient sound entity out of range");
         }
+        MoverTable movers = null;
+        if (map.has("movers")) {
+            String moversPath = exactPath(map, "movers", prefix + "movers.json");
+            referenced.add(moversPath);
+            movers = validateMovers(zip, entries, json(zip, required(entries, moversPath), moversPath), prefix, materials.size(),
+                modelRefs.size(), logic, referenced);
+        }
         referenced.addAll(List.of(surfaces, props, diagnostics));
         SurfaceTable surfaceTable = validateFaces(zip, required(entries, surfaces), materials.size());
         List<BundleProp> propRecords = validateProps(zip, required(entries, props), modelRefs.size());
@@ -198,7 +206,94 @@ final class BundleSchemaValidator {
         }
         long mapHeight = (long) max[1] - min[1] + 1;
         return new BundleMap(mapId, sourceName, min, max, anchor, loadedMaterials, modelRefs, propRecords, mapHeight > 384,
-            surfaceTable, modelRefs.stream().map(BundleModel::contentId).collect(java.util.stream.Collectors.toUnmodifiableSet()), atlas, pvs, occlusion, collision, audio, logic);
+            surfaceTable, modelRefs.stream().map(BundleModel::contentId).collect(java.util.stream.Collectors.toUnmodifiableSet()), atlas, pvs, occlusion, collision, audio, logic, movers);
+    }
+
+    /** Parses and validates the optional mover table (format.md section 17). */
+    private static MoverTable validateMovers(ZipFile zip, Map<String, ZipEntry> entries, JsonObject root, String prefix,
+                                             int materialCount, int modelCount, LogicTable logic, Set<String> referenced) throws IOException {
+        keys(root, "format", "version", "movers");
+        format(root, "src2mc-movers", "movers.json");
+        JsonArray array = array(root, "movers");
+        limit(array.size(), BundleLimits.MAX_MOVERS_PER_MAP, "mover count");
+        List<MoverTable.Mover> movers = new ArrayList<>(array.size());
+        int priorEntity = -1;
+        for (JsonElement element : array) {
+            JsonObject mover = object(element, "mover");
+            List<String> expected = new ArrayList<>(List.of("entity", "classname", "cell_origin", "size"));
+            if (mover.has("surfaces")) expected.add("surfaces");
+            if (mover.has("collision")) expected.add("collision");
+            expected.addAll(List.of("blocks", "props"));
+            keys(mover, expected.toArray(String[]::new));
+            int entity = uintIndex(mover.get("entity"), "mover entity");
+            if (entity <= priorEntity) fail(BundleErrorCode.DUPLICATE_IDENTITY, "movers are not in strictly ascending entity order");
+            priorEntity = entity;
+            if (logic != null && entity >= logic.entities().size()) fail(BundleErrorCode.INVALID_REFERENCE, "mover entity out of range");
+            String classname = string(mover, "classname");
+            if (classname.isEmpty() || !classname.equals(classname.toLowerCase(java.util.Locale.ROOT))) fail(BundleErrorCode.INVALID_SCHEMA, "mover classname must be lowercase");
+            int[] origin = vector3i(mover.get("cell_origin"), "cell_origin");
+            int[] size = vector3i(mover.get("size"), "mover size");
+            long cells = 1;
+            for (int axis = 0; axis < 3; axis++) {
+                if (size[axis] < 1) fail(BundleErrorCode.INVALID_SCHEMA, "mover size must be positive");
+                cells *= size[axis];
+            }
+            limit(cells, BundleLimits.MAX_CELLS_PER_MOVER, "mover cell count");
+            SurfaceTable surfaces = null;
+            if (mover.has("surfaces")) {
+                String path = exactPath(mover, "surfaces", prefix + "movers/" + entity + ".s2faces");
+                referenced.add(path);
+                surfaces = validateFaces(zip, required(entries, path), materialCount);
+            }
+            CollisionTable collision = null;
+            if (mover.has("collision")) {
+                String path = exactPath(mover, "collision", prefix + "movers/" + entity + ".s2coll");
+                referenced.add(path);
+                collision = validateCollision(zip, required(entries, path));
+            }
+            JsonObject blocks = object(mover.get("blocks"), "mover blocks");
+            keys(blocks, "surface", "carrier");
+            java.util.Set<Long> taken = new java.util.HashSet<>();
+            int[] surfaceBlocks = moverCells(array(blocks, "surface"), size, taken);
+            int[] carrierBlocks = moverCells(array(blocks, "carrier"), size, taken);
+            JsonArray propArray = array(mover, "props");
+            limit(propArray.size(), BundleLimits.MAX_PROPS_PER_MAP, "mover prop count");
+            List<MoverTable.Prop> props = new ArrayList<>(propArray.size());
+            for (JsonElement propElement : propArray) {
+                JsonObject prop = object(propElement, "mover prop");
+                keys(prop, "entity", "model", "translation", "rotation", "scale", "skin");
+                int propEntity = uintIndex(prop.get("entity"), "mover prop entity");
+                if (logic != null && propEntity >= logic.entities().size()) fail(BundleErrorCode.INVALID_REFERENCE, "mover prop entity out of range");
+                int model = index(prop.get("model"), modelCount, "mover prop model");
+                double[] translation = vector3d(prop.get("translation"), "mover prop translation");
+                JsonElement rotationElement = prop.get("rotation");
+                if (rotationElement == null || !rotationElement.isJsonArray() || rotationElement.getAsJsonArray().size() != 4) fail(BundleErrorCode.INVALID_SCHEMA, "mover prop rotation must have four numbers");
+                double[] rotation = new double[4];
+                double norm = 0;
+                for (int i = 0; i < 4; i++) { rotation[i] = finiteNumber(rotationElement.getAsJsonArray().get(i), "mover prop rotation"); norm += rotation[i] * rotation[i]; }
+                if (Math.abs(norm - 1) > 1e-6) fail(BundleErrorCode.INVALID_SCHEMA, "mover prop rotation must be a unit quaternion");
+                double scale = finiteNumber(prop.get("scale"), "mover prop scale");
+                if (!(scale > 0)) fail(BundleErrorCode.INVALID_SCHEMA, "mover prop scale must be positive");
+                props.add(new MoverTable.Prop(propEntity, model, translation, rotation, scale, integer(prop.get("skin"), "mover prop skin")));
+            }
+            movers.add(new MoverTable.Mover(entity, classname, origin, size, surfaces, collision, surfaceBlocks, carrierBlocks, props));
+        }
+        return new MoverTable(movers);
+    }
+
+    /** A mover's block list: ascending, inside its size, and in no other list of the same mover. */
+    private static int[] moverCells(JsonArray array, int[] size, java.util.Set<Long> taken) throws BundleValidationException {
+        int[] cells = new int[array.size() * 3];
+        int[] prior = null;
+        for (int i = 0; i < array.size(); i++) {
+            int[] cell = vector3i(array.get(i), "mover block");
+            for (int axis = 0; axis < 3; axis++) if (cell[axis] < 0 || cell[axis] >= size[axis]) fail(BundleErrorCode.INVALID_SCHEMA, "mover block outside the mover");
+            if (prior != null && compare(prior, cell) >= 0) fail(BundleErrorCode.INVALID_SCHEMA, "mover blocks are not uniquely sorted");
+            if (!taken.add(net.minecraft.core.BlockPos.asLong(cell[0], cell[1], cell[2]))) fail(BundleErrorCode.DUPLICATE_IDENTITY, "a mover cell holds two blocks");
+            prior = cell;
+            System.arraycopy(cell, 0, cells, i * 3, 3);
+        }
+        return cells;
     }
 
     /** Parses and validates the optional per-cell collision table (format.md section 14). */

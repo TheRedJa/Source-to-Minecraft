@@ -51,6 +51,37 @@ pub struct Conversion {
     /// What every cell is solid as, finer than a block. Only computed along
     /// with `fragments`.
     pub collision: Option<crate::voxel::collision::CellCollision>,
+    /// The `separate` brush entities run through the same exact pipeline as
+    /// the world, each on its own, for the mod to move. Only computed along
+    /// with `fragments`.
+    pub movers: Vec<MoverGeometry>,
+}
+
+/// One moving brush entity's exact geometry, in map-local cells at the pose
+/// the map spawns it in.
+///
+/// Built exactly as the world is, but from the entity's own brushes alone, so
+/// a fragment's owner is one of the mover's blocks and its collision hangs off
+/// them: the door carries everything it is made of when it swings, and leaves
+/// nothing of itself behind in the doorway.
+#[derive(Debug, Clone)]
+pub struct MoverGeometry {
+    /// Index into the map's entity list.
+    pub entity: usize,
+    pub classname: String,
+    pub targetname: Option<String>,
+    /// The `*N` brush model the entity uses.
+    pub model: usize,
+    /// The mover's own blocks. Empty for a mover built only of brushes too thin
+    /// to voxelize, such as a door panel; its fragments are then all unowned
+    /// and its collision is all carriers.
+    pub grid: VoxelGrid,
+    /// Exact visible faces, cut per cell against `grid`.
+    pub fragments: Vec<crate::voxel::fragments::Fragment>,
+    /// What the mover's cells are solid as, against `grid`.
+    pub collision: crate::voxel::collision::CellCollision,
+    /// Drawn faces no brush of the mover could be found behind.
+    pub faces_unmatched: usize,
 }
 
 /// One brush drawn as its own geometry rather than as blocks.
@@ -858,6 +889,105 @@ fn voxelize_solids(
         )
 }
 
+/// Whether a voxelized brush makes any blocks at all: not skipped outright,
+/// and with at least one side whose material resolves. Only such a brush
+/// collides, exactly as only such a brush is drawn.
+fn makes_blocks(solid: &Solid, map: &Map, config: &Config, resolver: &Resolver) -> bool {
+    let skip_sky = config.contents.skip_sky;
+    let decision = resolver.decide(solid.flags);
+    decision != Decision::Skip
+        && solid.sides.iter().any(|side| {
+            let material = side.texture_info.and_then(|i| map.material_index(i));
+            side_block(&decision, resolver, material, side.texture_flags, skip_sky).is_some()
+        })
+}
+
+/// Run one brush entity through the world's exact pipeline on its own: thin
+/// brushes split off, the rest voxelized, the face lump's faces cut against
+/// the entity's own grid, and collision computed from both.
+///
+/// Nothing is hollowed: a mover is a door or a platform, rarely more than a
+/// block or two thick, and it is seen from every side once it moves. Shapes
+/// are not fitted either; the mod only ever reads which cells hold a block.
+#[allow(clippy::too_many_arguments)]
+fn mover_geometry(
+    entity: &EntityModel,
+    map: &Map,
+    config: &Config,
+    resolver: &Resolver,
+    transform: &Transform,
+    origins: &std::collections::HashMap<usize, Vec3>,
+    tiles: &[Option<TileSet>],
+    palette: &Mutex<Palette>,
+    skybox: Option<&crate::bsp::skybox::Skybox>,
+) -> MoverGeometry {
+    let all: Vec<Solid> = map
+        .solids(entity.model)
+        .into_iter()
+        // A brush entity's brushes are stored relative to its origin, so the
+        // skybox room is tested against where they really are: tested where
+        // they are stored, every mover near Source's origin fell inside an
+        // INFRA skybox room and lost its brushes.
+        .filter(|solid| {
+            let placed = Aabb::new(
+                solid.bounds.min + entity.origin,
+                solid.bounds.max + entity.origin,
+            );
+            !skybox.is_some_and(|room| room.contains(&placed))
+        })
+        .collect();
+    let (solids, _, _, thin) = split_brush_meshes(map, config, transform, origins, all.clone());
+    let skipped = std::sync::atomic::AtomicUsize::new(0);
+    let (grid, _, _) = voxelize_solids(
+        &solids, map, config, resolver, transform, origins, tiles, palette, &skipped,
+    );
+    let (polygons, faces_unmatched) = exact_polygons(
+        map,
+        config,
+        resolver,
+        transform,
+        origins,
+        &[entity.model],
+        &all,
+        skybox,
+        &[],
+    );
+    let fragments = polygons
+        .par_iter()
+        .flat_map_iter(|polygon| crate::voxel::fragments::fragments(polygon, &grid))
+        .collect();
+    let block_solids: Vec<BlockSolid> = solids
+        .iter()
+        .filter(|solid| makes_blocks(solid, map, config, resolver))
+        .map(|solid| {
+            let origin = origins.get(&solid.model).copied().unwrap_or(Vec3::ZERO);
+            to_block_solid(solid, transform, origin)
+        })
+        .collect();
+    let collision = crate::voxel::collision::compute(&crate::voxel::collision::Sources {
+        grid: &grid,
+        // Never hollowed, so no cell is sealed away inside it.
+        interior: &|_| false,
+        solids: block_solids.iter().collect(),
+        thin: thin
+            .iter()
+            .filter(|(flags, _)| resolver.decide(*flags) != Decision::Skip)
+            .map(|(_, block)| block)
+            .collect(),
+        terrain: Vec::new(),
+    });
+    MoverGeometry {
+        entity: entity.entity,
+        classname: entity.classname.clone(),
+        targetname: entity.targetname.clone(),
+        model: entity.model,
+        grid,
+        fragments,
+        collision,
+        faces_unmatched,
+    }
+}
+
 /// Replace full cubes with slabs and stairs wherever the octant mask says the
 /// geometry was really half-height or stepped.
 ///
@@ -1089,7 +1219,16 @@ fn exact_polygons(
             let centre = points.iter().fold(Vec3::ZERO, |sum, &p| sum + p) / points.len() as f64;
             let decision = match lookup.find(model, centre, normal, texture_info) {
                 // Left out with the 3D skybox, as the voxelizer leaves it out.
-                Some(solid) if skybox.is_some_and(|room| room.contains(&solid.bounds)) => {
+                // Brush-entity brushes are stored relative to the entity's
+                // origin, so the room is tested where they really are.
+                Some(solid)
+                    if skybox.is_some_and(|room| {
+                        room.contains(&Aabb::new(
+                            solid.bounds.min + origin,
+                            solid.bounds.max + origin,
+                        ))
+                    }) =>
+                {
                     continue;
                 }
                 Some(solid) => resolver.decide(solid.flags),
@@ -1372,16 +1511,23 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
     // Every brush the world is made of, thin and skybox ones included: a drawn
     // face is traced back to its brush to learn whether the brush is converted.
     let exact_solids = config.output.exact_surfaces.then(|| model_solids.clone());
+    let origins = model_origins(&entity_models);
+    // Brush-entity brushes are stored relative to the entity's origin, so the
+    // skybox room is tested against where they really are. Tested where they
+    // are stored, an entity near Source's origin fell inside an INFRA skybox
+    // room and silently lost its brushes.
     let solids: Vec<Solid> = model_solids
         .into_iter()
-        .filter(|solid| !skybox.is_some_and(|room| room.contains(&solid.bounds)))
+        .filter(|solid| {
+            let origin = origins.get(&solid.model).copied().unwrap_or(Vec3::ZERO);
+            let placed = Aabb::new(solid.bounds.min + origin, solid.bounds.max + origin);
+            !skybox.is_some_and(|room| room.contains(&placed))
+        })
         .collect();
 
     // The palette is shared and rarely written to after the first few brushes.
     let palette = Mutex::new(Palette::new());
     let skipped = std::sync::atomic::AtomicUsize::new(0);
-
-    let origins = model_origins(&entity_models);
 
     // Brushes thinner than the cut-off never reach the voxel grid: filling
     // every cell they touch is what turns a 4-unit plate into a 32-unit wall.
@@ -1463,6 +1609,22 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
             })
         })
         .collect();
+
+    // Movers: the same separate entities, through the exact pipeline the world
+    // takes below, each against its own grid so it owns its own faces.
+    let movers: Vec<MoverGeometry> = if config.output.exact_surfaces {
+        entity_models
+            .iter()
+            .filter(|e| e.mode == crate::config::BrushEntityMode::Separate)
+            .map(|entity| {
+                mover_geometry(
+                    entity, map, config, &resolver, &transform, &origins, &tiles, &palette, skybox,
+                )
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
 
     // Displacements: Source's terrain, and the reason a converted outdoor map
     // used to be a floating shell of buildings over nothing.
@@ -1930,19 +2092,10 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
     };
     crate::timing::mark("convert: bake, barriers, exact surface fragments");
     let collision = config.output.exact_surfaces.then(|| {
-        let skip_sky = config.contents.skip_sky;
         let converted: Vec<&BlockSolid> = solids
             .iter()
             .zip(&block_solids)
-            .filter(|(solid, _)| {
-                let decision = resolver.decide(solid.flags);
-                decision != Decision::Skip
-                    && solid.sides.iter().any(|side| {
-                        let material = side.texture_info.and_then(|i| map.material_index(i));
-                        side_block(&decision, &resolver, material, side.texture_flags, skip_sky)
-                            .is_some()
-                    })
-            })
+            .filter(|(solid, _)| makes_blocks(solid, map, config, &resolver))
             .map(|(_, block)| block)
             .collect();
         let terrain = surfaces
@@ -2027,6 +2180,7 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
         occluders,
         fragments,
         collision,
+        movers,
     })
 }
 
@@ -2178,6 +2332,83 @@ mod tests {
             "/Entropy Zero/EntropyZero/maps/az_c4_4.bsp"
         ));
         path.exists().then(|| Map::load(path).unwrap())
+    }
+
+    /// Mod export takes every moving entity out of the world: its faces,
+    /// blocks and collision belong to the mover alone, built against its own
+    /// grid, while a mover too thin for blocks is still kept for its faces.
+    #[test]
+    fn movers_leave_the_world_with_their_own_geometry() {
+        let path = Path::new(concat!(
+            "/mnt/games/SteamLibrary/steamapps/common/Portal",
+            "/portal/maps/testchmb_a_00.bsp"
+        ));
+        if !path.exists() {
+            return;
+        }
+        let map = Map::load(path).unwrap();
+        let mut config = Config::default();
+        config.scale.units_per_block = 32.0;
+        config.props.enabled = false;
+        config.output.exact_surfaces = true;
+        let mut included = config.clone();
+        for class in crate::config::MOVER_CLASSES {
+            included
+                .entities
+                .classname_modes
+                .insert(class.to_string(), crate::config::BrushEntityMode::Include);
+        }
+        config.entities.separate_movers();
+        let moved = convert(&map, &config).unwrap();
+        let stayed = convert(&map, &included).unwrap();
+        assert!(stayed.movers.is_empty());
+        assert!(!moved.movers.is_empty());
+
+        let face_of =
+            |fragment: &crate::voxel::fragments::Fragment| match fragment.source.provenance {
+                crate::voxel::surface::SourceProvenance::Face { face, .. } => Some(face),
+                _ => None,
+            };
+        let world_faces: BTreeSet<usize> = moved.fragments.iter().filter_map(face_of).collect();
+        let stayed_faces: BTreeSet<usize> = stayed.fragments.iter().filter_map(face_of).collect();
+        let mut mover_faces = BTreeSet::new();
+        for mover in &moved.movers {
+            for fragment in &mover.fragments {
+                let face = face_of(fragment).unwrap();
+                assert!(
+                    !world_faces.contains(&face),
+                    "mover face {face} left in the world"
+                );
+                mover_faces.insert(face);
+                // Owners are the mover's own blocks.
+                if let Some(owner) = fragment.owner {
+                    let cell = [0, 1, 2].map(|a| fragment.cell[a] + owner[a]);
+                    assert!(mover.grid.is_solid(cell));
+                }
+            }
+        }
+        assert!(!mover_faces.is_empty());
+        assert!(
+            mover_faces.is_subset(&stayed_faces),
+            "included, the world draws them"
+        );
+        // This map's movers are all panels thinner than the brush-mesh
+        // cut-off, so what they leave behind in the world is light occlusion
+        // and collision rather than blocks; neither is the world's any more.
+        assert!(moved.stats.blocks_before_hollow <= stayed.stats.blocks_before_hollow);
+        assert!(moved.occluders.len() < stayed.occluders.len());
+        let size = |c: &Option<crate::voxel::collision::CellCollision>| {
+            let c = c.as_ref().unwrap();
+            c.shapes.len() + c.carriers.len()
+        };
+        assert!(size(&moved.collision) < size(&stayed.collision));
+        assert!(
+            moved
+                .movers
+                .iter()
+                .any(|m| m.grid.count() == 0 && !m.fragments.is_empty()),
+            "a mover without blocks is kept for its faces"
+        );
     }
 
     /// The whole point of drawing a thin brush instead of voxelizing it: a

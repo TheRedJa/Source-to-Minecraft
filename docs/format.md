@@ -169,6 +169,7 @@ fields in order:
 | `collision` | optional canonical `maps/<map-id>/collision.s2coll` path (section 14) |
 | `audio` | optional canonical `maps/<map-id>/audio.json` path (section 15) |
 | `logic` | optional canonical `maps/<map-id>/logic.json` path (section 16) |
+| `movers` | optional canonical `maps/<map-id>/movers.json` path (section 17); absent when the map has no movers |
 | `diagnostics` | canonical `maps/<map-id>/diagnostics.json` path |
 
 Surface-table material IDs index `materials` directly. This array therefore
@@ -309,6 +310,10 @@ residency budgets:
 | PVS clusters per map | 65,536 |
 | PVS leaves per map | 4,000,000 |
 | PVS bitset payload | 256 MiB |
+| movers per map | 16,384 |
+| cells per mover axis (`size`) | 4,096 |
+| blocks per mover, surface and carrier together | 1,000,000 |
+| props per mover | 65,536 |
 | uncompressed entry | 2 GiB |
 | uncompressed bundle payload | 64 GiB |
 | ZIP expansion ratio | 200:1 after a 1 MiB small-entry allowance |
@@ -598,3 +603,91 @@ latter), the first file to define a token winning. Escapes in the files'
 strings (`\"`, `\\`, `\n`, `\t`) are resolved; keys starting with `[`
 (`[english]` originals) are not captions.
 
+## 17. Mover table
+
+`maps/<map-id>/movers.json` optionally records the map's moving entities, for
+the mod to move each one as its own small map (a physics sub-level). Map
+metadata references it through the optional `movers` field, which sits between
+`logic` and `diagnostics`. It is absent when the map has no movers.
+
+A *mover* is a brush entity (`model` `*<n>`) of class `func_door`,
+`func_door_rotating`, `func_movelinear`, `func_tracktrain`, `func_rotating`,
+`func_button`, `func_rot_button`, `momentary_rot_button`, `infra_button`,
+`func_brush` or `func_wall_toggle`, or a `prop_door_rotating`, a door that is
+a model rather than brushes. A mover is entirely absent from the static map:
+its brushes make no `src2mc:surface` blocks, carriers or collision in the map
+schematic and collision table, its faces are not in the map's surface table,
+its brushes add nothing to the light-occlusion mask, and the props riding on
+it are not in `props.s2props` and add nothing to the map's collision.
+
+A prop rides on a mover when its `parentname`, without any `,attachment`
+suffix and matched ignoring ASCII case against `targetname`, names the mover,
+or names an entity that itself rides on one, through any chain of parents. A
+`prop_door_rotating` carries its own model. When several entities share the
+parent's name, the first mover among them in lump order is taken, failing that
+the first whose own chain reaches a mover, and a `MOVER_PARENT_AMBIGUOUS`
+warning lists the names. A mover's own `parentname` does not merge it into
+another mover; each is its own record, and the logic table keeps the parent.
+
+The payload is canonical JSON with `format` `src2mc-movers`, `version` 1, and
+`movers`, an array in entity lump order with unique entities. Each mover
+record has these fields in order:
+
+| Field | Meaning |
+| --- | --- |
+| `entity` | the entity's index in the BSP entity lump, as in the logic table's `entities` (worldspawn is 0) |
+| `classname` | lowercase |
+| `cell_origin` | map-local `[x, y, z]` cell of mover-local cell `[0, 0, 0]`, in the pose the map spawns the entity in |
+| `size` | `[sx, sy, sz]`, each 1 to 4,096: every mover-local cell the record uses lies in `[0, size)` |
+| `surfaces` | optional `maps/<map-id>/movers/<entity>.s2faces`; absent when the mover has no visible face |
+| `collision` | optional `maps/<map-id>/movers/<entity>.s2coll`; absent when no cell has a shape |
+| `blocks` | `{"surface": [...], "carrier": [...]}`, mover-local `[x, y, z]` cells |
+| `props` | the riding props, in lump order |
+
+| Record | Fields, in order |
+| --- | --- |
+| prop | `entity`, the prop's lump index; `model`, an index into the map's model-reference table; `translation`, mover-local block coordinates of the model origin; `rotation`, unit quaternion XYZW in Minecraft axes; `scale`, finite and positive; `skin`, the Source skin, already reflected in the model reference's `materials` |
+
+A mover-local position is the map-local position minus `cell_origin`; the
+mod moves the whole mover by transforming mover-local space. The logic table
+is unchanged: a mover's `volume` and `origin` stay map-local in the spawn
+pose. `cell_origin` is the componentwise minimum over the mover's blocks and
+carriers, the cells its fragments lie in and their owner cells, every cell a
+collision shape reaches into (a hanging piece reaches one cell beyond its
+owner), and for each prop the cells of its transformed model bounding box and
+the cell holding its origin. Every coordinate in the record is therefore at
+least 0, a prop's `translation` included. A mover with none of these — an
+invisible, non-solid brush entity with no props, such as most buttons, whose
+model is a separate prop — has nothing to move and is left out of the table
+(it still has its logic-table entity and volume); a `MOVER_SUMMARY` info
+diagnostic counts exported, block-less and left-out movers, riding props and
+ambiguous parent names.
+
+The mover's geometry is built exactly as the map's (sections 5 and 14), from
+its own brushes alone: brushes thinner than the brush-mesh cut-off are not
+voxelized, the rest become the mover's own voxel grid, the face lump's faces
+are cut per cell against that grid, and collision is computed against it, so a
+fragment's owner and a hanging collision piece's owner are one of the mover's
+own blocks. Nothing is hollowed. A mover built only of thin brushes, such as
+a door panel, has an empty `surface` list: its fragments are all unowned and
+its collision lives in carriers. Riding props add their volume to the mover's
+collision by the rules of section 14.
+
+`blocks.surface` is the mover's voxel grid: each cell holds an
+`src2mc:surface` block. `blocks.carrier` is the collision table's carriers:
+each cell holds an `src2mc:carrier` block. Both lists are strictly ascending
+by X, then Y, then Z, lie inside `size`, and are disjoint. Unlike the map
+schematic, no cell is reserved for prop roots; where a prop's root block goes
+in the sub-level is the mod's choice.
+
+The surface payload is exactly the section 5 S2FACE v2 format with every
+coordinate mover-local: cells, sections and owner cells, and the UV regions'
+offsets, which are rewritten so that `s` and `t` at a mover-local point equal
+their map-local values at the same point in the spawn pose. Material IDs index
+the map's own material-reference table, and textures share the map's atlas.
+The collision payload is exactly the section 14 S2COLL format with mover-local
+cells and sections. A riding prop's model and materials are exported with the
+map's models whether or not anything in `props.s2props` uses them.
+
+Limits are in section 10. Each mover adds at most two bundle entries, which
+count against the ZIP entry limit.

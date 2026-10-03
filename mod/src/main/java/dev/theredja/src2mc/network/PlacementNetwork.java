@@ -18,7 +18,8 @@ public final class PlacementNetwork {
     public static void register(RegisterPayloadHandlersEvent event) {
         // "2": surface-change payload added alongside the v2 exact-fragment surface table.
         // "3": map logic's sound sync and use payloads.
-        var registrar = event.registrar("3");
+        // "4": mover sync (which Sable sub-level carries which map's mover).
+        var registrar = event.registrar("4");
         registrar.playToClient(PlacementSyncPayload.TYPE, PlacementSyncPayload.STREAM_CODEC,
             (payload, context) -> {
                 PlacementIndex index = new PlacementIndex();
@@ -36,6 +37,7 @@ public final class PlacementNetwork {
         registrar.playToClient(SurfaceChangePayload.TYPE, SurfaceChangePayload.STREAM_CODEC,
             (payload, context) -> dev.theredja.src2mc.client.ClientLightRefresh.onSurfaceBlocksChanged(payload.dimension(), payload.sections()));
         dev.theredja.src2mc.logic.LogicNetwork.register(registrar);
+        dev.theredja.src2mc.logic.MoverNetwork.register(registrar);
     }
 
     public static PlacementIndex clientIndex(ResourceLocation dimension) { return CLIENT.getOrDefault(dimension, new PlacementIndex()); }

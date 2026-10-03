@@ -496,3 +496,44 @@ anything that moves.
   Every input an entity does not handle is counted per class and input in
   `/src2mc logic status`, which shows what the next phase must cover.
 
+
+## D21 — Moving entities are Sable sub-levels
+
+Doors, buttons, lifts, trains and `func_brush` move in Source; a block world
+cannot move a block. Every map mover is therefore its own small map: the
+converter leaves it out of the world (blocks, surfaces, collision, props) and
+writes its exact surfaces, collision and the props parented to it in
+mover-local cells (format section 17). The mod builds one Sable sub-level per
+mover and placement, of unbreakable invisible `src2mc:mover` blocks, and
+Sable carries it (user, 2026-10-03: "use Sable for any movement as this
+doesn't mean we have to do two systems"; Sable is a required dependency).
+
+- **One system for all motion.** Sable already makes players and mobs collide
+  with a rotated or moving block structure, carries the players standing on it
+  (lifts, trains) and pushes those in its way, and networks and interpolates
+  its pose. src2mc only says where the sub-level is.
+- **Kinematic, not simulated.** A sub-level is a physics body, and gravity
+  pulls it. A resting mover is held by a fixed constraint to the world at its
+  pose, as Create: Aeronautics' physics staff freezes a sub-level (checked in
+  its `PhysicsStaffServerHandler`). A moving one is teleported on every physics
+  substep to the pose its entity has at that moment, its velocity cleared,
+  and held there by a new constraint, so it follows Source's `LinearMove` and
+  `AngularMove` exactly. A move that reverses part way takes the remaining
+  distance at the entity's speed, as Source's does.
+- **Collision.** Entities collide with a mover through the block's shape at
+  its plot position, which is the mover's own collision table (D18), found
+  through the plot's centre block, where mover-local cell (0, 0, 0) stands.
+  Sable's physics engine is given no shape for these blocks: contacts with the
+  door frame a door slides past would only fight the kinematic path. Sable's
+  per-state mass and solidity checks see a full cube, since a sub-level
+  without mass is removed.
+- **Drawing.** The plot's blocks are invisible. src2mc bakes each mover's
+  surfaces and carried props into mover-local buffers and draws them with the
+  sub-level's interpolated render pose, lit as one by the world's light at
+  the mover's middle (first version; rebuilt when that light changes).
+- **Lifetime.** Sub-levels exist for every placed map, whether its logic runs
+  or not; Sable saves and loads them with the world, and the dimension's saved
+  data keeps which is which. A removed placement or a re-export that changes a
+  mover replaces its sub-level. `/src2mc movers status|respawn`.
+- **Not yet.** Skeletal animation (`SetAnimation`), `env_sprite`, lights and
+  VScript come later (user, 2026-10-03). Movers cannot be broken for now.

@@ -47,6 +47,17 @@ public final class LogicCommands {
                         .then(argument("parameter", StringArgumentType.greedyString())
                             .executes(context -> fire(context.getSource(), StringArgumentType.getString(context, "target"),
                                 StringArgumentType.getString(context, "input"), StringArgumentType.getString(context, "parameter")))))))));
+        event.getDispatcher().register(literal(Src2mc.MOD_ID).then(literal("movers")
+            .requires(source -> source.hasPermission(2))
+            .then(literal("status").executes(context -> {
+                context.getSource().sendSuccess(() -> Component.literal(MoverSystem.status(context.getSource().getLevel())), false);
+                return 1;
+            }))
+            .then(literal("respawn").executes(context -> {
+                int count = MoverSystem.respawn(context.getSource().getLevel());
+                context.getSource().sendSuccess(() -> Component.literal("src2mc movers: removed " + count + " sub-levels and built them again"), true);
+                return 1;
+            }))));
     }
 
     /** The placement the command means: of {@code mapId} if given, holding the source's position, else nearest it. */

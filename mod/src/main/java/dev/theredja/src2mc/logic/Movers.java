@@ -6,9 +6,10 @@ import net.minecraft.nbt.CompoundTag;
 /**
  * Buttons and doors as the map's logic sees them, after the SDK's {@code buttons.cpp},
  * {@code doors.cpp} and {@code props.cpp}: their states, the outputs each move fires and the time
- * a move takes. Nothing moves in the world yet; a move is its duration, so outputs that wait for
- * a door to open fully still wait as long as in Source. INFRA's {@code infra_button} is, by its
- * FGD, a {@code func_door} that also fires {@code OnPressed} when used.
+ * a move takes. Each also has a {@link MoverPose} at any moment, which is where Sable carries its
+ * sub-level (D21): a move goes from where the entity is to its destination at the entity's speed,
+ * as Source's {@code LinearMove} and {@code AngularMove} do. INFRA's {@code infra_button} is, by
+ * its FGD, a {@code func_door} that also fires {@code OnPressed} when used.
  */
 final class Movers {
     private Movers() {}
@@ -44,6 +45,34 @@ final class Movers {
         return new double[]{Math.cos(pitch) * Math.cos(yaw), Math.cos(pitch) * Math.sin(yaw), -Math.sin(pitch)};
     }
 
+    private static final int ROTATE_BACKWARDS = 2, ROTATE_ROLL = 64, ROTATE_PITCH = 128;
+
+    /** {@code CBaseToggle::AxisDir} with {@code SF_DOOR_ROTATE_BACKWARDS}: the angle a rotating entity turns about, per degree. */
+    private static double[] moveAngles(LogicEntity entity) {
+        double[] axis = entity.hasSpawnFlags(ROTATE_ROLL) ? new double[]{0, 0, 1}
+            : entity.hasSpawnFlags(ROTATE_PITCH) ? new double[]{1, 0, 0} : new double[]{0, 1, 0};
+        if (entity.hasSpawnFlags(ROTATE_BACKWARDS)) for (int i = 0; i < 3; i++) axis[i] = -axis[i];
+        return axis;
+    }
+
+    /** The pose {@code fraction} of the way along a straight move of {@code travel} blocks. */
+    private static MoverPose linear(double[] travel, double fraction) {
+        return MoverPose.of(new double[]{travel[0] * fraction, travel[1] * fraction, travel[2] * fraction}, new org.joml.Quaterniond());
+    }
+
+    /** The pose {@code fraction} of the way through a turn of {@code degrees} about {@code axis} from {@code start}. */
+    private static MoverPose angular(double[] start, double[] axis, double degrees, double fraction) {
+        double turn = degrees * fraction;
+        return MoverPose.of(new double[3], MoverPose.angles(start[0] + axis[0] * turn, start[1] + axis[1] * turn, start[2] + axis[2] * turn));
+    }
+
+    /** The compiled-to-open offset of a sliding entity, Source's {@code m_vecPosition2 - m_vecPosition1}, in blocks. */
+    private static double[] slide(MapLogic map, LogicEntity entity, double lip) {
+        double[] direction = moveDirection(entity);
+        double length = Math.max(0, extent(map, entity, direction) - lip);
+        return MoverPose.sourceToBlocks(new double[]{direction[0] * length, direction[1] * length, direction[2] * length});
+    }
+
     /** {@code PlayLockSounds}: the locked or unlocked sound, at the entity. */
     private static void lockSound(LogicEntity entity, boolean locked) {
         entity.map.emitSound(entity.key(locked ? "locked_sound" : "unlocked_sound"), entity.position(), null, null, 0, -1);
@@ -64,12 +93,18 @@ final class Movers {
         private int direction = 1;
         private double lastUsed = -1;
         private boolean beingUsed;
+        // The move in progress: it began at moveStart and ends at nextThink.
+        private double moveStart;
+        private double[] slide = new double[3], startAngles = new double[3], axis = new double[3];
+        private boolean rotating;
 
         Button(MapLogic map, int index, LogicTable.Entity entity) { super(map, index, entity); }
 
         @Override void spawn() {
             momentary = classname.equals("momentary_rot_button");
-            boolean rotating = !classname.equals("func_button");
+            rotating = !classname.equals("func_button");
+            startAngles = MoverPose.parseAngles(key("angles"));
+            axis = moveAngles(this);
             speed = number("speed", 0);
             if (speed == 0) speed = momentary ? 100 : 40;
             wait = number("wait", 0);
@@ -84,6 +119,7 @@ final class Movers {
                 if (lip == 0) lip = 4;
                 double length = extent(map, this, moveDirection(this)) - lip;
                 travel = length < 1 || hasSpawnFlags(DONT_MOVE) ? 0 : length / speed;
+                if (travel > 0) slide = slide(map, this, lip);
             }
             if (momentary) {
                 position = Math.max(0, Math.min(1, number("startposition", 0)));
@@ -133,12 +169,35 @@ final class Movers {
             if (locked) { lockSound(this, true); return; }
             lockSound(this, false);
             state = Toggle.GOING_UP;
+            moveStart = map.time();
             nextThink = map.time() + travel;
         }
 
         private void goReturn() {
             state = Toggle.GOING_DOWN;
+            moveStart = map.time();
             nextThink = map.time() + travel;
+        }
+
+        /** How far pressed in the button is at time {@code t}: 0 out, 1 in. */
+        private double fraction(double t) {
+            if (momentary) return position;
+            double done = travel <= 0 ? 1 : Math.max(0, Math.min(1, (t - moveStart) / travel));
+            return switch (state) {
+                case AT_BOTTOM -> 0;
+                case AT_TOP -> 1;
+                case GOING_UP -> done;
+                case GOING_DOWN -> 1 - done;
+            };
+        }
+
+        @Override MoverPose pose(double t) {
+            double fraction = fraction(t);
+            return rotating ? angular(startAngles, axis, distance, fraction) : linear(slide, fraction);
+        }
+
+        @Override boolean moving(double t) {
+            return momentary ? beingUsed : state == Toggle.GOING_UP || state == Toggle.GOING_DOWN;
         }
 
         @Override void think() {
@@ -237,6 +296,7 @@ final class Movers {
             tag.putBoolean("locked", locked);
             tag.putDouble("position", position);
             tag.putInt("direction", direction);
+            tag.putDouble("move_start", moveStart);
         }
 
         @Override void load(CompoundTag tag) {
@@ -245,6 +305,7 @@ final class Movers {
             locked = tag.getBoolean("locked");
             position = tag.getDouble("position");
             direction = tag.getInt("direction") == -1 ? -1 : 1;
+            moveStart = tag.getDouble("move_start");
         }
 
         @Override String state() {
@@ -268,6 +329,13 @@ final class Movers {
         private double travel, wait, lastHeld = -1, moveDone = NEVER, returnAt = NEVER;
         private Actor activator;
         private long movingSound = -1;
+        // The move in progress: from this fraction of the way open, starting at moveStart.
+        private double moveFrom, moveStart;
+        private double distance, speed;
+        // prop_door_rotating moves by angles, as CPropDoorRotating does: from angFrom to angTo.
+        private double[] closedAngles = new double[3], forwardAngles, backAngles, angFrom = new double[3], angTo = new double[3];
+        private PlayerActor openAwayFrom;
+        private double[] slide = new double[3], startAngles = new double[3], axis = new double[3];
 
         Door(MapLogic map, int index, LogicTable.Entity entity) { super(map, index, entity); }
 
@@ -279,17 +347,28 @@ final class Movers {
                 case "func_movelinear" -> Kind.MOVELINEAR;
                 default -> Kind.BRUSH;
             };
-            double speed = number("speed", 0);
+            speed = number("speed", 0);
             if (speed == 0) speed = 100;
-            double distance = switch (classname) {
+            distance = switch (classname) {
                 case "func_door_rotating", "prop_door_rotating" -> Math.abs(number("distance", 90));
                 case "func_movelinear" -> Math.abs(number("movedistance", 100));
                 default -> extent(map, this, moveDirection(this)) - number("lip", 0);
             };
             travel = Math.max(0, distance) / speed;
+            startAngles = MoverPose.parseAngles(key("angles"));
+            axis = classname.equals("prop_door_rotating")
+                // CPropDoorRotating turns about its up axis; opendir 2 opens backwards.
+                ? new double[]{0, Variant.integer(key("opendir")) == 2 ? -1 : 1, 0} : moveAngles(this);
+            if (kind == Kind.PROP) spawnPropDoor();
+            if (kind == Kind.MOVELINEAR) {
+                double[] direction = moveDirection(this);
+                slide = MoverPose.sourceToBlocks(new double[]{direction[0] * distance, direction[1] * distance, direction[2] * distance});
+            } else if (!rotating()) {
+                slide = slide(map, this, number("lip", 0));
+            }
             wait = kind == Kind.PROP ? number("returndelay", -1) : number("wait", 4);
             locked = hasSpawnFlags(LOCKED);
-            boolean open = kind == Kind.PROP ? Variant.integer(key("spawnpos")) == 1
+            boolean open = kind == Kind.PROP ? Variant.integer(key("spawnpos")) != 0 || hasSpawnFlags(START_OPEN)
                 : kind == Kind.MOVELINEAR ? number("startposition", 0) >= 1
                 : Variant.integer(key("spawnpos")) == 1 || hasSpawnFlags(START_OPEN);
             if (open) state = Toggle.AT_TOP;
@@ -329,6 +408,7 @@ final class Movers {
 
         /** {@code CBasePropDoor::OnUse}. */
         private void usePropDoor(PlayerActor player) {
+            openAwayFrom = player;
             if (state == Toggle.AT_BOTTOM || (state == Toggle.AT_TOP && hasSpawnFlags(USE_CLOSES))) {
                 if (locked) {
                     lockSound(this, true);
@@ -356,10 +436,126 @@ final class Movers {
 
         private boolean silent() { return hasSpawnFlags(SILENT); }
 
+        private boolean rotating() { return classname.equals("func_door_rotating") || kind == Kind.PROP; }
+
+        /**
+         * {@code CPropDoorRotating::Spawn} and {@code CalcOpenAngles}: the closed angles are the
+         * entity's, forward opens to the yaw minus the distance and back to the yaw plus it, the
+         * two swapped for a door hinged on its left; the spawn position picks where it starts.
+         */
+        private void spawnPropDoor() {
+            closedAngles = MoverPose.parseAngles(key("angles"));
+            forwardAngles = new double[]{closedAngles[0], closedAngles[1] - distance, closedAngles[2]};
+            backAngles = new double[]{closedAngles[0], closedAngles[1] + distance, closedAngles[2]};
+            if (hingeOnLeft()) { double[] swap = forwardAngles; forwardAngles = backAngles; backAngles = swap; }
+            angFrom = closedAngles.clone();
+            int spawn = Variant.integer(key("spawnpos"));
+            angTo = hasSpawnFlags(START_OPEN) || spawn == 1 ? forwardAngles
+                : spawn == 2 ? backAngles
+                : spawn == 3 ? MoverPose.parseAngles(key("ajarangles")) : closedAngles.clone();
+        }
+
+        /**
+         * {@code IsHingeOnLeft}: the corner of the model's box farthest from its origin, across the
+         * floor, lies to the door's right. Asked in the model's own frame, where Source's right
+         * is Minecraft's +z; the same as Source's world-box test for a door square to the axes.
+         */
+        private boolean hingeOnLeft() {
+            if (map.map == null || map.map.movers() == null) return false;
+            int mover = map.map.movers().indexOfEntity(index);
+            if (mover < 0) return false;
+            for (var prop : map.map.movers().movers().get(mover).props()) {
+                if (prop.entity() != index) continue;
+                float[] b = map.map.models().get(prop.model()).bounds();
+                if (b == null) return false;
+                double minLength = b[0] * b[0] + b[2] * b[2], maxLength = b[3] * b[3] + b[5] * b[5];
+                return (minLength > maxLength ? b[2] : b[5]) > 0;
+            }
+            return false;
+        }
+
+        /** Where a prop door turns to when it opens: its one direction, else away from whoever opens it. */
+        private double[] openAngles() {
+            int direction = Variant.integer(key("opendir"));
+            if (direction == 1) return forwardAngles;
+            if (direction == 2) return backAngles;
+            double[] player = openAwayFrom == null ? null : map.playerPosition(openAwayFrom);
+            double[] origin = position();
+            if (player == null || origin == null) return forwardAngles;
+            // CPropDoorRotating::BeginOpening: open back when the player stands in front.
+            org.joml.Vector3d forward = MoverPose.angles(closedAngles[0], closedAngles[1], closedAngles[2]).transform(new org.joml.Vector3d(1, 0, 0));
+            double ahead = forward.x * (player[0] - origin[0]) + forward.y * (player[1] - origin[1]) + forward.z * (player[2] - origin[2]);
+            return ahead > 0 ? backAngles : forwardAngles;
+        }
+
+        /** The prop door's angles at time {@code t}: {@code AngularMove} turns each angle at a constant rate. */
+        private double[] propAngles(double t) {
+            return switch (state) {
+                case AT_BOTTOM -> closedAngles;
+                case AT_TOP -> angTo;
+                case GOING_UP, GOING_DOWN -> {
+                    double length = moveDone - moveStart;
+                    double done = !(length > 0) || moveDone == NEVER ? 1 : Math.max(0, Math.min(1, (t - moveStart) / length));
+                    yield new double[]{angFrom[0] + (angTo[0] - angFrom[0]) * done, angFrom[1] + (angTo[1] - angFrom[1]) * done,
+                        angFrom[2] + (angTo[2] - angFrom[2]) * done};
+                }
+            };
+        }
+
+        /** How far open the door is at time {@code t}: 0 at its first position, 1 at its second. */
+        private double fraction(double t) {
+            double target = state == Toggle.GOING_UP ? 1 : 0;
+            return switch (state) {
+                case AT_BOTTOM -> 0;
+                case AT_TOP -> 1;
+                case GOING_UP, GOING_DOWN -> {
+                    double length = moveDone - moveStart;
+                    double done = !(length > 0) || moveDone == NEVER ? 1 : Math.max(0, Math.min(1, (t - moveStart) / length));
+                    yield moveFrom + (target - moveFrom) * done;
+                }
+            };
+        }
+
+        /** Starts a move toward fully open (1) or closed (0) from wherever the door is, at its speed. */
+        private void moveTo(double target) {
+            double now = map.time();
+            if (kind == Kind.PROP) {
+                double[] current = propAngles(now);
+                double[] destination = target >= 1 ? (state == Toggle.GOING_UP || state == Toggle.AT_TOP ? angTo : openAngles()) : closedAngles;
+                double turn = Math.max(Math.abs(destination[0] - current[0]), Math.max(Math.abs(destination[1] - current[1]), Math.abs(destination[2] - current[2])));
+                angFrom = current.clone();
+                angTo = destination.clone();
+                moveStart = now;
+                moveDone = now + turn / speed;
+                return;
+            }
+            moveFrom = fraction(now);
+            moveStart = now;
+            moveDone = now + Math.abs(target - moveFrom) * travel;
+        }
+
+        @Override MoverPose pose(double t) {
+            double fraction = fraction(t);
+            if (kind == Kind.MOVELINEAR) {
+                // CFuncMoveLinear spawns startposition of the way along its path.
+                double start = Math.max(0, Math.min(1, number("startposition", 0)));
+                return linear(slide, fraction - (start >= 1 ? 1 : 0));
+            }
+            if (kind == Kind.PROP) {
+                // The prop is placed at its closed angles already: the pose is the turn from them.
+                double[] now = propAngles(t);
+                return MoverPose.of(new double[3], MoverPose.angles(now[0], now[1], now[2])
+                    .mul(MoverPose.angles(closedAngles[0], closedAngles[1], closedAngles[2]).conjugate()));
+            }
+            return rotating() ? angular(startAngles, axis, distance, fraction) : linear(slide, fraction);
+        }
+
+        @Override boolean moving(double t) { return state == Toggle.GOING_UP || state == Toggle.GOING_DOWN; }
+
         private void goUp() {
             if (!silent() && state != Toggle.GOING_UP && state != Toggle.GOING_DOWN) startMoving(true);
+            moveTo(1);
             state = Toggle.GOING_UP;
-            moveDone = map.time() + travel;
             returnAt = NEVER;
             schedule();
             fire("onopen", this, null);
@@ -367,8 +563,8 @@ final class Movers {
 
         private void goDown() {
             if (!silent() && state != Toggle.GOING_UP && state != Toggle.GOING_DOWN) startMoving(false);
+            moveTo(0);
             state = Toggle.GOING_DOWN;
-            moveDone = map.time() + travel;
             returnAt = NEVER;
             schedule();
             fire("onclose", this, null);
@@ -433,6 +629,7 @@ final class Movers {
                             lockSound(this, false);
                             fire("onopen", by, null);
                             activator = by;
+                            openAwayFrom = null;
                             goUp();
                         }
                     } else if (state != Toggle.AT_TOP && state != Toggle.GOING_UP) {
@@ -478,6 +675,11 @@ final class Movers {
             tag.putDouble("travel", travel);
             if (moveDone != NEVER) tag.putDouble("move_done", moveDone);
             if (returnAt != NEVER) tag.putDouble("return_at", returnAt);
+            tag.putDouble("move_from", moveFrom);
+            tag.putDouble("move_start", moveStart);
+            if (kind == Kind.PROP) {
+                for (int i = 0; i < 3; i++) { tag.putDouble("ang_from" + i, angFrom[i]); tag.putDouble("ang_to" + i, angTo[i]); }
+            }
         }
 
         @Override void load(CompoundTag tag) {
@@ -487,6 +689,11 @@ final class Movers {
             if (tag.contains("travel")) travel = tag.getDouble("travel");
             moveDone = tag.contains("move_done") ? tag.getDouble("move_done") : NEVER;
             returnAt = tag.contains("return_at") ? tag.getDouble("return_at") : NEVER;
+            moveFrom = tag.getDouble("move_from");
+            moveStart = tag.getDouble("move_start");
+            if (kind == Kind.PROP && tag.contains("ang_to0")) {
+                for (int i = 0; i < 3; i++) { angFrom[i] = tag.getDouble("ang_from" + i); angTo[i] = tag.getDouble("ang_to" + i); }
+            }
         }
 
         @Override String state() {

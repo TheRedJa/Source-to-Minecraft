@@ -59,7 +59,43 @@ pub struct MapExport {
     pub audio: Option<crate::output::audio::AudioExport>,
     /// The map's entity logic; absent when the map has no entities.
     pub logic: Option<crate::output::logic::LogicTable>,
+    /// The map's moving entities, in entity lump order (format section 17).
+    pub movers: Vec<MoverExport>,
     pub diagnostics: metadata::Diagnostics,
+}
+
+/// One moving entity, cut out of the world and moved into cells of its own.
+pub struct MoverExport {
+    /// Index of the entity in the BSP entity lump.
+    pub entity: usize,
+    /// Lowercase.
+    pub classname: String,
+    /// The map-local cell of mover-local `[0, 0, 0]`.
+    pub cell_origin: IVec3,
+    pub size: IVec3,
+    /// Mover-local, UVs included.
+    pub faces: Vec<surface::EncodedFace>,
+    /// Encoded mover-local collision table; absent when nothing collides.
+    pub collision: Option<Vec<u8>>,
+    /// Mover-local, sorted.
+    pub surface_blocks: Vec<IVec3>,
+    /// Mover-local, sorted, none of them a surface block.
+    pub carrier_blocks: Vec<IVec3>,
+    pub props: Vec<MoverPropExport>,
+}
+
+/// A prop riding on a mover. The model reference is resolved when the map's
+/// model table is, at write time, exactly as for a placed prop.
+pub struct MoverPropExport {
+    pub entity: usize,
+    pub source_model: String,
+    pub model_content_id: String,
+    pub material_ids: Vec<u32>,
+    /// Mover-local block coordinates of the model origin.
+    pub translation: [f64; 3],
+    pub rotation: [f64; 4],
+    pub scale: f64,
+    pub skin: i32,
 }
 
 pub struct WrittenCampaign {
@@ -87,10 +123,49 @@ pub fn from_conversion(
         .context("mod export produced an empty map")?;
     let extracted = crate::source::extract::extract_mod_props(map, config);
     crate::timing::mark("export: load prop models");
+    // Movers: every brush entity the conversion took out of the world, and
+    // every `prop_door_rotating`, a door that is a model rather than brushes.
+    // A prop parented to one rides on it and leaves the world with it.
+    let entities = crate::bsp::entities::extract(map, &conversion.transform);
+    let mover_entities: BTreeSet<usize> = conversion
+        .movers
+        .iter()
+        .map(|mover| mover.entity)
+        .chain(
+            entities
+                .iter()
+                .filter(|e| e.classname.eq_ignore_ascii_case("prop_door_rotating"))
+                .map(|e| e.index),
+        )
+        .collect();
+    let attachments = crate::output::movers::attach(
+        &entities,
+        &mover_entities,
+        extracted.iter().filter_map(|item| item.prop.entity),
+    );
+    let mut riding: BTreeMap<usize, Vec<crate::source::extract::ModProp>> = BTreeMap::new();
+    let mut placed = Vec::with_capacity(extracted.len());
+    for item in extracted {
+        match item
+            .prop
+            .entity
+            .and_then(|entity| attachments.mover_of.get(&entity))
+        {
+            Some(&mover) => riding.entry(mover).or_default().push(item),
+            None => placed.push(item),
+        }
+    }
+    let extracted = placed;
     let mut collision = conversion.collision.clone();
     let (mut solid_props, mut prop_cells) = (0, 0);
     if let Some(collision) = collision.as_mut() {
-        (solid_props, prop_cells) = add_prop_collision(config, conversion, &extracted, collision);
+        (solid_props, prop_cells) = add_prop_collision(
+            config,
+            &conversion.transform,
+            &conversion.grid,
+            &extracted,
+            collision,
+        );
     }
     crate::timing::mark("export: prop collision");
     // Carriers are blocks too, and may sit a cell outside the grid: the anchor
@@ -136,7 +211,7 @@ pub fn from_conversion(
     // materials never enter the atlas and every prop silently becomes a
     // fallback material.
     let mut prop_texture_spans = BTreeMap::<String, f64>::new();
-    for item in &extracted {
+    for item in extracted.iter().chain(riding.values().flatten()) {
         for part in &item.model.parts {
             if part.uv_per_unit.is_finite() && part.uv_per_unit > 0.0 {
                 let blocks = 1.0 / (part.uv_per_unit * UNITS_PER_BLOCK);
@@ -147,14 +222,25 @@ pub fn from_conversion(
             }
         }
     }
-    let (mut materials, textures, face_material_ids, prop_bucket_ids) = extract_materials(
-        map,
-        config,
-        &prop_texture_spans,
-        &conversion.fragments,
-        quality,
-    );
+    // The movers' faces are the map's faces too: they share its material table
+    // and atlas, so they are resolved in the same pass, after the world's.
+    let all_fragments: Vec<&crate::voxel::fragments::Fragment> = conversion
+        .fragments
+        .iter()
+        .chain(conversion.movers.iter().flat_map(|mover| &mover.fragments))
+        .collect();
+    let (mut materials, textures, face_material_ids, prop_bucket_ids) =
+        extract_materials(map, config, &prop_texture_spans, &all_fragments, quality);
+    drop(all_fragments);
     crate::timing::mark("export: materials and textures");
+    let (face_material_ids, mut mover_material_ids) =
+        face_material_ids.split_at(conversion.fragments.len());
+    let mut mover_face_ids: BTreeMap<usize, &[u32]> = BTreeMap::new();
+    for mover in &conversion.movers {
+        let (ids, rest) = mover_material_ids.split_at(mover.fragments.len());
+        mover_face_ids.insert(mover.entity, ids);
+        mover_material_ids = rest;
+    }
     let faces = conversion
         .fragments
         .iter()
@@ -174,7 +260,7 @@ pub fn from_conversion(
     // Keyed by skin as well: one mesh, but each skin its own material slots.
     let mut model_by_path: BTreeMap<(String, i32), (String, Vec<u32>, Vec<u8>, Option<String>)> =
         BTreeMap::new();
-    for item in &extracted {
+    for item in extracted.iter().chain(riding.values().flatten()) {
         let key = (item.prop.model.clone(), item.prop.skin);
         if model_by_path.contains_key(&key) {
             continue;
@@ -266,6 +352,75 @@ pub fn from_conversion(
     if let Some(collision) = collision.as_mut() {
         collision.carriers.retain(|cell| !taken.contains(cell));
     }
+    // Each mover, in lump order, in cells of its own.
+    let no_blocks = crate::voxel::grid::VoxelGrid::new();
+    let geometry: BTreeMap<usize, &crate::convert::MoverGeometry> = conversion
+        .movers
+        .iter()
+        .map(|mover| (mover.entity, mover))
+        .collect();
+    let mut movers = Vec::new();
+    let (mut attached_props, mut empty_movers, mut thin_movers) = (0, 0, 0);
+    for &entity in &mover_entities {
+        let shape = geometry.get(&entity).copied();
+        let grid = shape.map_or(&no_blocks, |mover| &mover.grid);
+        let mut mover_collision = shape
+            .map(|mover| mover.collision.clone())
+            .unwrap_or_default();
+        let riders = riding.remove(&entity).unwrap_or_default();
+        add_prop_collision(
+            config,
+            &conversion.transform,
+            grid,
+            &riders,
+            &mut mover_collision,
+        );
+        let mut props = Vec::with_capacity(riders.len());
+        for item in &riders {
+            let (model_content_id, slots, _, _) =
+                &model_by_path[&(item.prop.model.clone(), item.prop.skin)];
+            let origin = conversion.transform.to_block_space(item.prop.origin);
+            let bounds = conversion.transform.transform_bounds(item.bounds);
+            props.push((
+                MoverPropExport {
+                    entity: item.prop.entity.context("mover prop without an entity")?,
+                    source_model: item.prop.model.clone(),
+                    model_content_id: model_content_id.clone(),
+                    material_ids: slots.clone(),
+                    translation: [origin.x, origin.y, origin.z],
+                    rotation: crate::output::display::rotation(&item.prop, &conversion.transform),
+                    scale: item.prop.scale,
+                    skin: item.prop.skin,
+                },
+                bounds,
+            ));
+        }
+        let classname = shape
+            .map(|mover| mover.classname.clone())
+            .or_else(|| entities.get(entity).map(|e| e.classname.clone()))
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let fragments = shape.map_or(&[][..], |mover| &mover.fragments[..]);
+        let ids = mover_face_ids.get(&entity).copied().unwrap_or(&[]);
+        match localize(
+            entity,
+            classname,
+            grid,
+            fragments,
+            ids,
+            mover_collision,
+            props,
+        )? {
+            Some(mover) => {
+                attached_props += mover.props.len();
+                if mover.surface_blocks.is_empty() {
+                    thin_movers += 1;
+                }
+                movers.push(mover);
+            }
+            None => empty_movers += 1,
+        }
+    }
     let blocks = conversion
         .grid
         .iter()
@@ -325,6 +480,41 @@ pub fn from_conversion(
             severity: metadata::Severity::Info,
             code: "LIGHT_OCCLUSION_SUMMARY".into(),
             message: "cells recorded as blocking daylight: every block of the map, and drawn geometry that holds none".into(),
+            context,
+        });
+    }
+    if !mover_entities.is_empty() {
+        let mut context = BTreeMap::new();
+        context.insert("movers".into(), movers.len().to_string());
+        context.insert("without_blocks".into(), thin_movers.to_string());
+        context.insert("empty".into(), empty_movers.to_string());
+        context.insert("attached_props".into(), attached_props.to_string());
+        context.insert(
+            "ambiguous_parents".into(),
+            attachments.ambiguous.len().to_string(),
+        );
+        diagnostics.push(metadata::Diagnostic {
+            severity: metadata::Severity::Info,
+            code: "MOVER_SUMMARY".into(),
+            message: "moving entities cut out of the world into the mover table; empty ones had nothing to draw, collide with or carry".into(),
+            context,
+        });
+    }
+    if !attachments.ambiguous.is_empty() {
+        let mut context = BTreeMap::new();
+        context.insert(
+            "targetnames".into(),
+            attachments
+                .ambiguous
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+        diagnostics.push(metadata::Diagnostic {
+            severity: metadata::Severity::Warning,
+            code: "MOVER_PARENT_AMBIGUOUS".into(),
+            message: "props are parented to a name several entities share; each rides on the first mover of that name in lump order".into(),
             context,
         });
     }
@@ -396,7 +586,6 @@ pub fn from_conversion(
         .context("encoding the light-occlusion mask")?;
     // Scenes come first: the sound table carries the lines they speak, and
     // the logic table the captions of the sound table's scripts.
-    let entities = crate::bsp::entities::extract(map, &conversion.transform);
     let vfs = crate::source::vfs::Vfs::for_map(&map.path, &config.materials.game_dir_paths());
     let pak = Some(&map.bsp.pack);
     let scenes = crate::output::logic::Scenes::load(&vfs, pak, &entities);
@@ -461,8 +650,134 @@ pub fn from_conversion(
         collision,
         audio,
         logic,
+        movers,
         diagnostics: metadata::Diagnostics::new(diagnostics)?,
     })
+}
+
+/// Move one mover's geometry and riders out of map-local cells into its own.
+///
+/// The origin is the lowest cell anything of the mover is in, so every
+/// mover-local cell is at least zero: its blocks, its carriers, the cells its
+/// faces lie in and belong to, a cell its collision reaches into, and for each
+/// prop the cells of its box and the cell its origin is in. `None` when the
+/// mover has none of these, so nothing to draw, collide with or carry.
+fn localize(
+    entity: usize,
+    classname: String,
+    grid: &crate::voxel::grid::VoxelGrid,
+    fragments: &[crate::voxel::fragments::Fragment],
+    material_ids: &[u32],
+    collision: crate::voxel::collision::CellCollision,
+    props: Vec<(MoverPropExport, crate::geom::Aabb)>,
+) -> Result<Option<MoverExport>> {
+    use crate::voxel::collision::STEPS;
+    ensure!(
+        fragments.len() == material_ids.len(),
+        "mover fragments and material IDs disagree"
+    );
+    let mut min = [i32::MAX; 3];
+    let mut max = [i32::MIN; 3];
+    let mut cover = |cell: IVec3| {
+        for axis in 0..3 {
+            min[axis] = min[axis].min(cell[axis]);
+            max[axis] = max[axis].max(cell[axis]);
+        }
+    };
+    for (cell, _) in grid.iter() {
+        cover(cell);
+    }
+    for fragment in fragments {
+        cover(fragment.cell);
+        if let Some(owner) = fragment.owner {
+            cover(add(fragment.cell, owner));
+        }
+    }
+    for cell in &collision.carriers {
+        cover(*cell);
+    }
+    for (cell, boxes) in &collision.shapes {
+        cover(*cell);
+        // A piece hanging off a block reaches into the cell beside it.
+        for b in boxes {
+            cover(std::array::from_fn(|axis| {
+                cell[axis] + i32::from(b[axis]).div_euclid(STEPS)
+            }));
+            cover(std::array::from_fn(|axis| {
+                cell[axis] + (i32::from(b[axis + 3]) - 1).div_euclid(STEPS)
+            }));
+        }
+    }
+    for (prop, bounds) in &props {
+        let floor = |v: f64| v.floor() as i32;
+        cover(prop.translation.map(floor));
+        if !bounds.is_empty() {
+            cover([bounds.min.x, bounds.min.y, bounds.min.z].map(floor));
+            cover([bounds.max.x, bounds.max.y, bounds.max.z].map(|v| (v - 1.0e-8).floor() as i32));
+        }
+    }
+    if min[0] > max[0] {
+        return Ok(None);
+    }
+    let origin = min;
+    let size: IVec3 = std::array::from_fn(|axis| max[axis] - min[axis] + 1);
+    let shift = |value: f64, axis: usize| value - f64::from(origin[axis]);
+    let faces = fragments
+        .iter()
+        .zip(material_ids)
+        .map(|(fragment, &material)| {
+            let mut face =
+                surface::EncodedFace::from_fragment(fragment, surface::MaterialId(material));
+            face.cell = sub(face.cell, origin);
+            // The UV projection is affine in block coordinates, so moving the
+            // geometry by -origin moves the offset by the projection of origin.
+            for projection in [&mut face.uv.u, &mut face.uv.v] {
+                projection[3] += (0..3)
+                    .map(|axis| projection[axis] * f64::from(origin[axis]))
+                    .sum::<f64>();
+            }
+            face
+        })
+        .collect();
+    let shapes: BTreeMap<IVec3, Vec<crate::voxel::collision::Box16>> = collision
+        .shapes
+        .into_iter()
+        .map(|(cell, boxes)| (sub(cell, origin), boxes))
+        .collect();
+    let encoded_collision = (!shapes.is_empty())
+        .then(|| crate::output::cell_collision::encode(&shapes))
+        .transpose()
+        .context("encoding a mover's collision table")?;
+    let surface_blocks: Vec<IVec3> = grid
+        .iter()
+        .map(|(cell, _)| sub(cell, origin))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let carrier_blocks: Vec<IVec3> = collision
+        .carriers
+        .iter()
+        .filter(|cell| !grid.is_solid(**cell))
+        .map(|cell| sub(*cell, origin))
+        .collect();
+    let props = props
+        .into_iter()
+        .map(|(mut prop, _)| {
+            prop.translation = std::array::from_fn(|axis| shift(prop.translation[axis], axis));
+            prop
+        })
+        .collect();
+    Ok(Some(MoverExport {
+        entity,
+        classname,
+        cell_origin: origin,
+        size,
+        faces,
+        collision: encoded_collision,
+        surface_blocks,
+        carrier_blocks,
+        props,
+    }))
 }
 
 /// Give every solid prop large enough to bump into its collision: Source's
@@ -472,14 +787,14 @@ pub fn from_conversion(
 /// props and cells took part.
 fn add_prop_collision(
     config: &crate::config::Config,
-    conversion: &crate::convert::Conversion,
+    transform: &crate::voxel::transform::Transform,
+    grid: &crate::voxel::grid::VoxelGrid,
     extracted: &[crate::source::extract::ModProp],
     collision: &mut crate::voxel::collision::CellCollision,
 ) -> (usize, usize) {
     use crate::bsp::props::{SOLID_BBOX, SOLID_NONE};
     use crate::voxel::collision::{SubCells, box_volume, shell_volume};
     use rayon::prelude::*;
-    let transform = &conversion.transform;
     let volumes: Vec<std::collections::HashMap<IVec3, SubCells>> = extracted
         .par_iter()
         .filter_map(|item| {
@@ -515,7 +830,7 @@ fn add_prop_collision(
         }
     }
     crate::timing::mark("  prop collision: merge");
-    let added = crate::voxel::collision::add_props(collision, &conversion.grid, cells);
+    let added = crate::voxel::collision::add_props(collision, grid, cells);
     crate::timing::mark("  prop collision: add to table");
     (solid, added)
 }
@@ -554,7 +869,7 @@ fn extract_materials(
     map: &crate::bsp::Map,
     config: &crate::config::Config,
     prop_texture_spans: &BTreeMap<String, f64>,
-    surfaces: &[crate::voxel::fragments::Fragment],
+    surfaces: &[&crate::voxel::fragments::Fragment],
     quality: atlas::TextureQuality,
 ) -> (
     Vec<metadata::MaterialReference>,
@@ -625,7 +940,7 @@ struct TextureRequest {
 fn assign_materials(
     map: &crate::bsp::Map,
     prop_texture_spans: &BTreeMap<String, f64>,
-    surfaces: &[crate::voxel::fragments::Fragment],
+    surfaces: &[&crate::voxel::fragments::Fragment],
     resolver: &crate::source::vmt::Materials,
     decoder: &mut crate::source::vtf::Textures,
     quality: atlas::TextureQuality,
@@ -839,7 +1154,7 @@ fn assign_materials(
 /// Texels of stretch per block along each texture axis, measured in the
 /// plane of each fragment: the part of the projection along the normal moves
 /// nothing on the face.
-fn per_face_rates(surfaces: &[crate::voxel::fragments::Fragment]) -> Vec<Option<[f64; 2]>> {
+fn per_face_rates(surfaces: &[&crate::voxel::fragments::Fragment]) -> Vec<Option<[f64; 2]>> {
     surfaces
         .iter()
         .map(|face| {
@@ -1151,6 +1466,72 @@ pub fn write_campaign(
         if let Some(logic) = map.logic {
             archive.add(format!("{prefix}/logic.json"), logic.encode()?)?;
         }
+        let has_movers = !map.movers.is_empty();
+        if has_movers {
+            use crate::output::movers;
+            let mut records = Vec::with_capacity(map.movers.len());
+            for mover in map.movers {
+                let entity = u32::try_from(mover.entity).context("mover entity index")?;
+                let surfaces = if mover.faces.is_empty() {
+                    None
+                } else {
+                    let path = movers::Mover::surfaces_path(&map.map_id, entity);
+                    archive.add(
+                        &path,
+                        surface::encode(mover.faces, surface::Limits::default())?,
+                    )?;
+                    Some(path)
+                };
+                let collision = match mover.collision {
+                    Some(bytes) => {
+                        let path = movers::Mover::collision_path(&map.map_id, entity);
+                        archive.add(&path, bytes)?;
+                        Some(path)
+                    }
+                    None => None,
+                };
+                let mut props = Vec::with_capacity(mover.props.len());
+                for prop in mover.props {
+                    let model = *model_ids
+                        .get(&(
+                            prop.model_content_id.clone(),
+                            prop.source_model.clone(),
+                            prop.material_ids.clone(),
+                        ))
+                        .with_context(|| {
+                            format!(
+                                "prop entity {} on mover {entity} references a missing model",
+                                prop.entity
+                            )
+                        })?;
+                    props.push(movers::MoverProp {
+                        entity: u32::try_from(prop.entity).context("prop entity index")?,
+                        model,
+                        translation: prop.translation,
+                        rotation: prop.rotation,
+                        scale: prop.scale,
+                        skin: prop.skin,
+                    });
+                }
+                records.push(movers::Mover {
+                    entity,
+                    classname: mover.classname,
+                    cell_origin: mover.cell_origin,
+                    size: mover.size,
+                    surfaces,
+                    collision,
+                    blocks: movers::Blocks {
+                        surface: mover.surface_blocks,
+                        carrier: mover.carrier_blocks,
+                    },
+                    props,
+                });
+            }
+            archive.add(
+                format!("{prefix}/movers.json"),
+                movers::MoverTable::new(records).encode(&map.map_id, model_refs.len() as u32)?,
+            )?;
+        }
         archive.add(
             format!("{prefix}/diagnostics.json"),
             map.diagnostics.encode()?,
@@ -1174,6 +1555,7 @@ pub fn write_campaign(
             collision: has_collision.then(|| format!("{prefix}/collision.s2coll")),
             audio: has_audio.then(|| format!("{prefix}/audio.json")),
             logic: has_logic.then(|| format!("{prefix}/logic.json")),
+            movers: has_movers.then(|| format!("{prefix}/movers.json")),
             diagnostics: format!("{prefix}/diagnostics.json"),
         };
         archive.add(&metadata_path, meta.encode()?)?;
@@ -1210,6 +1592,10 @@ pub fn write_campaign(
 
 fn sub(a: IVec3, b: IVec3) -> IVec3 {
     [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
+fn add(a: IVec3, b: IVec3) -> IVec3 {
+    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
 }
 
 /// The 16-block section coordinate of a map-local block-space position,
@@ -1331,6 +1717,7 @@ mod tests {
             collision: None,
             audio: None,
             logic: None,
+            movers: Vec::new(),
             props: vec![Prop {
                 source_ordinal: 0,
                 source_model: source_model.into(),
@@ -1438,7 +1825,7 @@ mod tests {
             face_at(0, [1.0, 0.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]),
             face_at(0, [0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0]),
         ];
-        let rates = per_face_rates(&surfaces);
+        let rates = per_face_rates(&surfaces.iter().collect::<Vec<_>>());
         assert_eq!(rates.len(), 2);
         assert_eq!(rates[0], Some([1.0, 1.0]));
         assert_eq!(rates[1], None);
@@ -1450,7 +1837,7 @@ mod tests {
         // half stretches the texture across the floor.
         let mut face = face_at(0, [1.0, 1.0, 0.0, 0.0], [0.0, 0.0, 2.0, 0.0]);
         face.normal = Vec3::new(0.0, 1.0, 0.0);
-        assert_eq!(per_face_rates(&[face]), vec![Some([1.0, 2.0])]);
+        assert_eq!(per_face_rates(&[&face]), vec![Some([1.0, 2.0])]);
     }
 
     #[test]
@@ -1566,6 +1953,170 @@ mod tests {
                 .count(),
             1
         );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn rider(translation: [f64; 3]) -> MoverPropExport {
+        MoverPropExport {
+            entity: 573,
+            source_model: "models/b.mdl".into(),
+            model_content_id: bundle::content_id(&triangle_mesh()),
+            material_ids: vec![0],
+            translation,
+            rotation: [0.0, 0.0, 0.0, 1.0],
+            scale: 1.0,
+            skin: 1,
+        }
+    }
+
+    /// Everything of a mover is moved into its own cells by the same offset,
+    /// the UV projection along with the geometry, so a texture keeps its phase.
+    #[test]
+    fn movers_are_moved_into_their_own_cells() {
+        let mut grid = crate::voxel::grid::VoxelGrid::new();
+        grid.set([10, 5, -3], 1);
+        grid.set([11, 5, -3], 1);
+        let u = [1.0, 0.0, 0.5, 0.25];
+        let v = [0.0, 1.0, 0.0, 0.0];
+        let fragments = vec![fragment([10, 5, -3], 0, u, v)];
+        let mut collision = crate::voxel::collision::CellCollision::default();
+        collision.carriers.insert([12, 5, -3]);
+        collision
+            .shapes
+            .insert([12, 5, -3], vec![[0, 0, 0, 16, 8, 16]]);
+        let bounds = crate::geom::Aabb::new(Vec3::new(9.5, 5.0, -3.0), Vec3::new(10.5, 6.0, -2.0));
+        let mover = localize(
+            7,
+            "func_door".into(),
+            &grid,
+            &fragments,
+            &[0],
+            collision,
+            vec![(rider([9.75, 5.5, -2.5]), bounds)],
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            mover.cell_origin,
+            [9, 5, -3],
+            "the prop's box reaches furthest"
+        );
+        assert_eq!(mover.size, [4, 1, 1]);
+        assert_eq!(mover.surface_blocks, vec![[1, 0, 0], [2, 0, 0]]);
+        assert_eq!(mover.carrier_blocks, vec![[3, 0, 0]]);
+        assert_eq!(mover.faces[0].cell, [1, 0, 0]);
+        assert_eq!(mover.faces[0].owner, Some([0, 0, 0]));
+        assert_eq!(mover.props[0].translation, [0.75, 0.5, 0.5]);
+        // A point keeps its texture coordinate across the move.
+        let map_point = Vec3::new(10.25, 5.5, -2.75);
+        let local = map_point - Vec3::new(9.0, 5.0, -3.0);
+        let before = BlockTexCoord { u, v };
+        assert!((mover.faces[0].uv.s(local) - before.s(map_point)).abs() < 1e-12);
+        assert!((mover.faces[0].uv.t(local) - before.t(map_point)).abs() < 1e-12);
+        assert!(mover.collision.is_some());
+    }
+
+    /// A door panel too thin to voxelize has no blocks of its own: it is kept,
+    /// drawn by unowned faces and solid through carriers.
+    #[test]
+    fn a_mover_without_blocks_is_kept() {
+        let mut face = fragment([-4, 2, 0], 0, [1.0, 0.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]);
+        face.owner = None;
+        let mut collision = crate::voxel::collision::CellCollision::default();
+        collision.carriers.insert([-4, 2, 0]);
+        collision
+            .shapes
+            .insert([-4, 2, 0], vec![[0, 0, 0, 16, 16, 2]]);
+        let mover = localize(
+            3,
+            "func_door_rotating".into(),
+            &crate::voxel::grid::VoxelGrid::new(),
+            &[face],
+            &[0],
+            collision,
+            Vec::new(),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(mover.surface_blocks.is_empty());
+        assert_eq!(mover.carrier_blocks, vec![[0, 0, 0]]);
+        assert_eq!(mover.faces[0].owner, None);
+        assert_eq!(mover.size, [1, 1, 1]);
+        // And a mover with nothing at all is dropped.
+        assert!(
+            localize(
+                4,
+                "func_brush".into(),
+                &crate::voxel::grid::VoxelGrid::new(),
+                &[],
+                &[],
+                Default::default(),
+                Vec::new(),
+            )
+            .unwrap()
+            .is_none()
+        );
+    }
+
+    /// The mover table is written, referenced from the map metadata between
+    /// `logic` and `diagnostics`, and its prop names the map's model table.
+    #[test]
+    fn movers_are_written_into_the_bundle() {
+        use std::io::Read;
+        let bytes = triangle_mesh();
+        let mut map = fixture_map("map", "models/a.mdl", bytes.clone());
+        map.models.push(ModelAsset {
+            source_model: "models/b.mdl".into(),
+            bytes,
+            materials: vec![0],
+            surface_prop: None,
+        });
+        let mut grid = crate::voxel::grid::VoxelGrid::new();
+        grid.set([5, 0, 5], 1);
+        let mover = localize(
+            12,
+            "func_door".into(),
+            &grid,
+            &[fragment(
+                [5, 0, 5],
+                0,
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+            )],
+            &[0],
+            Default::default(),
+            vec![(rider([5.5, 0.5, 5.5]), crate::geom::Aabb::empty())],
+        )
+        .unwrap()
+        .unwrap();
+        map.movers.push(mover);
+        let dir = temp_dir("movers");
+        let written = write_campaign(&dir, "fixture", vec![map]).unwrap();
+        let mut zip = zip::ZipArchive::new(std::fs::File::open(&written.bundle).unwrap()).unwrap();
+        let mut read = |name: &str| {
+            let mut text = String::new();
+            zip.by_name(name)
+                .unwrap()
+                .read_to_string(&mut text)
+                .unwrap();
+            text
+        };
+        let meta = read("maps/map.json");
+        assert!(
+            meta.contains(r#""movers":"maps/map/movers.json","diagnostics""#),
+            "{meta}"
+        );
+        let table = read("maps/map/movers.json");
+        assert!(
+            table.starts_with(r#"{"format":"src2mc-movers","version":1,"movers":[{"entity":12,"classname":"func_door","cell_origin":[5,0,5],"size":[1,1,1],"surfaces":"maps/map/movers/12.s2faces","blocks":{"surface":[[0,0,0]],"carrier":[]},"props":[{"entity":573,"model":1,"translation":[0.5,0.5,0.5]"#),
+            "{table}"
+        );
+        let mut faces = Vec::new();
+        zip.by_name("maps/map/movers/12.s2faces")
+            .unwrap()
+            .read_to_end(&mut faces)
+            .unwrap();
+        assert_eq!(&faces[..8], &surface::MAGIC);
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

@@ -395,6 +395,9 @@ fn mod_export(
     }
     let mut config = common.resolve()?;
     config.scale.units_per_block = src2mc::output::mod_export::UNITS_PER_BLOCK;
+    // Doors, buttons and the rest move in the mod, so they leave the world
+    // for the bundle's mover table.
+    config.entities.separate_movers();
     let mut exports = Vec::with_capacity(maps.len());
     for path in maps {
         src2mc::timing::mark("start");
@@ -410,13 +413,25 @@ fn mod_export(
         surface_config.props.enabled = false;
         surface_config.output.exact_surfaces = true;
         let conversion = src2mc::convert::convert(&map, &surface_config)?;
-        exports.push(src2mc::output::mod_export::from_conversion(
+        let export = src2mc::output::mod_export::from_conversion(
             &map,
             &config,
             &conversion,
             quality,
             with_audio,
-        )?);
+        )?;
+        if !export.movers.is_empty() {
+            eprintln!(
+                "  {} moving entities exported as movers, carrying {} props",
+                export.movers.len(),
+                export
+                    .movers
+                    .iter()
+                    .map(|mover| mover.props.len())
+                    .sum::<usize>(),
+            );
+        }
+        exports.push(export);
     }
     let written = src2mc::output::mod_export::write_campaign(out, campaign, exports)?;
     src2mc::timing::mark("write bundle and schematics");

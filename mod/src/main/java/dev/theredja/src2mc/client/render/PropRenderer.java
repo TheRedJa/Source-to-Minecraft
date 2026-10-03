@@ -67,6 +67,9 @@ public final class PropRenderer {
     private static final int ROOT_RECHECK_FRAMES = 10;
     private static final long MESH_GRACE_FRAMES = 600;
     private static final RuntimeMeshResidency RUNTIME_MESHES = new RuntimeMeshResidency();
+
+    /** Shared with {@link MoverRenderer}: the props movers carry come from the same meshes. */
+    static RuntimeMeshResidency runtimeMeshes() { return RUNTIME_MESHES; }
     private static final PropBatchAggregator<AggregateKey, PropKey, Mesh> AGGREGATES = new PropBatchAggregator<>();
     private static final Map<PropKey, PropSource> ROOT_DATA = new HashMap<>();
     private static final Map<PropKey, Set<AggregateKey>> PROP_CONTRIBUTIONS = new HashMap<>();
