@@ -39,6 +39,7 @@ public final class SourceAudio {
     private static final SoundscapePlayer SOUNDSCAPES = new SoundscapePlayer(LIBRARY);
     private static final AmbientPlayer AMBIENTS = new AmbientPlayer(LIBRARY);
     private static final SurfaceSounds SURFACES = new SurfaceSounds(LIBRARY);
+    private static final LogicSounds LOGIC = new LogicSounds(LIBRARY);
     private static boolean soundscapes = true, ambient = true, surfaces = true;
 
     private static ClientLevel level;
@@ -46,6 +47,7 @@ public final class SourceAudio {
     private static List<MapSound> maps = List.of();
     private static List<SoundscapePlayer.Emitter> emitters = List.of();
     private static List<AmbientPlayer.Ambient> ambients = List.of();
+    private static List<LogicSounds.MusicEntity> music = List.of();
 
     private SourceAudio() {}
 
@@ -53,15 +55,21 @@ public final class SourceAudio {
     static void onClientTick(ClientTickEvent.Post event) {
         Minecraft minecraft = Minecraft.getInstance();
         if (minecraft.level == null || minecraft.player == null) {
-            if (level != null) reset(false);
+            if (level != null) {
+                reset(false);
+                dev.theredja.src2mc.client.logic.ClientLogic.clear();
+                dev.theredja.src2mc.client.logic.CaptionOverlay.clear();
+            }
             return;
         }
         refresh(minecraft.level);
         if (minecraft.isPaused() || !LIBRARY.available()) return;
         Vec3 ear = minecraft.player.getEyePosition();
         Vec3 listener = minecraft.gameRenderer.getMainCamera().getPosition();
+        var dimension = minecraft.level.dimension().location();
         if (soundscapes) SOUNDSCAPES.tick(minecraft.level, ear, emitters);
-        if (ambient) AMBIENTS.tick(listener, ambients);
+        if (ambient) AMBIENTS.tick(dimension, listener, ambients);
+        LOGIC.tick(dimension, listener, maps, music);
         if (surfaces) movement(minecraft.player);
         else airborne = false;
     }
@@ -115,6 +123,23 @@ public final class SourceAudio {
         if (replacement != sound) event.setSound(replacement);
     }
 
+    /**
+     * Inside a placed map Minecraft's own music never plays: the map has its own soundscapes and,
+     * with its logic running, its own music (user, 2026-10-03). Outside, Minecraft picks as usual.
+     */
+    @SubscribeEvent
+    static void onSelectMusic(net.neoforged.neoforge.client.event.SelectMusicEvent event) {
+        var player = Minecraft.getInstance().player;
+        if (player == null || maps.isEmpty()) return;
+        BlockPos at = player.blockPosition();
+        for (MapSound map : maps) {
+            if (map.placement().contains(at)) {
+                event.setMusic(null);
+                return;
+            }
+        }
+    }
+
     /** Rebuilds what plays from the placements and bundles whenever either changes. */
     private static void refresh(ClientLevel current) {
         BundleGeneration generation = Src2mc.bundles().active();
@@ -128,6 +153,7 @@ public final class SourceAudio {
         List<MapSound> nextMaps = new ArrayList<>();
         List<SoundscapePlayer.Emitter> nextEmitters = new ArrayList<>();
         List<AmbientPlayer.Ambient> nextAmbients = new ArrayList<>();
+        List<LogicSounds.MusicEntity> nextMusic = new ArrayList<>();
         for (MapPlacement placement : PlacementNetwork.clientIndex(current.dimension().location()).view()) {
             var located = generation.findLocatedMap(placement.campaignId(), placement.mapId()).orElse(null);
             if (located == null || located.map().audio() == null) continue;
@@ -145,20 +171,29 @@ public final class SourceAudio {
                 AudioTable.Ambient entry = audio.ambients().get(i);
                 nextAmbients.add(new AmbientPlayer.Ambient(map, i, map.world(entry.x(), entry.y(), entry.z())));
             }
+            var logic = located.map().logic();
+            if (logic != null) {
+                for (int i = 0; i < logic.entities().size(); i++) {
+                    if (logic.entities().get(i).classname().equals("infra_music")) nextMusic.add(new LogicSounds.MusicEntity(map, i));
+                }
+            }
         }
         maps = List.copyOf(nextMaps);
         emitters = List.copyOf(nextEmitters);
         ambients = List.copyOf(nextAmbients);
+        music = List.copyOf(nextMusic);
     }
 
     private static void reset(boolean freeBuffers) {
         SOUNDSCAPES.stop();
         AMBIENTS.stop();
+        LOGIC.stop();
         if (freeBuffers) LIBRARY.clear();
         level = null;
         maps = List.of();
         emitters = List.of();
         ambients = List.of();
+        music = List.of();
         generationSequence = -1;
         placementEpoch = -1;
     }
@@ -176,6 +211,9 @@ public final class SourceAudio {
             .then(literal("surfaces")
                 .then(literal("on").executes(context -> { surfaces = true; return status(context.getSource()); }))
                 .then(literal("off").executes(context -> { surfaces = false; return status(context.getSource()); })))
+            .then(literal("captions")
+                .then(literal("on").executes(context -> { dev.theredja.src2mc.client.logic.CaptionOverlay.setEnabled(true); return status(context.getSource()); }))
+                .then(literal("off").executes(context -> { dev.theredja.src2mc.client.logic.CaptionOverlay.setEnabled(false); return status(context.getSource()); })))
             .then(literal("steps")
                 .then(net.minecraft.commands.Commands.argument("gain", com.mojang.brigadier.arguments.FloatArgumentType.floatArg(0, 5))
                     .executes(context -> {
@@ -190,6 +228,7 @@ public final class SourceAudio {
             + "  soundscapes " + (soundscapes ? "on" : "off") + ": " + SOUNDSCAPES.status() + "\n"
             + "  ambient " + (ambient ? "on" : "off") + ": " + AMBIENTS.status() + "\n"
             + "  surfaces " + (surfaces ? "on" : "off") + ": " + SURFACES.status() + "\n"
+            + "  logic: " + LOGIC.status() + ", captions " + (dev.theredja.src2mc.client.logic.CaptionOverlay.enabled() ? "on" : "off") + "\n"
             + "  decoded " + LIBRARY.decodedCount() + ", failed " + LIBRARY.failedCount();
         source.sendSuccess(() -> Component.literal(text), false);
         return 1;

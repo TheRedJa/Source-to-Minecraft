@@ -66,6 +66,8 @@ final class SoundscapePlayer {
 
     void tick(Level level, Vec3 ear, List<Emitter> emitters) {
         time += TICK_SECONDS;
+        // CEnvSoundscape::UpdateForPlayer: a disabled soundscape lets go of the player.
+        if (current != null && !enabled(level, current)) current = null;
         select(level, ear, emitters);
         fadeLoops();
         playRandoms(ear);
@@ -81,7 +83,7 @@ final class SoundscapePlayer {
         }
         Emitter chosen = current;
         for (Emitter candidate : emitters) {
-            if (candidate.same(chosen) || !inPvs(candidate, ear)) continue;
+            if (candidate.same(chosen) || !enabled(level, candidate) || !inPvs(candidate, ear)) continue;
             double range = ear.distanceTo(candidate.position);
             if ((!inRange || range < currentDistance) && reaches(candidate, range) && visible(level, candidate.position, ear)) {
                 chosen = candidate;
@@ -94,6 +96,18 @@ final class SoundscapePlayer {
             switches++;
             start(chosen);
         }
+    }
+
+    /**
+     * Whether the entity may be chosen: as the map's logic says while it runs, else unless it
+     * starts disabled.
+     */
+    private static boolean enabled(Level level, Emitter emitter) {
+        var dimension = level.dimension().location();
+        long anchor = emitter.map.placement().anchorWorld().asLong();
+        if (!dev.theredja.src2mc.client.logic.ClientLogic.running(dimension, anchor)) return !emitter.entry().startDisabled();
+        var state = dev.theredja.src2mc.client.logic.ClientLogic.state(dimension, anchor, emitter.entry().entity());
+        return state != null && state.on();
     }
 
     private static boolean reaches(Emitter emitter, double range) { return emitter.radius > range || emitter.radius == -1; }

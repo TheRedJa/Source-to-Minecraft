@@ -71,6 +71,9 @@ final class SourceSound extends AbstractSoundInstance implements TickableSoundIn
 
     /** The loudness before falloff, 0..1; a soundscape fades it. */
     void setLevel(float level) { this.level = level; }
+
+    /** The pitch factor, 1 unchanged; the engine picks it up on the next tick. */
+    void setPitch(float pitch) { this.pitch = pitch; }
     float level() { return level; }
     AudioTable.Sound asset() { return asset; }
 

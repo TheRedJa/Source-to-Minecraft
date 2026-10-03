@@ -5,8 +5,9 @@ import java.util.Map;
 
 /**
  * A map's validated sound table (format.md section 15): its sounds, the soundscapes its
- * {@code env_soundscape} entities select, the {@code ambient_generic} sounds that play from the
- * start, and the soundscripts each surface property plays. Indices are validated in range; an
+ * {@code env_soundscape} entities select, its {@code ambient_generic} sounds, and the soundscripts
+ * each surface property and the map's logic play. An {@code entity} is the entity's index in the
+ * BSP entity lump, which is its index in the logic table too. Indices are validated in range; an
  * absent optional index is -1. Positions are map-local blocks; sound levels are Source decibels.
  */
 public record AudioTable(List<Sound> sounds, List<Soundscape> soundscapes, List<Emitter> emitters,
@@ -56,7 +57,8 @@ public record AudioTable(List<Sound> sounds, List<Soundscape> soundscapes, List<
     public record Child(int soundscape, Range volume, int position, int positionOverride, int ambientPositionOverride) {}
 
     /** One {@code env_soundscape}. {@code radius} is in blocks, -1 for no limit; positions hold null where unnamed. */
-    public record Emitter(double x, double y, double z, double radius, int soundscape, double[][] positions) {
+    public record Emitter(int entity, double x, double y, double z, double radius, int soundscape, double[][] positions,
+                          boolean startDisabled) {
         public Emitter {
             double[][] copy = new double[positions.length][];
             for (int i = 0; i < positions.length; i++) copy[i] = positions[i] == null ? null : positions[i].clone();
@@ -67,9 +69,15 @@ public record AudioTable(List<Sound> sounds, List<Soundscape> soundscapes, List<
         }
     }
 
-    /** One {@code ambient_generic} that plays from the start. A sound level of 0 is heard everywhere. */
-    public record Ambient(double x, double y, double z, int[] sounds, Range volume, Range pitch, Range soundLevel) {
+    /**
+     * One {@code ambient_generic}. A sound level of 0 is heard everywhere. {@code flags} are its spawnflags:
+     * Source starts it with the map unless it starts silent or is not looping.
+     */
+    public record Ambient(int entity, double x, double y, double z, int[] sounds, Range volume, Range pitch, Range soundLevel, int flags) {
+        public static final int EVERYWHERE = 1, START_SILENT = 16, NOT_LOOPING = 32;
         public Ambient { sounds = sounds.clone(); }
+        public boolean startsWithMap() { return (flags & (START_SILENT | NOT_LOOPING)) == 0; }
+        public boolean looping() { return (flags & NOT_LOOPING) == 0; }
         @Override public int[] sounds() { return sounds.clone(); }
         public int sound(int index) { return sounds[index]; }
         public int soundCount() { return sounds.length; }
@@ -84,6 +92,14 @@ public record AudioTable(List<Sound> sounds, List<Soundscape> soundscapes, List<
 
     /** Scripts a surface property plays, by index into {@link #scripts()}, -1 where it plays none. */
     public record Surface(String name, int stepLeft, int stepRight, int impactSoft, int impactHard, int breakSound) {}
+
+    /** The script named {@code name}, lowercase, or null. */
+    public Script script(String name) {
+        if (name == null) return null;
+        String key = name.toLowerCase(java.util.Locale.ROOT);
+        for (Script script : scripts) if (script.name().equals(key)) return script;
+        return null;
+    }
 
     /** The surface for a {@code $surfaceprop}, falling back to {@code default} as Source does. */
     public Surface surface(String surfaceProp) {

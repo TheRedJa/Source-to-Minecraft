@@ -1,10 +1,10 @@
 //! A map's sound for the mod (format section 15): the soundscapes its
-//! `env_soundscape` entities select, the `ambient_generic` sounds that start
-//! with the map, and what each surface property sounds like to walk on.
+//! `env_soundscape` entities select, its `ambient_generic` sounds, what each
+//! surface property sounds like to walk on, and the soundscripts its logic
+//! plays by name (scene lines, music, buttons and doors).
 //!
-//! Only what plays without the map's logic is exported. A soundscape that
-//! starts disabled, an ambient sound that starts silent, and everything the
-//! I/O system triggers wait on that logic running in Minecraft.
+//! Every sound entity is exported with its flags, whether or not it plays
+//! from the start; which ones wait for the map's logic is the mod's call.
 //!
 //! Positions are map-local blocks. Sound levels, radii and the falloff the mod
 //! computes from them stay in Source's own terms; the mod converts distances
@@ -38,8 +38,39 @@ const UNITS_PER_BLOCK: f64 = 32.0;
 const PLAYER_SCRIPTS: &[&str] = &["Player.FallDamage", "Player.FallLight", "Player.FallMedium"];
 
 const SF_AMBIENT_EVERYWHERE: u32 = 1;
-const SF_AMBIENT_START_SILENT: u32 = 16;
-const SF_AMBIENT_NOT_LOOPING: u32 = 32;
+
+/// `EmitSound` defaults for a sound file played without a soundscript.
+const FILE_VOLUME: f64 = 1.0;
+const FILE_PITCH: f64 = 100.0;
+const FILE_SOUND_LEVEL: f64 = SNDLVL_NORM;
+
+/// Brush and prop entities whose keyvalues name the sounds they make.
+const SOUND_ENTITY_CLASSES: &[&str] = &[
+    "func_button",
+    "infra_button",
+    "func_rot_button",
+    "momentary_rot_button",
+    "func_door",
+    "func_door_rotating",
+    "func_movelinear",
+    "prop_door_rotating",
+];
+/// The keyvalues on those that name a soundscript or a sound file.
+const SOUND_KEYS: &[&str] = &[
+    "noise1",
+    "noise2",
+    "startclosesound",
+    "closesound",
+    "locked_sound",
+    "unlocked_sound",
+    "soundopenoverride",
+    "soundcloseoverride",
+    "soundmoveoverride",
+    "soundlockedoverride",
+    "soundunlockedoverride",
+];
+/// Buttons whose `sounds` number picks `Buttons.snd<n>` (`MakeButtonSound`).
+const BUTTON_CLASSES: &[&str] = &["func_button", "func_rot_button", "momentary_rot_button"];
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct AudioTable {
@@ -116,6 +147,8 @@ pub struct Child {
 /// One `env_soundscape`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Emitter {
+    /// Index in the entity lump.
+    pub entity: u32,
     pub position: [f64; 3],
     /// In blocks; -1 for no limit.
     pub radius: f64,
@@ -123,17 +156,24 @@ pub struct Emitter {
     /// Exactly eight; `null` where the entity names no position or one that
     /// does not exist.
     pub positions: Vec<Option<[f64; 3]>>,
+    /// `StartDisabled`: the map's logic enables it.
+    pub start_disabled: bool,
 }
 
-/// One `ambient_generic` that plays from the start.
+/// One `ambient_generic`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Ambient {
+    /// Index in the entity lump.
+    pub entity: u32,
     pub position: [f64; 3],
     pub sounds: Vec<u32>,
     pub volume: [f64; 2],
     pub pitch: [f64; 2],
     /// 0 plays everywhere at full volume.
     pub sound_level: [f64; 2],
+    /// The entity's spawnflags: whether it starts silent (16) or plays once
+    /// (32) decides whether it plays from the start.
+    pub flags: u32,
 }
 
 /// One soundscript entry.
@@ -168,7 +208,10 @@ impl AudioTable {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.emitters.is_empty() && self.ambients.is_empty() && self.surfaces.is_empty()
+        self.emitters.is_empty()
+            && self.ambients.is_empty()
+            && self.scripts.is_empty()
+            && self.surfaces.is_empty()
     }
 }
 
@@ -181,23 +224,32 @@ pub struct AudioExport {
 }
 
 /// Build the map's audio. `surface_props` are the `$surfaceprop` names its
-/// materials and models use; `default` is always added.
+/// materials and models use; `default` is always added. `scene_scripts` are
+/// the soundscripts its scenes speak.
 pub fn build(
     map: &crate::bsp::Map,
-    config: &crate::config::Config,
+    vfs: &Vfs,
     entities: &[EntityRecord],
     surface_props: &BTreeSet<String>,
+    scene_scripts: &BTreeSet<String>,
 ) -> Result<AudioExport> {
-    let vfs = Vfs::for_map(&map.path, &config.materials.game_dir_paths());
     let pak = Some(&map.bsp.pack);
     let sources = Sources {
-        scripts: SoundScripts::load(&vfs, pak, &map.name),
-        soundscapes: Soundscapes::load(&vfs, pak, &map.name),
-        surfaces: SurfaceProperties::load(&vfs, pak),
+        scripts: SoundScripts::load(vfs, pak, &map.name),
+        soundscapes: Soundscapes::load(vfs, pak, &map.name),
+        surfaces: SurfaceProperties::load(vfs, pak),
     };
     let mut builder = Builder::new(&sources);
     builder.add_entities(entities)?;
     builder.add_surfaces(surface_props)?;
+    let mut named: BTreeMap<String, &str> = BTreeMap::new();
+    for name in scene_scripts {
+        named.entry(name.clone()).or_insert("scene");
+    }
+    for (name, origin) in entity_sounds(entities) {
+        named.entry(name).or_insert(origin);
+    }
+    builder.add_named(&named)?;
     let Builder {
         waves,
         soundscapes,
@@ -214,7 +266,7 @@ pub fn build(
     use rayon::prelude::*;
     let encoded: Vec<std::result::Result<(SoundAsset, Vec<u8>), String>> = waves
         .par_iter()
-        .map(|wave| encode(&vfs, pak, wave))
+        .map(|wave| encode(vfs, pak, wave))
         .collect();
     let mut remap = Vec::with_capacity(encoded.len());
     let mut sounds = Vec::new();
@@ -255,6 +307,7 @@ pub fn build(
             ("soundscapes", table.soundscapes.len().to_string()),
             ("soundscape_entities", table.emitters.len().to_string()),
             ("ambient_sounds", table.ambients.len().to_string()),
+            ("scripts", table.scripts.len().to_string()),
             ("surfaces", table.surfaces.len().to_string()),
         ],
     ));
@@ -348,13 +401,9 @@ impl<'a> Builder<'a> {
         };
         let mut skipped: BTreeMap<&str, usize> = BTreeMap::new();
         for entity in entities {
-            let property = |key: &str| entity.properties.get(key).map(String::as_str);
-            match entity.classname.as_str() {
+            let property = |key: &str| entity.get(key);
+            match entity.classname.to_ascii_lowercase().as_str() {
                 "env_soundscape" => {
-                    if property("StartDisabled").is_some_and(|v| v.trim() == "1") {
-                        *skipped.entry("soundscape_start_disabled").or_default() += 1;
-                        continue;
-                    }
                     let (Some(origin), Some(name)) = (entity.origin_mc, property("soundscape"))
                     else {
                         continue;
@@ -379,6 +428,7 @@ impl<'a> Builder<'a> {
                         })
                         .collect::<Result<Vec<_>>>()?;
                     self.emitters.push(Emitter {
+                        entity: entity.index as u32,
                         position: canonical3(origin)?,
                         radius: if radius == -1.0 {
                             -1.0
@@ -388,17 +438,16 @@ impl<'a> Builder<'a> {
                         },
                         soundscape,
                         positions,
+                        start_disabled: property("StartDisabled").is_some_and(|v| v.trim() == "1"),
                     });
                 }
                 "env_soundscape_triggerable" | "env_soundscape_proxy" => {
-                    *skipped.entry("soundscape_needs_logic").or_default() += 1;
+                    *skipped
+                        .entry("soundscape_triggerable_or_proxy")
+                        .or_default() += 1;
                 }
                 "ambient_generic" => {
                     let flags = property("spawnflags").map_or(0, |v| leading_float(v) as u32);
-                    if flags & (SF_AMBIENT_START_SILENT | SF_AMBIENT_NOT_LOOPING) != 0 {
-                        *skipped.entry("ambient_needs_logic").or_default() += 1;
-                        continue;
-                    }
                     if let Some(ambient) = self.ambient(entity, flags, &origin_of)? {
                         self.ambients.push(ambient);
                     }
@@ -409,9 +458,11 @@ impl<'a> Builder<'a> {
         if !skipped.is_empty() {
             self.diagnostics.push(diagnostic(
                 Severity::Info,
-                "AUDIO_ENTITIES_NEED_LOGIC",
-                "sound entities that only play once the map's logic triggers them; not exported",
-                skipped.into_iter().map(|(k, v)| (k.to_string(), v.to_string())),
+                "AUDIO_ENTITIES_NOT_EXPORTED",
+                "soundscape entities that select another entity's soundscape; not exported",
+                skipped
+                    .into_iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string())),
             ));
         }
         Ok(())
@@ -427,7 +478,7 @@ impl<'a> Builder<'a> {
         flags: u32,
         origin_of: &dyn Fn(&str) -> Option<[f64; 3]>,
     ) -> Result<Option<Ambient>> {
-        let property = |key: &str| entity.properties.get(key).map(String::as_str);
+        let property = |key: &str| entity.get(key);
         let Some(message) = property("message").filter(|m| !m.trim().is_empty()) else {
             return Ok(None);
         };
@@ -467,11 +518,13 @@ impl<'a> Builder<'a> {
             }
         };
         Ok(Some(Ambient {
+            entity: entity.index as u32,
             position: canonical3(position)?,
             sounds,
             volume: bounds(volume)?,
             pitch: bounds(pitch)?,
             sound_level: bounds(sound_level)?,
+            flags,
         }))
     }
 
@@ -671,6 +724,80 @@ impl<'a> Builder<'a> {
         self.script_ids.insert(key, id);
         Ok(Some(id))
     }
+
+    /// Scripts the map's logic plays by name, each with where it was named.
+    /// A sound file gets a script of its own, keyed by its path, with the
+    /// values `EmitSound` plays a bare file at.
+    fn add_named(&mut self, names: &BTreeMap<String, &str>) -> Result<()> {
+        for (name, origin) in names {
+            if WaveRef::is_file(name) {
+                let wave = WaveRef::parse(name);
+                let key = wave.path.clone();
+                if self.script_ids.contains_key(&key) {
+                    continue;
+                }
+                let Some(sound) = self.wave(wave) else {
+                    continue;
+                };
+                let id = self.scripts.len() as u32;
+                self.scripts.push(Script {
+                    name: key.clone(),
+                    sounds: vec![sound],
+                    volume: [FILE_VOLUME; 2],
+                    pitch: [FILE_PITCH; 2],
+                    sound_level: [FILE_SOUND_LEVEL; 2],
+                });
+                self.script_ids.insert(key, id);
+            } else if self.script(Some(name))?.is_none() {
+                self.diagnostics.push(diagnostic(
+                    Severity::Warning,
+                    "AUDIO_SCRIPT_UNRESOLVED",
+                    "the map's logic names a soundscript that is not defined or plays no sound",
+                    [("script", name.clone()), ("named_by", origin.to_string())],
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The soundscripts and sound files entities name in their keyvalues:
+/// `infra_music`'s `sound`, and the sounds buttons and doors make. Names are
+/// trimmed; empty values and `0` name nothing.
+fn entity_sounds(entities: &[EntityRecord]) -> Vec<(String, &'static str)> {
+    let mut out = Vec::new();
+    let mut push = |value: &str, origin: &'static str| {
+        let value = value.trim();
+        if !value.is_empty() && value != "0" {
+            out.push((value.to_string(), origin));
+        }
+    };
+    for entity in entities {
+        let class = entity.classname.to_ascii_lowercase();
+        if class == "infra_music" {
+            if let Some(sound) = entity.get("sound") {
+                push(sound, "infra_music");
+            }
+            continue;
+        }
+        let Some(&class) = SOUND_ENTITY_CLASSES.iter().find(|c| **c == class) else {
+            continue;
+        };
+        for key in SOUND_KEYS {
+            if let Some(value) = entity.get(key) {
+                push(value, class);
+            }
+        }
+        if BUTTON_CLASSES.contains(&class)
+            && let Some(sounds) = entity.get("sounds")
+        {
+            let n = leading_float(sounds);
+            if (1.0..1000.0).contains(&n) {
+                push(&format!("Buttons.snd{}", n as u32), class);
+            }
+        }
+    }
+    out
 }
 
 /// Renumber provisional sound IDs to the sounds that decoded, dropping
@@ -727,7 +854,7 @@ fn finish(
     }
     AudioTable {
         format: FORMAT,
-        version: 1,
+        version: 2,
         sounds,
         soundscapes,
         emitters,
@@ -850,23 +977,22 @@ mod tests {
     }
 
     fn entity(classname: &str, origin: [f64; 3], props: &[(&str, &str)]) -> EntityRecord {
-        EntityRecord {
-            index: 0,
-            classname: classname.into(),
-            targetname: props
-                .iter()
-                .find(|(k, _)| *k == "targetname")
-                .map(|(_, v)| v.to_string()),
-            model: None,
-            brush_model: None,
-            origin_source: None,
-            origin_mc: Some(origin),
-            angles: None,
-            properties: props
-                .iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect(),
+        let config = crate::config::Config::default();
+        let transform =
+            crate::voxel::transform::Transform::new(&config, crate::geom::Aabb::empty());
+        let mut keyvalues = vec![("classname".to_string(), classname.to_string())];
+        keyvalues.extend(props.iter().map(|(k, v)| (k.to_string(), v.to_string())));
+        let mut record = crate::bsp::entities::record(0, keyvalues, &transform);
+        record.origin_mc = Some(origin);
+        record
+    }
+
+    /// Entities numbered by their position, as in the lump.
+    fn numbered(mut entities: Vec<EntityRecord>) -> Vec<EntityRecord> {
+        for (index, entity) in entities.iter_mut().enumerate() {
+            entity.index = index;
         }
+        entities
     }
 
     #[test]
@@ -874,21 +1000,37 @@ mod tests {
         let sources = sources();
         let mut builder = Builder::new(&sources);
         builder
-            .add_entities(&[
+            .add_entities(&numbered(vec![
                 entity("info_target", [1.0, 2.0, 3.0], &[("targetname", "spot")]),
                 entity(
                     "env_soundscape",
                     [10.0, 0.0, 0.0],
-                    &[("soundscape", "HALL"), ("radius", "320"), ("position2", "spot")],
+                    &[
+                        ("soundscape", "HALL"),
+                        ("radius", "320"),
+                        ("position2", "spot"),
+                    ],
                 ),
                 entity(
                     "env_soundscape",
                     [0.0; 3],
-                    &[("soundscape", "hall"), ("radius", "-1"), ("StartDisabled", "1")],
+                    &[
+                        ("soundscape", "hall"),
+                        ("radius", "-1"),
+                        ("startdisabled", "1"),
+                    ],
                 ),
-            ])
+            ]))
             .unwrap();
-        assert_eq!(builder.emitters.len(), 1, "start-disabled ones need logic");
+        assert_eq!(builder.emitters.len(), 2, "start-disabled ones are kept");
+        assert_eq!(
+            builder
+                .emitters
+                .iter()
+                .map(|e| (e.entity, e.start_disabled))
+                .collect::<Vec<_>>(),
+            [(1, false), (2, true)]
+        );
         let emitter = &builder.emitters[0];
         assert_eq!(emitter.radius, 10.0);
         assert_eq!(emitter.positions[2], Some([1.0, 2.0, 3.0]));
@@ -897,7 +1039,11 @@ mod tests {
         assert_eq!(hall.name, "hall");
         assert_eq!(hall.loops.len(), 2);
         assert_eq!(hall.loops[0].volume, [0.5, 0.5]);
-        assert_eq!(hall.loops[1].volume, [0.0, 0.0], "playlooping volume defaults to 0");
+        assert_eq!(
+            hall.loops[1].volume,
+            [0.0, 0.0],
+            "playlooping volume defaults to 0"
+        );
         assert_eq!(hall.loops[0].sound_level, [75.0, 75.0]);
         let random = &hall.randoms[0];
         assert!(random.random_position);
@@ -912,29 +1058,59 @@ mod tests {
     }
 
     #[test]
-    fn only_ambient_generics_that_start_by_themselves_are_exported() {
+    fn every_ambient_generic_is_exported_with_its_flags() {
         let sources = sources();
         let mut builder = Builder::new(&sources);
         builder
-            .add_entities(&[
+            .add_entities(&numbered(vec![
                 entity(
                     "ambient_generic",
                     [0.0; 3],
-                    &[("message", "machinery/fan.wav"), ("health", "7"), ("radius", "1250"), ("spawnflags", "0")],
+                    &[
+                        ("message", "machinery/fan.wav"),
+                        ("health", "7"),
+                        ("radius", "1250"),
+                        ("spawnflags", "0"),
+                    ],
                 ),
-                entity("ambient_generic", [0.0; 3], &[("message", "x.wav"), ("health", "10"), ("spawnflags", "48")]),
-                entity("ambient_generic", [0.0; 3], &[("message", "y.wav"), ("health", "10"), ("spawnflags", "32")]),
-                entity("ambient_generic", [5.0; 3], &[("message", "Machine.Hum"), ("health", "2"), ("spawnflags", "1")]),
-            ])
+                entity(
+                    "ambient_generic",
+                    [0.0; 3],
+                    &[("message", "x.wav"), ("health", "10"), ("spawnflags", "48")],
+                ),
+                entity(
+                    "ambient_generic",
+                    [0.0; 3],
+                    &[("message", "y.wav"), ("health", "10"), ("spawnflags", "32")],
+                ),
+                entity(
+                    "ambient_generic",
+                    [5.0; 3],
+                    &[
+                        ("message", "Machine.Hum"),
+                        ("health", "2"),
+                        ("spawnflags", "1"),
+                    ],
+                ),
+            ]))
             .unwrap();
-        assert_eq!(builder.ambients.len(), 2);
+        let flags: Vec<_> = builder
+            .ambients
+            .iter()
+            .map(|a| (a.entity, a.flags))
+            .collect();
+        assert_eq!(flags, [(0, 0), (1, 48), (2, 32), (3, 1)]);
         let fan = &builder.ambients[0];
         assert_eq!(fan.volume, [0.7, 0.7]);
         assert_eq!(fan.pitch, [100.0, 100.0]);
         // 40 + 20 log10(1250 / 36) = 70.8
         assert_eq!(fan.sound_level, [70.0, 70.0]);
-        let hum = &builder.ambients[1];
-        assert_eq!(hum.volume, [0.7, 0.7], "a soundscript plays with its own values");
+        let hum = &builder.ambients[3];
+        assert_eq!(
+            hum.volume,
+            [0.7, 0.7],
+            "a soundscript plays with its own values"
+        );
         assert_eq!(hum.sound_level, [80.0, 80.0]);
     }
 
@@ -953,7 +1129,12 @@ mod tests {
         let left = &builder.scripts[metal.step_left.unwrap() as usize];
         assert_eq!(left.sounds.len(), 2);
         assert!(builder.waves[left.sounds[0] as usize].spatial_stereo);
-        assert!(builder.scripts.iter().any(|s| s.name == "player.falldamage"));
+        assert!(
+            builder
+                .scripts
+                .iter()
+                .any(|s| s.name == "player.falldamage")
+        );
     }
 
     #[test]
@@ -961,7 +1142,11 @@ mod tests {
         let sources = sources();
         let mut builder = Builder::new(&sources);
         builder
-            .add_entities(&[entity("env_soundscape", [0.0; 3], &[("soundscape", "hall"), ("radius", "-1")])])
+            .add_entities(&[entity(
+                "env_soundscape",
+                [0.0; 3],
+                &[("soundscape", "hall"), ("radius", "-1")],
+            )])
             .unwrap();
         builder.add_surfaces(&BTreeSet::new()).unwrap();
         // Every sound but the first random wave fails to decode.
@@ -984,6 +1169,48 @@ mod tests {
         assert!(table.scripts.is_empty());
         assert_eq!(table.surfaces[0].step_left, None);
         assert_eq!(table.emitters[0].radius, -1.0);
+    }
+
+    #[test]
+    fn scripts_named_by_logic_resolve_by_name_or_file() {
+        let sources = sources();
+        let mut builder = Builder::new(&sources);
+        let entities = numbered(vec![
+            entity("infra_music", [0.0; 3], &[("Sound", "Machine.Hum")]),
+            entity(
+                "func_button",
+                [0.0; 3],
+                &[
+                    ("sounds", "3"),
+                    ("locked_sound", "0"),
+                    ("noise1", ")Buttons\\Lever_002.wav"),
+                ],
+            ),
+            entity("func_door", [0.0; 3], &[("noise2", "No.Such.Door")]),
+            entity("func_wall", [0.0; 3], &[("noise1", "ignored.wav")]),
+        ]);
+        let mut named: BTreeMap<String, &str> = BTreeMap::new();
+        named.insert("Player.FallDamage".into(), "scene");
+        named.extend(entity_sounds(&entities));
+        builder.add_named(&named).unwrap();
+        let names: Vec<_> = builder.scripts.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["buttons/lever_002.wav", "machine.hum", "player.falldamage"]
+        );
+        let file = &builder.scripts[0];
+        assert_eq!(
+            (file.volume, file.pitch, file.sound_level),
+            ([1.0; 2], [100.0; 2], [75.0; 2])
+        );
+        assert!(builder.waves[file.sounds[0] as usize].spatial_stereo);
+        let unresolved: Vec<_> = builder
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == "AUDIO_SCRIPT_UNRESOLVED")
+            .map(|d| d.context["script"].as_str())
+            .collect();
+        assert_eq!(unresolved, ["Buttons.snd3", "No.Such.Door"]);
     }
 
     #[test]

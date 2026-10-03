@@ -108,6 +108,13 @@ pub fn parse(text: &str) -> Vmt {
 
 /// Split VDF text into tokens, dropping comments and platform conditionals.
 pub(crate) fn tokenize(text: &str) -> Vec<String> {
+    tokenize_with(text, false)
+}
+
+/// As [`tokenize`], optionally resolving `\"`, `\\`, `\n` and `\t` inside quoted
+/// strings, as KeyValues files loaded with escape sequences (localization and
+/// caption files) are read.
+pub(crate) fn tokenize_with(text: &str, escapes: bool) -> Vec<String> {
     let mut tokens = Vec::new();
     let bytes = text.as_bytes();
     let mut i = 0;
@@ -126,6 +133,29 @@ pub(crate) fn tokenize(text: &str) -> Vec<String> {
             while i < bytes.len() && bytes[i] != b']' {
                 i += 1;
             }
+            i += 1;
+        } else if c == b'"' && escapes {
+            i += 1;
+            let mut token = Vec::new();
+            while i < bytes.len() && bytes[i] != b'"' {
+                if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                    let escaped = match bytes[i + 1] {
+                        b'"' => Some(b'"'),
+                        b'\\' => Some(b'\\'),
+                        b'n' => Some(b'\n'),
+                        b't' => Some(b'\t'),
+                        _ => None,
+                    };
+                    if let Some(escaped) = escaped {
+                        token.push(escaped);
+                        i += 2;
+                        continue;
+                    }
+                }
+                token.push(bytes[i]);
+                i += 1;
+            }
+            tokens.push(String::from_utf8_lossy(&token).into_owned());
             i += 1;
         } else if c == b'"' {
             i += 1;

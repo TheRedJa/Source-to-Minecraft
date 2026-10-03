@@ -194,7 +194,7 @@ pub struct Stats {
 /// `d1_trainstation_02` that is 103 of 115 brush entity models: taken at face
 /// value, every door, button, trigger and func_brush in the map piles up
 /// around wherever Source's origin happens to land.
-fn to_block_solid(solid: &Solid, transform: &Transform, origin: Vec3) -> BlockSolid {
+pub(crate) fn to_block_solid(solid: &Solid, transform: &Transform, origin: Vec3) -> BlockSolid {
     let planes = solid
         .sides
         .iter()

@@ -30,6 +30,12 @@ final class BundleValidatorTest {
         BundleManifest manifest = new BundleValidator().validate(Path.of(path));
         org.junit.jupiter.api.Assertions.assertFalse(manifest.maps().isEmpty());
         org.junit.jupiter.api.Assertions.assertNotNull(manifest.maps().getFirst().atlas());
+        for (BundleMap map : manifest.maps()) {
+            if (map.logic() == null) continue;
+            System.out.println("validated " + map.mapId() + ": " + map.logic().entities().size() + " entities, "
+                + map.logic().volumes().size() + " volumes, " + map.logic().scenes().size() + " scenes, "
+                + map.logic().captions().size() + " captions, " + (map.audio() == null ? 0 : map.audio().scripts().size()) + " scripts");
+        }
     }
 
     @Test

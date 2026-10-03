@@ -11,6 +11,7 @@ pub mod display;
 pub mod kubejs;
 pub mod layout;
 pub mod limits;
+pub mod logic;
 pub mod mesh;
 pub mod metadata;
 pub mod mod_export;

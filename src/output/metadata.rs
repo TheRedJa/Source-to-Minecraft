@@ -90,9 +90,12 @@ pub struct MapMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub collision: Option<String>,
     /// Optional sound table. Absent when the map was exported without sound
-    /// or has none that plays without its logic.
+    /// or has none.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub audio: Option<String>,
+    /// Optional entity logic table. Absent when the map has no entities.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub logic: Option<String>,
     pub diagnostics: String,
 }
 
@@ -334,6 +337,18 @@ impl MapMetadata {
                 "non-canonical collision path"
             );
         }
+        if let Some(audio) = &self.audio {
+            ensure!(
+                audio == &format!("maps/{}/audio.json", self.map_id),
+                "non-canonical audio path"
+            );
+        }
+        if let Some(logic) = &self.logic {
+            ensure!(
+                logic == &format!("maps/{}/logic.json", self.map_id),
+                "non-canonical logic path"
+            );
+        }
         for material in &mut self.materials {
             material.validate()?;
         }
@@ -555,6 +570,7 @@ mod tests {
             occlusion: Some("maps/d1_01/occlusion.s2occl".into()),
             collision: None,
             audio: None,
+            logic: None,
             diagnostics: "maps/d1_01/diagnostics.json".into(),
         };
         let value: serde_json::Value =

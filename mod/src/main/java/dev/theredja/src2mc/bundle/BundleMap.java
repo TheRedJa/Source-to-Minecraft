@@ -22,15 +22,26 @@ public record BundleMap(
     // Per-cell collision shapes; null when the map was exported without them.
     CollisionTable collision,
     // The map's sound; null when it was exported without any.
-    AudioTable audio
+    AudioTable audio,
+    // The map's entities for its logic; null when it was exported without them.
+    LogicTable logic
 ) {
+    public BundleMap(String mapId, String sourceName, int[] cellMin, int[] cellMax, int[] anchorCell,
+                     java.util.List<BundleMaterial> materials, java.util.List<BundleModel> models,
+                     java.util.List<BundleProp> props, boolean exceedsVanillaBuildHeight, SurfaceTable surfaces,
+                     java.util.Set<String> modelContentIds, AtlasIndex atlas, PropVisibility pvs,
+                     OcclusionTable occlusion, CollisionTable collision, AudioTable audio) {
+        this(mapId, sourceName, cellMin, cellMax, anchorCell, materials, models, props, exceedsVanillaBuildHeight,
+            surfaces, modelContentIds, atlas, pvs, occlusion, collision, audio, null);
+    }
+
     public BundleMap(String mapId, String sourceName, int[] cellMin, int[] cellMax, int[] anchorCell,
                      java.util.List<BundleMaterial> materials, java.util.List<BundleModel> models,
                      java.util.List<BundleProp> props, boolean exceedsVanillaBuildHeight, SurfaceTable surfaces,
                      java.util.Set<String> modelContentIds, AtlasIndex atlas, PropVisibility pvs,
                      OcclusionTable occlusion, CollisionTable collision) {
         this(mapId, sourceName, cellMin, cellMax, anchorCell, materials, models, props, exceedsVanillaBuildHeight,
-            surfaces, modelContentIds, atlas, pvs, occlusion, collision, null);
+            surfaces, modelContentIds, atlas, pvs, occlusion, collision, null, null);
     }
 
     public BundleMap {
@@ -56,7 +67,8 @@ public record BundleMap(
             && materials.equals(map.materials) && models.equals(map.models) && props.equals(map.props)
             && exceedsVanillaBuildHeight == map.exceedsVanillaBuildHeight && surfaces.equals(map.surfaces)
             && modelContentIds.equals(map.modelContentIds) && java.util.Objects.equals(atlas, map.atlas)
-            && pvs == map.pvs && occlusion == map.occlusion && collision == map.collision && audio == map.audio;
+            && pvs == map.pvs && occlusion == map.occlusion && collision == map.collision && audio == map.audio
+            && logic == map.logic;
     }
 
     @Override
@@ -74,7 +86,8 @@ public record BundleMap(
         // often enough that walking them would cost real frame time.
         result = 31 * result + System.identityHashCode(occlusion);
         result = 31 * result + System.identityHashCode(collision);
-        return 31 * result + System.identityHashCode(audio);
+        result = 31 * result + System.identityHashCode(audio);
+        return 31 * result + System.identityHashCode(logic);
     }
 
     public int materialCount() { return materials.size(); }

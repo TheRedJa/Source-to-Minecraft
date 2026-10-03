@@ -29,6 +29,12 @@ final class Src2mcCommands {
                 .requires(source -> source.hasPermission(2))
                 .then(argument("mapId", StringArgumentType.word())
                     .executes(context -> place(context.getSource(), StringArgumentType.getString(context, "mapId")))))
+            .then(literal("place_chain")
+                .requires(source -> source.hasPermission(2))
+                .then(argument("mapId", StringArgumentType.word())
+                    .then(argument("count", com.mojang.brigadier.arguments.IntegerArgumentType.integer(1, 64))
+                        .executes(context -> placeChain(context.getSource(), StringArgumentType.getString(context, "mapId"),
+                            com.mojang.brigadier.arguments.IntegerArgumentType.getInteger(context, "count"))))))
             .then(literal("lightmask")
                 .requires(source -> source.hasPermission(2))
                 .executes(context -> lightMaskStatus(context.getSource()))
@@ -257,36 +263,41 @@ final class Src2mcCommands {
         return counts.failures() == 0 ? 1 : 0;
     }
 
-    private static int place(net.minecraft.commands.CommandSourceStack source, String mapId) {
+    /** The one loaded map with this ID; null, after saying why, when there is none or more than one. */
+    private static dev.theredja.src2mc.bundle.BundleGeneration.LocatedMap locate(net.minecraft.commands.CommandSourceStack source, String mapId) {
         var generation = Src2mc.BUNDLES.active();
         var matches = generation.bundles().stream()
             .flatMap(bundle -> bundle.maps().stream()
-                .filter(map -> map.mapId().equals(mapId))
+                .filter(map -> map.mapId().equalsIgnoreCase(mapId))
                 .map(map -> new dev.theredja.src2mc.bundle.BundleGeneration.LocatedMap(bundle, map)))
             .toList();
         if (matches.isEmpty()) {
             source.sendFailure(Component.literal("src2mc: no loaded bundle has map `" + mapId + "`"));
-            return 0;
+            return null;
         }
         if (matches.size() > 1) {
             source.sendFailure(Component.literal("src2mc: map `" + mapId + "` is ambiguous across "
                 + matches.size() + " bundles; rename one campaign to disambiguate"));
-            return 0;
+            return null;
         }
-        var located = matches.get(0);
+        return matches.get(0);
+    }
+
+    /** A map's schematic, read; null, after saying why, when it cannot be. */
+    private static dev.theredja.src2mc.world.SchematicReader.Result schematic(net.minecraft.commands.CommandSourceStack source, String mapId) {
         Path schematicPath = Src2mcConfig.schematicDirectory().resolve(mapId + ".schem");
-        dev.theredja.src2mc.world.SchematicReader.Result schematic;
         try {
-            schematic = dev.theredja.src2mc.world.SchematicReader.read(schematicPath);
+            return dev.theredja.src2mc.world.SchematicReader.read(schematicPath);
         } catch (java.io.IOException exception) {
             Src2mc.LOGGER.error("src2mc place failed to read {}", schematicPath, exception);
             source.sendFailure(Component.literal("src2mc: failed to read " + schematicPath + ": " + exception.getMessage()));
-            return 0;
+            return null;
         }
-        int[] anchorCell = located.map().anchorCell();
-        BlockPos anchorWorld = BlockPos.containing(source.getPosition());
-        BlockPos translation = anchorWorld.subtract(new BlockPos(anchorCell[0], anchorCell[1], anchorCell[2]));
+    }
 
+    /** Whether the schematic fits the world's build height at {@code translation}; says why not when it does not. */
+    private static boolean fits(net.minecraft.commands.CommandSourceStack source, String mapId, BlockPos translation,
+                                dev.theredja.src2mc.world.SchematicReader.Result schematic) {
         var level = source.getLevel();
         int[] offset = schematic.offset();
         int minWorldY = Integer.MAX_VALUE, maxWorldY = Integer.MIN_VALUE;
@@ -302,13 +313,88 @@ final class Src2mcCommands {
                 + level.getMaxBuildHeight() + ". Placement would silently drop blocks/props outside that range. "
                 + "Install a taller dimension_type (custom height datapack) for this world before placing, "
                 + "or place from a lower anchor position."));
-            return 0;
+            return false;
         }
+        return true;
+    }
 
-        dev.theredja.src2mc.world.WorldPlacer.enqueue(level, source, mapId, translation, schematic);
+    private static int place(net.minecraft.commands.CommandSourceStack source, String mapId) {
+        var located = locate(source, mapId);
+        if (located == null) return 0;
+        var schematic = schematic(source, located.map().mapId());
+        if (schematic == null) return 0;
+        int[] anchorCell = located.map().anchorCell();
+        BlockPos anchorWorld = BlockPos.containing(source.getPosition());
+        BlockPos translation = anchorWorld.subtract(new BlockPos(anchorCell[0], anchorCell[1], anchorCell[2]));
+        if (!fits(source, mapId, translation, schematic)) return 0;
+        dev.theredja.src2mc.world.WorldPlacer.enqueue(source.getLevel(), source, located.map().mapId(), translation, schematic);
         source.sendSuccess(() -> Component.literal("src2mc: placing " + mapId + " ("
             + schematic.cells().size() + " cells) at " + anchorWorld.toShortString()), true);
         return 1;
+    }
+
+    /** Blocks left free between maps placed in a chain. */
+    private static final int CHAIN_GAP = 16;
+
+    /**
+     * Places a map and the maps after it, following each map's {@code trigger_changelevel} to the
+     * next one not yet in the chain, side by side along +X from the command's position with every
+     * anchor at the same height. Level changes between them then move the player across
+     * ({@code LogicSystem.changeLevel}). Nothing is placed unless every map fits.
+     */
+    private static int placeChain(net.minecraft.commands.CommandSourceStack source, String firstMapId, int count) {
+        var first = locate(source, firstMapId);
+        if (first == null) return 0;
+        java.util.List<dev.theredja.src2mc.bundle.BundleGeneration.LocatedMap> chain = new java.util.ArrayList<>(java.util.List.of(first));
+        while (chain.size() < count) {
+            var last = chain.get(chain.size() - 1).map();
+            if (last.logic() == null) break;
+            dev.theredja.src2mc.bundle.BundleGeneration.LocatedMap next = null;
+            for (var entity : last.logic().entities()) {
+                if (!entity.classname().equals("trigger_changelevel")) continue;
+                String name = entity.value("map");
+                if (name == null || chain.stream().anyMatch(located -> located.map().mapId().equalsIgnoreCase(name))) continue;
+                var found = Src2mc.BUNDLES.active().bundles().stream()
+                    .flatMap(bundle -> bundle.maps().stream().filter(map -> map.mapId().equalsIgnoreCase(name))
+                        .map(map -> new dev.theredja.src2mc.bundle.BundleGeneration.LocatedMap(bundle, map)))
+                    .findFirst().orElse(null);
+                if (found != null) { next = found; break; }
+            }
+            if (next == null) break;
+            chain.add(next);
+        }
+        BlockPos start = BlockPos.containing(source.getPosition());
+        java.util.List<BlockPos> translations = new java.util.ArrayList<>();
+        java.util.List<dev.theredja.src2mc.world.SchematicReader.Result> schematics = new java.util.ArrayList<>();
+        var existing = dev.theredja.src2mc.world.PlacementSavedData.get(source.getLevel()).index().view();
+        int cursor = start.getX();
+        for (int i = 0; i < chain.size(); i++) {
+            var map = chain.get(i).map();
+            int[] anchorCell = map.anchorCell(), cellMin = map.cellMin();
+            int x = i == 0 ? start.getX() - anchorCell[0] : cursor - cellMin[0];
+            BlockPos translation = new BlockPos(x, start.getY() - anchorCell[1], start.getZ() - anchorCell[2]);
+            var schematic = schematic(source, map.mapId());
+            if (schematic == null || !fits(source, map.mapId(), translation, schematic)) return 0;
+            var placement = dev.theredja.src2mc.world.MapPlacement.fromAnchor(chain.get(i).bundle().campaignId(), map,
+                translation.offset(anchorCell[0], anchorCell[1], anchorCell[2]));
+            for (var other : existing) {
+                if (placement.overlaps(other)) {
+                    source.sendFailure(Component.literal("src2mc: " + map.mapId() + " would overlap the placed " + other.mapId()
+                        + "; place the chain somewhere free"));
+                    return 0;
+                }
+            }
+            translations.add(translation);
+            schematics.add(schematic);
+            cursor = translation.getX() + map.cellMax()[0] + 1 + CHAIN_GAP;
+        }
+        for (int i = 0; i < chain.size(); i++) {
+            dev.theredja.src2mc.world.WorldPlacer.enqueue(source.getLevel(), source, chain.get(i).map().mapId(), translations.get(i), schematics.get(i));
+        }
+        String names = String.join(" -> ", chain.stream().map(located -> located.map().mapId()).toList());
+        source.sendSuccess(() -> Component.literal("src2mc: placing " + chain.size() + " map(s) in a chain: " + names
+            + (chain.size() < count ? " (no further placed-able level change found)" : "")), true);
+        return chain.size();
     }
 
     private static void warnForTallMaps(net.minecraft.commands.CommandSourceStack source,

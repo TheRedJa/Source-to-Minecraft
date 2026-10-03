@@ -57,6 +57,8 @@ pub struct MapExport {
     pub collision: Option<Vec<u8>>,
     /// The map's sound; absent when exported without it.
     pub audio: Option<crate::output::audio::AudioExport>,
+    /// The map's entity logic; absent when the map has no entities.
+    pub logic: Option<crate::output::logic::LogicTable>,
     pub diagnostics: metadata::Diagnostics,
 }
 
@@ -392,6 +394,12 @@ pub fn from_conversion(
         .then(|| crate::output::occlusion::encode(&light_blockers))
         .transpose()
         .context("encoding the light-occlusion mask")?;
+    // Scenes come first: the sound table carries the lines they speak, and
+    // the logic table the captions of the sound table's scripts.
+    let entities = crate::bsp::entities::extract(map, &conversion.transform);
+    let vfs = crate::source::vfs::Vfs::for_map(&map.path, &config.materials.game_dir_paths());
+    let pak = Some(&map.bsp.pack);
+    let scenes = crate::output::logic::Scenes::load(&vfs, pak, &entities);
     let audio = if with_audio {
         // What a surface sounds like comes from its material's
         // `$surfaceprop`, and a prop's from its model's.
@@ -400,14 +408,40 @@ pub fn from_conversion(
             .filter_map(|m| m.surface_prop.clone())
             .chain(models.iter().filter_map(|m| m.surface_prop.clone()))
             .collect();
-        let entities = crate::bsp::entities::extract(map, &conversion.transform);
-        let audio = crate::output::audio::build(map, config, &entities, &surface_props)
-            .context("exporting the map's sound")?;
+        let audio = crate::output::audio::build(
+            map,
+            &vfs,
+            &entities,
+            &surface_props,
+            &scenes.speak_scripts(),
+        )
+        .context("exporting the map's sound")?;
         diagnostics.extend(audio.diagnostics.iter().cloned());
         crate::timing::mark("export: audio");
         (!audio.table.is_empty()).then_some(audio)
     } else {
         None
+    };
+    let logic = if entities.is_empty() {
+        None
+    } else {
+        let audio_scripts: BTreeSet<String> = audio
+            .iter()
+            .flat_map(|a| &a.table.scripts)
+            .map(|s| s.name.clone())
+            .collect();
+        let logic = crate::output::logic::build(
+            map,
+            &vfs,
+            &conversion.transform,
+            &entities,
+            scenes,
+            &audio_scripts,
+        )
+        .context("exporting the map's logic")?;
+        diagnostics.extend(logic.diagnostics);
+        crate::timing::mark("export: logic");
+        Some(logic.table)
     };
     Ok(MapExport {
         map_id: portable_id(&map.name),
@@ -426,6 +460,7 @@ pub fn from_conversion(
         occlusion,
         collision,
         audio,
+        logic,
         diagnostics: metadata::Diagnostics::new(diagnostics)?,
     })
 }
@@ -1112,6 +1147,10 @@ pub fn write_campaign(
             }
             archive.add(format!("{prefix}/audio.json"), audio.table.encode()?)?;
         }
+        let has_logic = map.logic.is_some();
+        if let Some(logic) = map.logic {
+            archive.add(format!("{prefix}/logic.json"), logic.encode()?)?;
+        }
         archive.add(
             format!("{prefix}/diagnostics.json"),
             map.diagnostics.encode()?,
@@ -1134,6 +1173,7 @@ pub fn write_campaign(
             occlusion: has_occlusion.then(|| format!("{prefix}/occlusion.s2occl")),
             collision: has_collision.then(|| format!("{prefix}/collision.s2coll")),
             audio: has_audio.then(|| format!("{prefix}/audio.json")),
+            logic: has_logic.then(|| format!("{prefix}/logic.json")),
             diagnostics: format!("{prefix}/diagnostics.json"),
         };
         archive.add(&metadata_path, meta.encode()?)?;
@@ -1290,6 +1330,7 @@ mod tests {
             occlusion: None,
             collision: None,
             audio: None,
+            logic: None,
             props: vec![Prop {
                 source_ordinal: 0,
                 source_model: source_model.into(),
