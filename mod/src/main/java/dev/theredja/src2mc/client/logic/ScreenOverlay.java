@@ -65,6 +65,9 @@ public final class ScreenOverlay {
     private static double mapClock;
 
     /** Game seconds, between ticks too. */
+    /** The client's clock, in seconds of game time: what map times are synced against. */
+    public static double clock() { return now(); }
+
     private static double now() {
         Minecraft minecraft = Minecraft.getInstance();
         if (minecraft.level == null) return 0;

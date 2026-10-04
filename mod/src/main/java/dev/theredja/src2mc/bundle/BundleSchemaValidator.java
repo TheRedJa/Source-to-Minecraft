@@ -124,6 +124,7 @@ final class BundleSchemaValidator {
             JsonObject model = object(value, "model");
             List<String> modelKeys = new ArrayList<>(List.of("content_id", "source_model", "materials"));
             if (model.has("color")) modelKeys.add("color");
+            if (model.has("animation")) modelKeys.add("animation");
             if (model.has("surface_prop")) modelKeys.add("surface_prop");
             keys(model, modelKeys.toArray(String[]::new));
             String contentId = digest(string(model, "content_id"), "model content ID");
@@ -141,7 +142,8 @@ final class BundleSchemaValidator {
                 color = rgb[0] << 16 | rgb[1] << 8 | rgb[2];
                 if (color == BundleModel.WHITE) fail(BundleErrorCode.INVALID_SCHEMA, "a white model color must be left out");
             }
-            BundleModel current = new BundleModel(contentId, source, ids, surfaceProp, null, color);
+            String animationId = model.has("animation") ? digest(string(model, "animation"), "model animation ID") : null;
+            BundleModel current = new BundleModel(contentId, source, ids, surfaceProp, null, color, animationId, null);
             if (prior != null && compareModels(prior, current) >= 0) fail(BundleErrorCode.DUPLICATE_IDENTITY, "model references are not uniquely sorted");
             prior = current;
             modelRefs.add(current);
@@ -208,13 +210,47 @@ final class BundleSchemaValidator {
         // its own, so this is where the parallelism pays for a campaign that
         // holds a single large map.
         Map<String, float[]> meshBounds = new ConcurrentHashMap<>();
+        Map<String, Integer> meshVertices = new ConcurrentHashMap<>();
         BundleLoadPool.forEach(modelRefs, model -> {
             String mesh = "meshes/" + model.contentId() + ".s2mesh";
             referenced.add(mesh);
             contentHash(hashes, mesh, model.contentId());
-            meshBounds.put(model.contentId(), validateMesh(zip, required(entries, mesh), model.materialSlotCount()));
+            float[] info = validateMesh(zip, required(entries, mesh), model.materialSlotCount());
+            meshBounds.put(model.contentId(), Arrays.copyOf(info, 6));
+            meshVertices.put(model.contentId(), (int) info[6]);
         });
         modelRefs.replaceAll(model -> model.withBounds(meshBounds.get(model.contentId())));
+        // An animation is shared by every reference to its model, and checked against its mesh.
+        Map<String, AnimationAsset> animations = new java.util.HashMap<>();
+        for (int i = 0; i < modelRefs.size(); i++) {
+            BundleModel model = modelRefs.get(i);
+            if (model.animationId() == null) continue;
+            String animationPath = "animations/" + model.animationId() + ".s2anim";
+            AnimationAsset animation = animations.get(model.animationId() + "/" + model.contentId());
+            if (animation == null) {
+                referenced.add(animationPath);
+                contentHash(hashes, animationPath, model.animationId());
+                ZipEntry entry = required(entries, animationPath);
+                limit(entry.getSize(), BundleLimits.MAX_ANIMATION_BYTES, "animation size");
+                byte[] bytes;
+                try (InputStream input = zip.getInputStream(entry)) { bytes = input.readNBytes((int) entry.getSize()); }
+                animation = AnimationAsset.decode(bytes, meshVertices.get(model.contentId()));
+                animations.put(model.animationId() + "/" + model.contentId(), animation);
+            }
+            modelRefs.set(i, model.withAnimation(animation));
+        }
+        if (logicProps != null) {
+            for (LogicPropTable.Prop prop : logicProps.props()) {
+                for (int skin : prop.skins()) {
+                    AnimationAsset animation = modelRefs.get(skin).animation();
+                    if ((animation != null) != (prop.sequence() >= 0)) fail(BundleErrorCode.INVALID_REFERENCE, "an animated logic prop names its spawn sequence, and only it");
+                    if (animation == null) continue;
+                    if (prop.sequence() >= animation.sequences().size()) fail(BundleErrorCode.INVALID_REFERENCE, "logic prop sequence out of range");
+                    for (LogicPropTable.Pose pose : prop.poses())
+                        if (pose.sequence() >= animation.sequences().size()) fail(BundleErrorCode.INVALID_REFERENCE, "pose sequence out of range");
+                }
+            }
+        }
         if (!textureIds.isEmpty() && atlas == null) fail(BundleErrorCode.MISSING_ENTRY, "textured materials require atlas.json");
         for (Map.Entry<String, int[]> textureRef : textureIds.entrySet()) {
             AtlasIndex.Texture texture = atlas.textures().get(textureRef.getKey());
@@ -232,7 +268,7 @@ final class BundleSchemaValidator {
                                                      int modelCount, LogicTable logic, MoverTable movers, List<BundleProp> placed,
                                                      Set<String> referenced) throws IOException {
         keys(root, "format", "version", "props");
-        format(root, "src2mc-logic-props", "logic_props.json");
+        format(root, "src2mc-logic-props", "logic_props.json", 3);
         JsonArray array = array(root, "props");
         limit(array.size(), BundleLimits.MAX_LOGIC_PROPS_PER_MAP, "logic prop count");
         Set<String> placedIds = new java.util.HashSet<>();
@@ -247,6 +283,8 @@ final class BundleSchemaValidator {
             expected.addAll(List.of("skins", "skin"));
             if (prop.has("start_hidden")) expected.add("start_hidden");
             if (prop.has("collision")) expected.add("collision");
+            if (prop.has("sequence")) expected.add("sequence");
+            if (prop.has("poses")) expected.add("poses");
             keys(prop, expected.toArray(String[]::new));
             int entity = uintIndex(prop.get("entity"), "logic prop entity");
             if (entity <= priorEntity) fail(BundleErrorCode.DUPLICATE_IDENTITY, "logic props are not in strictly ascending entity order");
@@ -279,12 +317,29 @@ final class BundleSchemaValidator {
             }
             CollisionTable collision = null;
             if (prop.has("collision")) {
-                if (mover >= 0) fail(BundleErrorCode.INVALID_SCHEMA, "a riding prop's collision is its mover's");
                 String path = exactPath(prop, "collision", prefix + "logic_props/" + entity + ".s2coll");
                 referenced.add(path);
                 collision = validateCollision(zip, required(entries, path));
             }
-            props.add(new LogicPropTable.Prop(entity, stableId, mover, skins, skin, startHidden, collision));
+            int sequence = prop.has("sequence") ? uintIndex(prop.get("sequence"), "logic prop sequence") : -1;
+            List<LogicPropTable.Pose> poses = new ArrayList<>();
+            if (prop.has("poses")) {
+                JsonArray poseArray = array(prop, "poses");
+                if (poseArray.isEmpty() || collision == null || sequence < 0)
+                    fail(BundleErrorCode.INVALID_SCHEMA, "poses are present only, and not empty, for an animated prop with collision of its own");
+                int priorSequence = -1;
+                for (JsonElement poseElement : poseArray) {
+                    JsonObject pose = object(poseElement, "logic prop pose");
+                    keys(pose, "sequence", "collision");
+                    int poseSequence = uintIndex(pose.get("sequence"), "pose sequence");
+                    if (poseSequence <= priorSequence) fail(BundleErrorCode.DUPLICATE_IDENTITY, "poses are not in strictly ascending sequence order");
+                    priorSequence = poseSequence;
+                    String path = exactPath(pose, "collision", prefix + "logic_props/" + entity + "_" + poseSequence + ".s2coll");
+                    referenced.add(path);
+                    poses.add(new LogicPropTable.Pose(poseSequence, validateCollision(zip, required(entries, path))));
+                }
+            }
+            props.add(new LogicPropTable.Prop(entity, stableId, mover, skins, skin, startHidden, collision, sequence, poses));
         }
         return new LogicPropTable(props);
     }
@@ -1017,7 +1072,7 @@ final class BundleSchemaValidator {
             for(long v=0;v<vertices;v++){ for(int n=0;n<3;n++) in.canonicalF32("position"); double normal=0; for(int n=0;n<3;n++){float x=in.canonicalF32("normal");normal+=x*x;} if(normal<=1e-12) fail(BundleErrorCode.INVALID_SCHEMA,"zero mesh normal"); for(int n=0;n<2;n++)in.canonicalF32("UV"); }
             for(long i=0;i<indices;i++) if(in.u32()>=vertices) fail(BundleErrorCode.INVALID_REFERENCE,"mesh index out of range");
             long next=0; for(long s=0;s<submeshes;s++){long first=in.u32(), count=in.u32(), slot=in.u32(); if(first!=next||count==0||count%3!=0||(next=Math.addExact(next,count))>indices) fail(BundleErrorCode.INVALID_SCHEMA,"invalid submesh ranges"); if(slot>=materialSlots) fail(BundleErrorCode.INVALID_REFERENCE,"mesh material slot out of range");} if(next!=indices) fail(BundleErrorCode.INVALID_SCHEMA,"submeshes do not cover indices"); in.end();
-            return new float[]{min[0], min[1], min[2], max[0], max[1], max[2]};
+            return new float[]{min[0], min[1], min[2], max[0], max[1], max[2], vertices};
         }
     }
 
@@ -1072,7 +1127,7 @@ final class BundleSchemaValidator {
     private static long u32(byte[]b,int o){return Integer.toUnsignedLong(ByteBuffer.wrap(b,o,4).order(ByteOrder.LITTLE_ENDIAN).getInt());}
     private static void fail(BundleErrorCode code,String message)throws BundleValidationException{throw new BundleValidationException(code,message);}
 
-    private static int compareModels(BundleModel left, BundleModel right) { int c=left.contentId().compareTo(right.contentId());if(c==0)c=left.sourceModel().compareTo(right.sourceModel());if(c==0){int[] a=left.materialIds(),b=right.materialIds();for(int i=0;i<Math.min(a.length,b.length);i++){c=Integer.compareUnsigned(a[i],b[i]);if(c!=0)return c;}c=Integer.compare(a.length,b.length);}if(c==0)c=Integer.compare(colorOrder(left),colorOrder(right));return c; }
+    private static int compareModels(BundleModel left, BundleModel right) { int c=left.contentId().compareTo(right.contentId());if(c==0)c=left.sourceModel().compareTo(right.sourceModel());if(c==0){int[] a=left.materialIds(),b=right.materialIds();for(int i=0;i<Math.min(a.length,b.length);i++){c=Integer.compareUnsigned(a[i],b[i]);if(c!=0)return c;}c=Integer.compare(a.length,b.length);}if(c==0)c=Integer.compare(colorOrder(left),colorOrder(right));if(c==0)c=left.animationId()==null?(right.animationId()==null?0:-1):right.animationId()==null?1:left.animationId().compareTo(right.animationId());return c; }
     /** A model without a tint sorts before every tinted one, as the converter's absent field does. */
     private static int colorOrder(BundleModel model) { return model.color() == BundleModel.WHITE ? -1 : model.color(); }
     private record FaceOrder(int local,int provenance,long primary,long secondary) implements Comparable<FaceOrder>{public int compareTo(FaceOrder o){int c=Integer.compare(local,o.local);if(c==0)c=Integer.compare(provenance,o.provenance);if(c==0)c=Long.compareUnsigned(primary,o.primary);if(c==0)c=Long.compareUnsigned(secondary,o.secondary);return c;}}

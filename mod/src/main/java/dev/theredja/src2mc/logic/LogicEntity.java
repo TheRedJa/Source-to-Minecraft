@@ -24,8 +24,13 @@ public class LogicEntity implements Actor {
     static final double NEVER = Double.POSITIVE_INFINITY;
 
     final MapLogic map;
-    /** The entity's index in the BSP entity lump; -1 for a stand-in that is not in the map. */
+    /**
+     * The entity's slot: its index in the BSP entity lump, or for a copy a point_template made, a
+     * slot after the lump's; -1 for a stand-in that is not in the map.
+     */
     final int index;
+    /** The lump entity whose record it was made from: its own index, or a copy's template entity. */
+    final int source;
     final String classname;
     private final Map<String, String> keys = new HashMap<>();
     /** Connections per lowercase output name, in Source's firing order. */
@@ -44,6 +49,7 @@ public class LogicEntity implements Actor {
     LogicEntity(MapLogic map, int index, LogicTable.Entity entity) {
         this.map = map;
         this.index = index;
+        this.source = map == null ? index : map.sourceFor(index);
         this.classname = entity == null ? "player" : entity.classname();
         if (entity == null) return;
         for (String[] pair : entity.keyvalues()) keys.put(pair[0].toLowerCase(Locale.ROOT), pair[1]);
@@ -93,6 +99,9 @@ public class LogicEntity implements Actor {
             case "fireuser1", "fireuser2", "fireuser3", "fireuser4" -> fire("onuser" + input.charAt(8), activator, null);
             case "addoutput" -> addOutput(value);
             case "runscriptcode", "runscriptfile", "callscriptfunction" -> map.scriptCall(this, input);
+            // CBaseEntity::InputSetParent: an empty name, as ClearParent, leaves it where it is.
+            case "setparent" -> setParent(value == null || value.isBlank() ? null : map.findFirst(value.trim(), this, activator, caller));
+            case "clearparent" -> setParent(null);
             default -> { return false; }
         }
         return true;
@@ -181,7 +190,7 @@ public class LogicEntity implements Actor {
     }
 
     /** The {@link dev.theredja.src2mc.world.PropStates} state of a model entity. */
-    final dev.theredja.src2mc.world.PropStates.State propState() {
+    dev.theredja.src2mc.world.PropStates.State propState() {
         int flags = (removed || noDraw ? dev.theredja.src2mc.world.PropStates.HIDDEN : 0)
             | (removed || notSolid ? dev.theredja.src2mc.world.PropStates.NOT_SOLID : 0);
         return new dev.theredja.src2mc.world.PropStates.State(flags, skin, renderColor);
@@ -221,6 +230,11 @@ public class LogicEntity implements Actor {
             tag.putBoolean("no_draw", noDraw);
             tag.putBoolean("not_solid", notSolid);
         }
+        if (reparented) {
+            tag.putInt("parent", parent == null || parent.removed ? -1 : parent.index);
+            Rigid hold = attached == null ? Rigid.IDENTITY : attached;
+            tag.put("attached", doubles(hold.qx(), hold.qy(), hold.qz(), hold.qw(), hold.x(), hold.y(), hold.z()));
+        }
         if (outputsChanged) {
             CompoundTag saved = new CompoundTag();
             for (Map.Entry<String, List<Connection>> entry : outputs.entrySet()) {
@@ -252,6 +266,15 @@ public class LogicEntity implements Actor {
             notSolid = tag.getBoolean("not_solid");
             lookChanged = true;
         }
+        if (tag.contains("parent")) {
+            int saved = tag.getInt("parent");
+            parent = saved < 0 ? null : map.entity(saved);
+            parentFound = true;
+            reparented = true;
+            ListTag hold = tag.getList("attached", Tag.TAG_DOUBLE);
+            attached = hold.size() != 7 ? null : new Rigid(hold.getDouble(0), hold.getDouble(1), hold.getDouble(2), hold.getDouble(3),
+                hold.getDouble(4), hold.getDouble(5), hold.getDouble(6));
+        }
         if (tag.contains("outputs")) {
             outputs.clear();
             CompoundTag saved = tag.getCompound("outputs");
@@ -268,9 +291,16 @@ public class LogicEntity implements Actor {
         }
     }
 
+    private static ListTag doubles(double... values) {
+        ListTag list = new ListTag();
+        for (double value : values) list.add(net.minecraft.nbt.DoubleTag.valueOf(value));
+        return list;
+    }
+
     /** For tracing and listings: {@code classname "name" #index}. */
     String describe() {
-        return classname + (targetname == null ? "" : " \"" + targetname + "\"") + (index >= 0 ? " #" + index : "");
+        return classname + (targetname == null ? "" : " \"" + targetname + "\"") + (index >= 0 ? " #" + index : "")
+            + (source != index && index >= 0 ? " (copy of #" + source + ")" : "");
     }
 
     /** Persistent state worth showing in a listing; empty for none. */
@@ -288,20 +318,43 @@ public class LogicEntity implements Actor {
      * a train rides the train, wheels turn on it, a brush follows the prop door it is parented
      * to. A parent with no pose of its own passes on its own parent's. Null when nothing moves.
      */
-    final MoverPose worldPose(double t, double[] origin) { return worldPose(t, origin, 0); }
+    final MoverPose worldPose(double t, double[] origin) {
+        Rigid motion = worldMotion(t);
+        return motion == null || origin == null ? null : motion.about(origin);
+    }
 
-    private MoverPose worldPose(double t, double[] origin, int depth) {
-        MoverPose own = pose(t);
+    /**
+     * Where the entity's compiled points are at time {@code t}: its parent's move, then the hold
+     * it was attached with, then its own move. Null when nothing moves it.
+     */
+    final Rigid worldMotion(double t) { return worldMotion(t, 0); }
+
+    private Rigid worldMotion(double t, int depth) {
+        Rigid own = ownMotion(t);
         LogicEntity parent = depth < MAX_PARENT_DEPTH ? parent() : null;
-        double[] parentOrigin = parent == null ? null : parent.position();
-        MoverPose above = parentOrigin == null ? null : parent.worldPose(t, parentOrigin, depth + 1);
-        if (above == null || origin == null) return own;
-        return MoverPose.compose(above, parentOrigin, own == null ? MoverPose.IDENTITY : own, origin);
+        Rigid above = parent == null ? null : parent.worldMotion(t, depth + 1);
+        if (above == null && attached == null) return own;
+        Rigid motion = above == null ? attached : attached == null ? above : above.after(attached);
+        return own == null ? motion : motion.after(own);
+    }
+
+    /** {@link #pose} as a move of map-local points; null when the entity does not move itself. */
+    private Rigid ownMotion(double t) {
+        MoverPose own = pose(t);
+        double[] origin = own == null ? null : position();
+        return origin == null ? null : Rigid.of(own, origin);
     }
 
     private static final int MAX_PARENT_DEPTH = 16;
     private LogicEntity parent;
     private boolean parentFound;
+    /** The parent was set at runtime, by {@code SetParent} or as a copy spawned; saved then. */
+    private boolean reparented;
+    /**
+     * How the entity hangs off its parent beyond their compiled places: null for the map's own
+     * links, else the move that kept its world place when it was attached.
+     */
+    private Rigid attached;
 
     /** The entity named by {@code parentname}, without its attachment; looked up once. */
     final LogicEntity parent() {
@@ -314,6 +367,41 @@ public class LogicEntity implements Actor {
             }
         }
         return parent == null || parent.removed ? null : parent;
+    }
+
+    /** Whether its parent was set at runtime, so it no longer rides where the map compiled it. */
+    final boolean reparented() { return reparented; }
+
+    /**
+     * {@code SetParent}: the entity keeps its world place and from now on moves with
+     * {@code next}, or with nothing for null. A parent that is the entity or rides it is refused.
+     */
+    final void setParent(LogicEntity next) {
+        for (LogicEntity above = next; above != null; above = above.parent()) if (above == this) return;
+        double t = map.time();
+        Rigid world = worldMotion(t), own = ownMotion(t);
+        Rigid hold = world == null ? Rigid.IDENTITY : world;
+        if (own != null) hold = hold.after(own.inverse());
+        if (next != null) {
+            Rigid parentWorld = next.worldMotion(t);
+            if (parentWorld != null) hold = parentWorld.inverse().after(hold);
+        }
+        parent = next;
+        parentFound = true;
+        reparented = true;
+        attached = hold.near(Rigid.IDENTITY, 1e-12) ? null : hold;
+    }
+
+    /**
+     * A copy a point_template spawned: its {@code parentname} is looked up now, as
+     * {@code SpawnHierarchicalList} links parents, and it keeps the place it spawned at.
+     */
+    final void attachAtSpawn() {
+        parentFound = true;
+        parent = null;
+        String name = key("parentname");
+        LogicEntity found = name == null || name.isBlank() ? null : map.findFirst(name.split(",", 2)[0].trim(), this, null, null);
+        setParent(found == this ? null : found);
     }
 
     /**

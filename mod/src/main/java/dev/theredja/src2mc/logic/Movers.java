@@ -462,10 +462,10 @@ final class Movers {
          */
         private boolean hingeOnLeft() {
             if (map.map == null || map.map.movers() == null) return false;
-            int mover = map.map.movers().indexOfEntity(index);
+            int mover = map.map.movers().indexOfEntity(source);
             if (mover < 0) return false;
             for (var prop : map.map.movers().movers().get(mover).props()) {
-                if (prop.entity() != index) continue;
+                if (prop.entity() != source) continue;
                 float[] b = map.map.models().get(prop.model()).bounds();
                 if (b == null) return false;
                 double minLength = b[0] * b[0] + b[2] * b[2], maxLength = b[3] * b[3] + b[5] * b[5];
@@ -743,31 +743,5 @@ final class Movers {
         }
 
         @Override String state() { return disabled ? "disabled" : "enabled"; }
-    }
-
-    /**
-     * {@code CDynamicProp}'s look and solidity: {@code StartDisabled} spawns it with
-     * {@code EF_NODRAW}; {@code Enable}/{@code TurnOn} and {@code Disable}/{@code TurnOff} only
-     * show and hide it, it stays solid; {@code EnableCollision}/{@code DisableCollision} switch
-     * {@code FSOLID_NOT_SOLID}. Skin and colour are every model entity's (see {@link LogicEntity}).
-     */
-    static final class DynamicProp extends LogicEntity {
-        DynamicProp(MapLogic map, int index, LogicTable.Entity entity) { super(map, index, entity); }
-
-        @Override void spawn() { noDraw = Variant.integer(key("startdisabled")) != 0; }
-
-        @Override boolean accept(String input, String value, Actor activator, LogicEntity caller) {
-            switch (input) {
-                case "enable", "turnon" -> noDraw = false;
-                case "disable", "turnoff" -> noDraw = true;
-                case "enablecollision" -> notSolid = false;
-                case "disablecollision" -> notSolid = true;
-                default -> { return false; }
-            }
-            lookChanged();
-            return true;
-        }
-
-        @Override String state() { return (noDraw ? "hidden" : "shown") + (notSolid ? ", not solid" : "") + ", skin " + skin; }
     }
 }

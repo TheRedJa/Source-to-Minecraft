@@ -124,6 +124,7 @@ public final class LogicSystem {
     public static void onServerStopped(ServerStoppedEvent event) {
         RUNNING.clear();
         dev.theredja.src2mc.world.PropStates.clear(false);
+        PropSync.clear();
         OCCUPIED.clear();
         generationSequence = -1;
     }
@@ -132,6 +133,12 @@ public final class LogicSystem {
 
     /** The running logic of a placement, or null. */
     static MapLogic get(ServerLevel level, MapPlacement placement) { return running(level).get(placement.anchorWorld().asLong()); }
+
+    /** The map time of a placement's logic, or 0 when it is not running. */
+    static double mapTime(ServerLevel level, dev.theredja.src2mc.world.PropStates.Key key) {
+        MapLogic logic = running(level).get(key.anchor());
+        return logic == null ? 0 : logic.time();
+    }
 
     /** Starts a placement's logic as a new game; null with the reason when it cannot. */
     static String start(ServerLevel level, MapPlacement placement, MapLogic.LoadType type) {
@@ -186,7 +193,7 @@ public final class LogicSystem {
                 dz = Math.max(0, Math.max(min.z - eye.z, eye.z - max.z));
             distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
         } else {
-            PropUseBox box = PropUseBox.of(logic.map, index);
+            PropUseBox box = PropUseBox.of(logic.map, logic.entity(index).source);
             if (box == null) return;
             Vec3 origin = logic.world(new double[3]);
             distance = box.distance(eye.x - origin.x, eye.y - origin.y, eye.z - origin.z);

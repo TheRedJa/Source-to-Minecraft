@@ -60,14 +60,18 @@ public final class CollisionShapes {
     private record Snapshot(BundleGeneration generation, long epoch, Entry[] entries, boolean client) {}
 
     /**
-     * The collision of a map's logic props (format.md section 18), added to a cell's own while the
-     * prop is solid. {@code cells} maps a packed map-local cell to pairs of prop index and shape
-     * index; {@code combined} caches a cell's whole shape for one {@link PropStates#version}.
+     * The collision of a map's logic props (format.md section 18), placed or riding one mover,
+     * added to a cell's own while the prop is solid: the table of the pose it stands in, for an animated prop whose collision
+     * follows its pose (section 19). Each table is a layer; {@code cells} maps a packed map-local
+     * cell to pairs of layer index and shape index; {@code combined} caches a cell's whole shape
+     * for one {@link PropStates#version}.
      */
-    private static final class LogicProps {
+    static final class LogicProps {
         final dev.theredja.src2mc.bundle.BundleMap map;
         final PropStates.Key key;
+        /** Per layer: its prop and its table. */
         final dev.theredja.src2mc.bundle.LogicPropTable.Prop[] props;
+        final CollisionTable[] tables;
         final AtomicReferenceArray<VoxelShape>[] shapes;
         final it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap<int[]> cells = new it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap<>();
         final it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap<VoxelShape> combined = new it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap<>();
@@ -77,10 +81,18 @@ public final class CollisionShapes {
         LogicProps(dev.theredja.src2mc.bundle.BundleMap map, PropStates.Key key, List<dev.theredja.src2mc.bundle.LogicPropTable.Prop> solid) {
             this.map = map;
             this.key = key;
-            this.props = solid.toArray(dev.theredja.src2mc.bundle.LogicPropTable.Prop[]::new);
+            List<dev.theredja.src2mc.bundle.LogicPropTable.Prop> layerProps = new java.util.ArrayList<>();
+            List<CollisionTable> layerTables = new java.util.ArrayList<>();
+            for (var prop : solid) {
+                layerProps.add(prop);
+                layerTables.add(prop.collision());
+                for (var pose : prop.poses()) { layerProps.add(prop); layerTables.add(pose.collision()); }
+            }
+            this.props = layerProps.toArray(dev.theredja.src2mc.bundle.LogicPropTable.Prop[]::new);
+            this.tables = layerTables.toArray(CollisionTable[]::new);
             this.shapes = new AtomicReferenceArray[props.length];
             for (int i = 0; i < props.length; i++) {
-                CollisionTable table = props[i].collision();
+                CollisionTable table = tables[i];
                 shapes[i] = BUILT.computeIfAbsent(table, ignored -> new AtomicReferenceArray<>(table.shapeCount()));
                 int prop = i;
                 table.forEachCell((x, y, z, shape) -> {
@@ -94,11 +106,17 @@ public final class CollisionShapes {
             }
         }
 
+        /** The placed logic props of a map, in its map-local cells. */
         static LogicProps of(Level level, MapPlacement placement, dev.theredja.src2mc.bundle.BundleMap map) {
+            return of(map, PropStates.key(level, placement), -1);
+        }
+
+        /** The logic props riding one mover ({@code -1}: placed ones), in its own cells; null for none with collision. */
+        static LogicProps of(dev.theredja.src2mc.bundle.BundleMap map, PropStates.Key key, int mover) {
             if (map.logicProps() == null) return null;
             List<dev.theredja.src2mc.bundle.LogicPropTable.Prop> solid = map.logicProps().props().stream()
-                .filter(prop -> prop.collision() != null).toList();
-            return solid.isEmpty() ? null : new LogicProps(map, PropStates.key(level, placement), solid);
+                .filter(prop -> prop.collision() != null && prop.mover() == mover).toList();
+            return solid.isEmpty() ? null : new LogicProps(map, key, solid);
         }
 
         /** The cell's shape with every solid logic prop in it added; {@code base} when none reaches it. */
@@ -118,11 +136,12 @@ public final class CollisionShapes {
             boolean any = false;
             for (int i = 0; i < pairs.length; i += 2) {
                 var prop = props[pairs[i]];
-                if (!PropStates.effective(client, key, map, prop).solid()) continue;
+                PropStates.State state = PropStates.effective(client, key, map, prop);
+                if (!state.solid() || PropStates.collision(prop, state) != tables[pairs[i]]) continue;
                 int id = pairs[i + 1];
                 VoxelShape part = shapes[pairs[i]].get(id);
                 if (part == null) {
-                    part = build(prop.collision().boxes(id));
+                    part = build(tables[pairs[i]].boxes(id));
                     shapes[pairs[i]].compareAndSet(id, null, part);
                 }
                 shape = Shapes.or(shape, part);

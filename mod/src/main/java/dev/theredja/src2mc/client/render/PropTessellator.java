@@ -19,11 +19,16 @@ final class PropTessellator {
     static List<Triangle> tessellate(RuntimeMesh mesh, RuntimeMesh.Submesh submesh, BundleProp prop,
                                     BundleMaterial.TextureReference material, AtlasIndex.Texture texture,
                                     int pageSize) {
-        float[] vertices = mesh.vertices();
-        int[] indices = mesh.indices();
+        return tessellate(mesh.vertices(), mesh.indices(), submesh.firstIndex(), submesh.indexCount(), prop, material, texture, pageSize);
+    }
+
+    /** As above over a mesh's own arrays, which {@link RuntimeMesh} copies on every call: for a caller that goes triangle by triangle. */
+    static List<Triangle> tessellate(float[] vertices, int[] indices, int firstIndex, int indexCount, BundleProp prop,
+                                    BundleMaterial.TextureReference material, AtlasIndex.Texture texture,
+                                    int pageSize) {
         List<Triangle> result = new ArrayList<>();
-        int end = submesh.firstIndex() + submesh.indexCount();
-        for (int index = submesh.firstIndex(); index < end; index += 3) {
+        int end = firstIndex + indexCount;
+        for (int index = firstIndex; index < end; index += 3) {
             List<Vertex> triangle = new ArrayList<>(3);
             for (int corner = 0; corner < 3; corner++) {
                 int vertex = indices[index + corner] * 8;

@@ -197,8 +197,10 @@ payloads. `atlas.json` records the fixed 4096 page size, mip levels 0 through 4,
 texture's lossless source-to-page rectangles. A model reference
 similarly contains its content ID, diagnostic normalized Source model path,
 a `materials` array mapping mesh material slots to map-local material IDs, an
-optional `color`, and an optional lowercase `surface_prop`, the model's
-`$surfaceprop`. `color` is the `[r, g, b]` tint, each 0 to 255, the model is
+optional `color`, an optional `animation`, and an optional lowercase
+`surface_prop`, the model's `$surfaceprop`. `animation` is the 64-character
+content ID of the `animations/<content-id>.s2anim` (section 19) that poses an
+animated prop's mesh; its vertex bindings are those of this reference's mesh. `color` is the `[r, g, b]` tint, each 0 to 255, the model is
 drawn with: every texel's colour is multiplied by it, as Source's colour
 modulation does. It is absent for white, which is no tint, and never written
 as `[255, 255, 255]`. A `prop_static` takes it from the static prop lump's
@@ -209,9 +211,11 @@ up to three integers, missing ones 0, each kept to its low byte.
 Model bytes live at `meshes/<content-id>.s2mesh`.
 
 Multiple model references may name the same content ID when their Source-model
-provenance, map-local material-slot arrays or tints differ. References are
-uniquely sorted by `(content_id, source_model, materials, color)`, a reference
-without `color` before every one with it and colours by red, green, then blue;
+provenance, map-local material-slot arrays, tints or animations differ.
+References are uniquely sorted by `(content_id, source_model, materials,
+color, animation)`, a reference without `color` before every one with it and
+colours by red, green, then blue, and one without `animation` before every one
+with it;
 prop placement records select the reference index. The mesh payload still occurs only once. This is how a
 Source skin family is carried: props of one model wearing different skins share
 the mesh and each select a reference whose `materials` are that skin's. A skin
@@ -326,6 +330,8 @@ residency budgets:
 | props per mover | 65,536 |
 | logic props per map | 16,384 |
 | skin families per logic prop | 1,024 |
+| `.s2anim` payload | 64 MiB |
+| bones / sequences / frames per sequence of an animation | 256 / 4,096 / 65,536 |
 | uncompressed entry | 2 GiB |
 | uncompressed bundle payload | 64 GiB |
 | ZIP expansion ratio | 200:1 after a 1 MiB small-entry allowance |
@@ -712,7 +718,14 @@ fragment's owner and a hanging collision piece's owner are one of the mover's
 own blocks. Nothing is hollowed. A mover built only of thin brushes, such as
 a door panel, has an empty `surface` list: its fragments are all unowned and
 its collision lives in carriers. Riding props add their volume to the mover's
-collision by the rules of section 14.
+collision by the rules of section 14, except a riding logic prop that keeps
+collision of its own (section 18), whose cells only add carriers here. A brush of the mover with
+solid contents but no drawn side (a `tools/toolsplayerclip` plate under a
+conveyor belt prop) adds its volume to the collision too, through carriers,
+when the mover is exported for anything else; an entity made only of such
+brushes, such as an invisible use volume, is no mover. The map's own collision (section 14) takes the
+world's such brushes, and its player clips, the same way, cut to the cells
+the rest of the map fills.
 
 `blocks.surface` is the mover's voxel grid: each cell holds an
 `src2mc:surface` block. `blocks.carrier` is the collision table's carriers:
@@ -745,7 +758,12 @@ A *logic prop* is an entity of the lump with a `.mdl` model that some output
 of the map sends `Skin`, `Color`, `Enable`, `Disable`, `TurnOn`, `TurnOff`,
 `Kill`, `KillHierarchy`, `DisableCollision` or `EnableCollision`, or that is a
 `prop_dynamic`, `prop_dynamic_override` or `prop_dynamic_ornament` with a
-non-zero `StartDisabled`. Targets resolve as `CEventQueue::ServiceEvents`
+non-zero `StartDisabled`, or such a dynamic prop that animates: some output
+sends it `SetAnimation`, `SetDefaultAnimation`, `SetPlaybackRate` or
+`SetCycle`, or it has a `DefaultAnim` or a non-zero `RandomAnimation`, or that
+a `point_template` names in `Template01` to `Template16` (a trailing `*`
+matching every name it begins), which the mod copies at runtime; such a prop's
+collision is kept apart as for a killed one. Targets resolve as `CEventQueue::ServiceEvents`
 resolves them, ignoring ASCII case: every entity whose `targetname` matches, a
 trailing `*` matching every name it begins; failing any, every entity of that
 classname. Targets starting with `!` depend on who fires and are not followed.
@@ -754,7 +772,7 @@ whose `parentname` chain leads to a `Kill` or `KillHierarchy` target counts as
 one too. A logic prop is still a placed prop in `props.s2props`, or a riding
 prop of its mover in `movers.json`; this table adds to it.
 
-The payload is canonical JSON with `format` `src2mc-logic-props`, `version` 1,
+The payload is canonical JSON with `format` `src2mc-logic-props`, `version` 3,
 and `props`, an array in strictly ascending entity order. Each record has
 these fields in order:
 
@@ -766,7 +784,9 @@ these fields in order:
 | `skins` | non-empty array of model-reference indices, one per skin family of the model, family 0 first; each reference wears that family's materials and the prop's tint |
 | `skin` | the skin the map spawns it with, as written; a skin the model lacks is drawn as family 0 |
 | `start_hidden` | present, and `true`, when the prop spawns hidden (`StartDisabled` on a dynamic prop) |
-| `collision` | optional `maps/<map-id>/logic_props/<entity>.s2coll`; only for a placed prop |
+| `collision` | optional `maps/<map-id>/logic_props/<entity>.s2coll`; map-local for a placed prop, mover-local for a riding one |
+| `sequence` | present for an animated prop (its models have `animation`): the sequence it spawns in |
+| `poses` | optional non-empty array of `{sequence, collision}`, strictly ascending by sequence, `collision` being `maps/<map-id>/logic_props/<entity>_<sequence>.s2coll`; only with `collision` and `sequence` |
 
 Exactly one of `stable_id` and `mover` is present. A prop that some input
 removes or switches the collision of (`Kill`, `KillHierarchy`,
@@ -776,8 +796,16 @@ cells are the section 14 S2COLL format of its own, map-local, and the mod adds
 each cell's shape to the cell's own while the prop is solid. Its cells follow
 the same rules as the merged ones: a cell whose map block is a full cube needs
 nothing, and a cell with no map block gets an `src2mc:carrier`, which collides
-as nothing while the prop is gone. A riding prop's collision stays merged in
-its mover's.
+as nothing while the prop is gone. A riding prop's is the same in its mover's
+cells (section 17): kept out of the mover's table, its cells in mover-local
+coordinates, a cell with no mover block getting a carrier there, and the mod
+adds it to the mover's cell shapes while the prop is solid.
+
+A `point_template`'s entities leave the map as it spawns, unless its
+spawnflag 1 keeps them: the mod spawns them neither shown nor solid, movers
+included, and draws each copy a `ForceSpawn` makes from the same records -- a
+copy of a prop wears the prop's model references, at its compiled place moved
+as the logic moves the copy. The bundle has nothing per copy.
 
 The logic sets each logic prop's state, which the server sends its clients:
 hidden (`EF_NODRAW`, or removed), not solid (`FSOLID_NOT_SOLID`, or removed),
@@ -786,5 +814,62 @@ and hide a dynamic prop, which stays solid, as `CDynamicProp` does; `Skin`
 reads its parameter as `atoi`, `Color` as `UTIL_StringToColor32`. A prop with
 no state yet is as the map spawns it.
 
-Each logic prop adds at most one bundle entry, which counts against the ZIP
-entry limit.
+An animated prop's model references are its reference pose, which the
+`.s2anim` of their `animation` moves (section 19); its `collision` is the
+volume of the pose it spawns in, the first frame of `sequence`, and each of
+`poses` the volume of the pose that sequence leaves it in: its last frame, or
+its first for one that loops. Every sequence the map can make the prop play
+has one when the prop is solid. The mod adds the table of the pose the prop
+stands in (the last sequence that settled; the spawn pose before any did) to
+the cells while the prop is solid, the mover's cells for a riding prop.
+
+The logic's state of an animated prop adds the sequence it plays, the cycle
+at a map time, the rate it advances at (0 while the server does not advance
+it), a parity that moves whenever Source would restart the sequence, and the
+sequence whose settled pose its collision is in.
+
+Each logic prop adds one bundle entry, and an animated prop one more per pose,
+which count against the ZIP entry limit.
+
+## 19. Animation
+
+`animations/<content-id>.s2anim` holds the skeleton and sequences of an
+animated prop's model, the content ID being the SHA-256 of the payload. A
+model reference names it in `animation`. Everything is in the model-local
+block space of the reference's runtime mesh (section 7): Source `(x, y, z)` is
+`(x, z, -y)`, 32 units to the block, so a rotation keeps its angle and its axis
+is mapped the same way. All values are little-endian; floats are finite.
+
+The header is the 8-byte magic `S2ANIM\0\0`, `u32` version 1, and `u32` bone,
+vertex, sequence and transition-node counts. The vertex count equals the
+mesh's. Then:
+
+- **Bones**, in order, each a parent after it: `i32` parent (-1 for a root),
+  the rest position as three `f32`, the rest rotation as four `i16` (XYZW,
+  each a fraction of 32767, normalized when read), and the bind transform,
+  twelve `f32` row-major 3x4: model space to the bone's space in the pose the
+  vertices were bound in, after undoing any turn the mesh was exported with.
+- **Vertices**, one per mesh vertex: `u8` bone count 0 to 3, three `u8` bone
+  indices, three `f32` weights. Used slots have a positive weight and a bone
+  that exists; unused slots are zero.
+- **Transitions**: `nodes * nodes` bytes, the model's transition graph; the
+  byte at row `from - 1`, column `to - 1` is the node to go through.
+- **Sequences**, in the model's order: the label and the activity name, each a
+  `u16` byte length and UTF-8; `i32` activity weight; `u32` Source sequence
+  flags (`0x1` looping, `0x2` snap, `0x100` real time); `f32` fade-in and
+  fade-out seconds; `i32` entry node, exit node and node flags; `f32` cycles
+  per second at playback rate 1 (`Studio_CPS` with every pose parameter at its
+  spawn value); a `f32` weight per bone; `u32` frame count. A sequence the map
+  cannot reach has 0 frames and nothing more; it keeps its name and timing so
+  a lookup finds what Source would. Otherwise, per bone: a `u8` position track
+  and a `u8` rotation track, each 0 (one value) or 1 (one per frame), then
+  the positions, three `f32` each, then the rotations, four `i16` each.
+
+A sequence's frames are the bones' local transforms as `CalcAnimation` decodes
+the model (`.ani` animation blocks and sections included). Between two frames
+a position is interpolated linearly and a rotation by `QuaternionBlend`; the
+frame of cycle `c` is `c * (frames - 1)`. A sequence of several blended
+animations is flattened at the spawn pose parameters. A bone's transform
+composes its parents' (`BuildBoneChain`); a vertex is the weighted sum of its
+bones' `bone-to-model * bind` applied to it, as the studio renderer skins it.
+

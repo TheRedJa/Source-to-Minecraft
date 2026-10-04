@@ -24,6 +24,15 @@ const STATE_INPUTS: &[&str] = &[
     "enablecollision",
 ];
 
+/// `CBaseAnimating` and `CDynamicProp` inputs that play or change an
+/// animation.
+const ANIMATION_INPUTS: &[&str] = &[
+    "setanimation",
+    "setdefaultanimation",
+    "setplaybackrate",
+    "setcycle",
+];
+
 /// Inputs after which the prop may no longer collide.
 const COLLISION_INPUTS: &[&str] = &[
     "kill",
@@ -48,6 +57,9 @@ pub struct Role {
     /// Removed, or its collision switched, by some input: its collision has
     /// to be removable rather than merged into the map's cells.
     pub collision: bool,
+    /// A dynamic prop that plays animations: some input sets one, or it has a
+    /// `DefaultAnim` or `RandomAnimation` of its own.
+    pub animated: bool,
 }
 
 struct Entity {
@@ -56,6 +68,7 @@ struct Entity {
     parent: String,
     model: bool,
     start_disabled: bool,
+    animates: bool,
 }
 
 /// Every model entity, by lump index, that some input changes, or that
@@ -83,8 +96,12 @@ pub fn roles(bsp: &vbsp::Bsp) -> BTreeMap<usize, Role> {
 
 /// [`roles`] over the entity lump's keyvalues, each entity's in lump order.
 pub fn roles_of(lump: &[Vec<(String, String)>]) -> BTreeMap<usize, Role> {
-    let entities: Vec<Entity> = lump
-        .iter()
+    let entities = entities_of(lump);
+    roles_from(lump, &entities)
+}
+
+fn entities_of(lump: &[Vec<(String, String)>]) -> Vec<Entity> {
+    lump.iter()
         .map(|raw| {
             let mut entity = Entity {
                 classname: String::new(),
@@ -92,6 +109,7 @@ pub fn roles_of(lump: &[Vec<(String, String)>]) -> BTreeMap<usize, Role> {
                 parent: String::new(),
                 model: false,
                 start_disabled: false,
+                animates: false,
             };
             for (key, value) in raw {
                 match key.to_ascii_lowercase().as_str() {
@@ -107,16 +125,20 @@ pub fn roles_of(lump: &[Vec<(String, String)>]) -> BTreeMap<usize, Role> {
                     }
                     "model" => entity.model = value.trim().to_ascii_lowercase().ends_with(".mdl"),
                     "startdisabled" => entity.start_disabled = atoi(value) != 0,
+                    "randomanimation" => entity.animates |= atoi(value) != 0,
                     _ => {}
                 }
             }
             entity
         })
-        .collect();
+        .collect()
+}
 
+fn roles_from(lump: &[Vec<(String, String)>], entities: &[Entity]) -> BTreeMap<usize, Role> {
     let mut changed: BTreeSet<usize> = BTreeSet::new();
     let mut collision: BTreeSet<usize> = BTreeSet::new();
     let mut killed: BTreeSet<usize> = BTreeSet::new();
+    let animated: BTreeSet<usize> = requests_of(lump).into_keys().collect();
     for raw in lump {
         for (key, value) in raw {
             let crate::bsp::entities::OutputParse::Output(output) =
@@ -128,7 +150,7 @@ pub fn roles_of(lump: &[Vec<(String, String)>]) -> BTreeMap<usize, Role> {
             if !STATE_INPUTS.contains(&input.as_str()) {
                 continue;
             }
-            let targets = resolve(&entities, &output.target);
+            let targets = resolve(entities, &output.target);
             if COLLISION_INPUTS.contains(&input.as_str()) {
                 collision.extend(&targets);
             }
@@ -163,25 +185,105 @@ pub fn roles_of(lump: &[Vec<(String, String)>]) -> BTreeMap<usize, Role> {
     }
     changed.extend(&killed);
     collision.extend(&killed);
+    // A point_template takes its entities out of the map as it spawns and makes
+    // copies of them on `ForceSpawn`: each is drawn and collides on its own.
+    let templated = templated_of(lump, entities);
+    changed.extend(&templated);
+    collision.extend(&templated);
 
     let mut roles = BTreeMap::new();
     for (index, entity) in entities.iter().enumerate() {
         if !entity.model {
             continue;
         }
-        let start_hidden =
-            entity.start_disabled && DYNAMIC_PROP_CLASSES.contains(&entity.classname.as_str());
-        if changed.contains(&index) || start_hidden {
+        let dynamic = DYNAMIC_PROP_CLASSES.contains(&entity.classname.as_str());
+        let start_hidden = entity.start_disabled && dynamic;
+        let animates = dynamic && (entity.animates || animated.contains(&index));
+        if changed.contains(&index) || start_hidden || animates {
             roles.insert(
                 index,
                 Role {
                     start_hidden,
                     collision: collision.contains(&index),
+                    animated: animates,
                 },
             );
         }
     }
     roles
+}
+
+/// Every entity some `point_template` names in its `Template01` to
+/// `Template16`, by lump index: every entity of that name, a trailing `*`
+/// matching every name it starts (`CPointTemplate::StartBuildingTemplates`).
+fn templated_of(lump: &[Vec<(String, String)>], entities: &[Entity]) -> BTreeSet<usize> {
+    let mut templated = BTreeSet::new();
+    for (index, raw) in lump.iter().enumerate() {
+        if entities[index].classname != "point_template" {
+            continue;
+        }
+        for (key, value) in raw {
+            let key = key.to_ascii_lowercase();
+            let Some(number) = key.strip_prefix("template") else {
+                continue;
+            };
+            if number.len() != 2 || !number.bytes().all(|b| b.is_ascii_digit()) {
+                continue;
+            }
+            let name = value.trim().to_ascii_lowercase();
+            if name.is_empty() {
+                continue;
+            }
+            let matches = |target: &str| match name.strip_suffix('*') {
+                Some(prefix) => target.starts_with(prefix),
+                None => target == name,
+            };
+            templated.extend(
+                entities
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, e)| !e.targetname.is_empty() && matches(&e.targetname))
+                    .map(|(i, _)| i),
+            );
+        }
+    }
+    templated
+}
+
+/// The animations the map asks each entity for, by lump index: its own
+/// `DefaultAnim`, and the parameter of every `SetAnimation` and
+/// `SetDefaultAnimation` sent to it, lowercased. An entity some input sends
+/// `SetPlaybackRate` or `SetCycle` is in the map with no name of its own.
+pub fn requests_of(lump: &[Vec<(String, String)>]) -> BTreeMap<usize, BTreeSet<String>> {
+    let entities = entities_of(lump);
+    let mut requests: BTreeMap<usize, BTreeSet<String>> = BTreeMap::new();
+    for (index, raw) in lump.iter().enumerate() {
+        for (key, value) in raw {
+            if key.eq_ignore_ascii_case("defaultanim") && !value.trim().is_empty() {
+                requests
+                    .entry(index)
+                    .or_default()
+                    .insert(value.trim().to_ascii_lowercase());
+            }
+            let crate::bsp::entities::OutputParse::Output(output) =
+                crate::bsp::entities::parse_output(key, value)
+            else {
+                continue;
+            };
+            let input = output.input.trim().to_ascii_lowercase();
+            if !ANIMATION_INPUTS.contains(&input.as_str()) {
+                continue;
+            }
+            let name = output.parameter.trim().to_ascii_lowercase();
+            for target in resolve(&entities, &output.target) {
+                let names = requests.entry(target).or_default();
+                if (input == "setanimation" || input == "setdefaultanimation") && !name.is_empty() {
+                    names.insert(name.clone());
+                }
+            }
+        }
+    }
+    requests
 }
 
 fn resolve(entities: &[Entity], target: &str) -> Vec<usize> {
@@ -208,6 +310,11 @@ fn resolve(entities: &[Entity], target: &str) -> Vec<usize> {
         .filter(|(_, e)| matches(&e.classname))
         .map(|(i, _)| i)
         .collect()
+}
+
+/// `atoi`, as `CDynamicProp` reads its integer keyvalues.
+pub fn atoi_text(text: &str) -> i64 {
+    atoi(text)
 }
 
 fn atoi(text: &str) -> i64 {
@@ -267,14 +374,16 @@ mod tests {
             roles.get(&2),
             Some(&Role {
                 start_hidden: false,
-                collision: true
+                collision: true,
+                animated: false
             })
         );
         assert_eq!(
             roles.get(&3),
             Some(&Role {
                 start_hidden: false,
-                collision: false
+                collision: false,
+                animated: false
             })
         );
         assert!(!roles.contains_key(&4));
@@ -320,7 +429,8 @@ mod tests {
             roles.get(&4),
             Some(&Role {
                 start_hidden: true,
-                collision: false
+                collision: false,
+                animated: false
             })
         );
         assert!(!roles.contains_key(&5), "prop_physics has no StartDisabled");
@@ -342,5 +452,36 @@ mod tests {
         ];
         let roles = roles_of(&lump);
         assert_eq!(roles.keys().copied().collect::<Vec<_>>(), vec![1]);
+    }
+
+    /// bts4's conveyor: a point_template names the belt module and every gib
+    /// (`*` too); they leave the map at spawn and come back as copies.
+    #[test]
+    fn a_point_templates_entities_are_logic_props() {
+        let lump = vec![
+            entity(&[
+                ("classname", "point_template"),
+                ("Template01", "belt_model"),
+                ("Template02", "gib_*"),
+            ]),
+            entity(&[
+                ("classname", "prop_dynamic"),
+                ("targetname", "belt_model"),
+                ("model", "models/belt.mdl"),
+            ]),
+            entity(&[
+                ("classname", "prop_dynamic"),
+                ("targetname", "gib_small"),
+                ("model", "models/gib.mdl"),
+            ]),
+            entity(&[
+                ("classname", "prop_dynamic"),
+                ("targetname", "other"),
+                ("model", "models/gib.mdl"),
+            ]),
+        ];
+        let roles = roles_of(&lump);
+        assert_eq!(roles.keys().copied().collect::<Vec<_>>(), vec![1, 2]);
+        assert!(roles[&1].collision && roles[&2].collision);
     }
 }

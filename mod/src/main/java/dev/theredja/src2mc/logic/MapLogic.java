@@ -45,7 +45,26 @@ public final class MapLogic {
     final BundleMap map;
     final LogicTable table;
     final AudioTable audio;
-    private final LogicEntity[] entities;
+    /** By slot: the lump's entities, the game code's, then copies point_templates made. */
+    private final List<LogicEntity> entities = new ArrayList<>();
+    /** How many slots the map itself has; copies come after. */
+    private final int mapEntities;
+    /**
+     * Slots of removed copies, by the map time they were freed: taken again by a copy made a
+     * second or more later. A slot taken in the same tick it was freed -- a conveyor kills its
+     * last train and makes a new one at once -- looked to the sub-levels and the clients like
+     * the old entity jumping to the new one's place.
+     */
+    private final java.util.TreeMap<Integer, Double> freeSlots = new java.util.TreeMap<>();
+    private static final double SLOT_REUSE_DELAY = 1.0;
+    /** The record a copy being made is of; see {@link #sourceFor}. */
+    private int creatingSource = -1;
+    /** Each point_template's group, built as the map spawns; see {@link Templates}. */
+    private final Map<Integer, Templates.Group> templates = new HashMap<>();
+    /** {@code g_iCurrentTemplateInstance}, the number name fixup appends. */
+    private int templateInstance;
+    /** Slot, template and instance of each copy alive, for saving. */
+    private final Map<Integer, int[]> copies = new java.util.TreeMap<>();
     private final Map<String, List<LogicEntity>> byName = new HashMap<>();
     private final Map<String, List<LogicEntity>> byClass = new HashMap<>();
     private final Map<UUID, LogicEntity> playerEntities = new HashMap<>();
@@ -75,7 +94,7 @@ public final class MapLogic {
         this.map = map;
         this.table = map.logic();
         this.audio = map.audio();
-        this.entities = new LogicEntity[table.entities().size() + table.engineEntities().size()];
+        this.mapEntities = table.entities().size() + table.engineEntities().size();
     }
 
     /** Spawns every entity fresh, as a map loads in Source, and activates them. */
@@ -86,11 +105,17 @@ public final class MapLogic {
         byName.clear();
         byClass.clear();
         playerEntities.clear();
-        for (int i = 0; i < entities.length; i++) {
-            entities[i] = LogicEntities.create(this, i, record(i));
-            index(entities[i]);
+        entities.clear();
+        freeSlots.clear();
+        copies.clear();
+        for (int i = 0; i < mapEntities; i++) {
+            entities.add(LogicEntities.create(this, i, record(i)));
+            index(entities.get(i));
         }
-        for (LogicEntity entity : entities) entity.spawn();
+        // CPointTemplate: each takes its entities out of the map before anything spawns.
+        templates.clear();
+        templateInstance = Templates.build(this, templates);
+        for (LogicEntity entity : entities) if (!entity.removed) entity.spawn();
         for (LogicEntity entity : entities) if (!entity.removed) entity.activate();
         // What the game's own code queues as the map spawns; a restored save has its queue already.
         if (!restoring) {
@@ -128,13 +153,155 @@ public final class MapLogic {
         if (named != null) named.remove(entity);
         List<LogicEntity> classed = byClass.get(entity.classname);
         if (classed != null) classed.remove(entity);
+        if (entity.index >= mapEntities && entity(entity.index) == entity) {
+            freeSlots.put(entity.index, time);
+            copies.remove(entity.index);
+        }
         dirty = true;
+    }
+
+    /** The lowest freed slot whose delay is over, taken out of the free ones; null for none. */
+    private Integer reusableSlot() {
+        Integer found = null;
+        for (Map.Entry<Integer, Double> slot : freeSlots.entrySet()) {
+            if (time - slot.getValue() >= SLOT_REUSE_DELAY) { found = slot.getKey(); break; }
+        }
+        // Removed only after the walk: a TreeMap reuses a deleted entry's node for its successor.
+        if (found != null) freeSlots.remove(found);
+        return found;
+    }
+
+    /** The record index a slot's entity is made from, while it is being made. */
+    int sourceFor(int index) { return creatingSource >= 0 ? creatingSource : index; }
+
+    /** Whether the slot holds a copy a point_template made. */
+    boolean isCopy(LogicEntity entity) { return entity.index >= mapEntities; }
+
+    /**
+     * Makes a copy of record {@code source}, as {@code record} (its keyvalues with any name fixup
+     * applied), in a free slot ({@code at}, or any for -1), and indexes it; it is not spawned
+     * yet. Null when slot {@code at} is taken.
+     */
+    LogicEntity createCopy(int source, LogicTable.Entity record, int template, int instance, int at) {
+        Integer free = at >= 0 ? (freeSlots.remove(at) != null ? Integer.valueOf(at) : null) : reusableSlot();
+        if (at >= 0 && free == null && at != entities.size()) return null;
+        int slot = free == null ? entities.size() : free;
+        LogicEntity copy;
+        creatingSource = source;
+        try {
+            copy = LogicEntities.create(this, slot, record);
+        } finally {
+            creatingSource = -1;
+        }
+        if (free == null) entities.add(copy);
+        else entities.set(slot, copy);
+        index(copy);
+        copies.put(slot, new int[]{source, template, instance});
+        dirty = true;
+        return copy;
+    }
+
+    /** The point_template group of entity {@code template}, or null. */
+    Templates.Group template(int template) { return templates.get(template); }
+
+    /** {@code Templates_StartUniqueInstance}: the next instance number. */
+    int nextTemplateInstance() {
+        templateInstance++;
+        if (templateInstance >= 10_000) templateInstance = 0;
+        return templateInstance;
+    }
+
+    /** Every slot, removed ones included, for code outside the logic that walks them. */
+    int slots() { return entities.size(); }
+
+    /** Per lump entity, whether the bundle has a mover for it; built when first asked. */
+    private boolean[] movers;
+
+    /** Whether the entity is one of the map's movers, or a copy of one. */
+    boolean isMover(LogicEntity entity) {
+        if (movers == null) {
+            movers = new boolean[mapEntities];
+            if (map.movers() != null) for (var mover : map.movers().movers()) if (mover.entity() < mapEntities) movers[mover.entity()] = true;
+        }
+        return entity.source >= 0 && entity.source < movers.length && movers[entity.source];
+    }
+
+    /**
+     * The solid movers, each with its map-local box where it is now: Source's pushers touch
+     * triggers as they move ({@code CPhysicsPushedEntities::FinishPushers}).
+     */
+    private List<Triggers.Toucher> touchers() {
+        if (map.movers() == null) return List.of();
+        List<Triggers.Toucher> out = new ArrayList<>();
+        for (int i = 0; i < entities.size(); i++) {
+            LogicEntity entity = entities.get(i);
+            if (entity.removed || !isMover(entity) || (entity.moverState() & dev.theredja.src2mc.world.MoverRegistry.NOT_SOLID) != 0) continue;
+            AABB box = moverBox(entity);
+            if (box != null) out.add(new Triggers.Toucher(entity, box));
+        }
+        return out;
+    }
+
+    /** A mover's box where it is now: its brushes' box as compiled, else its cells', moved as it is. */
+    private AABB moverBox(LogicEntity entity) {
+        double[] b;
+        LogicTable.Volume volume = volume(entity);
+        if (volume != null) {
+            b = volume.bounds();
+        } else {
+            int at = map.movers().indexOfEntity(entity.source);
+            if (at < 0) return null;
+            var mover = map.movers().movers().get(at);
+            b = new double[]{mover.originX(), mover.originY(), mover.originZ(),
+                mover.originX() + mover.sizeX(), mover.originY() + mover.sizeY(), mover.originZ() + mover.sizeZ()};
+        }
+        Rigid motion = entity.worldMotion(time);
+        if (motion == null) return new AABB(b[0], b[1], b[2], b[3], b[4], b[5]);
+        double minX = Double.POSITIVE_INFINITY, minY = minX, minZ = minX, maxX = Double.NEGATIVE_INFINITY, maxY = maxX, maxZ = maxX;
+        for (int corner = 0; corner < 8; corner++) {
+            org.joml.Vector3d p = motion.apply(new org.joml.Vector3d((corner & 1) == 0 ? b[0] : b[3], (corner & 2) == 0 ? b[1] : b[4],
+                (corner & 4) == 0 ? b[2] : b[5]));
+            minX = Math.min(minX, p.x); minY = Math.min(minY, p.y); minZ = Math.min(minZ, p.z);
+            maxX = Math.max(maxX, p.x); maxY = Math.max(maxY, p.y); maxZ = Math.max(maxZ, p.z);
+        }
+        return new AABB(minX, minY, minZ, maxX, maxY, maxZ);
+    }
+
+    /**
+     * A logic prop that no longer stands where the bundle has it -- a copy, or one parented anew
+     * -- and how to draw it: on mover {@code mover}'s sub-level (-1: in the map) moved by
+     * {@code motion} from its compiled place, relative to that mover's own move.
+     */
+    record Mount(int entity, int source, int mover, Rigid motion) {}
+
+    /** Every live {@link Mount} of the map now. */
+    List<Mount> mounts() {
+        var props = map.logicProps();
+        if (props == null) return List.of();
+        List<Mount> out = new ArrayList<>();
+        for (int i = 0; i < entities.size(); i++) {
+            LogicEntity entity = entities.get(i);
+            if (entity.removed || !(isCopy(entity) || entity.reparented()) || props.byEntity(entity.source) == null) continue;
+            LogicEntity carrier = entity.parent();
+            for (int depth = 0; carrier != null && !isMover(carrier) && depth < 16; depth++) carrier = carrier.parent();
+            Rigid world = entity.worldMotion(time);
+            if (world == null) world = Rigid.IDENTITY;
+            if (carrier != null) {
+                Rigid carried = carrier.worldMotion(time);
+                if (carried != null) world = carried.inverse().after(world);
+            }
+            out.add(new Mount(entity.index, entity.source, carrier == null ? -1 : carrier.index, world));
+        }
+        return out;
     }
 
     /** Every entity whose {@code parentname} names {@code parent}, looked up while the parent still stands. */
     List<LogicEntity> childrenOf(LogicEntity parent) {
         List<LogicEntity> children = new ArrayList<>();
-        for (LogicEntity entity : entities) if (entity != null && entity != parent && !entity.removed && entity.parent() == parent) children.add(entity);
+        for (int i = 0; i < entities.size(); i++) {
+            LogicEntity entity = entities.get(i);
+            if (entity != parent && !entity.removed && entity.parent() == parent) children.add(entity);
+        }
         return children;
     }
 
@@ -158,8 +325,12 @@ public final class MapLogic {
         traceLines = 0;
         time += TICK_SECONDS;
         dirty = true;
-        for (LogicEntity entity : entities) if (entity instanceof Triggers.Touchable touchable && !entity.removed) touchable.touch(inside);
-        for (LogicEntity entity : entities) {
+        List<Triggers.Toucher> touchers = touchers();
+        for (int i = 0; i < entities.size(); i++) {
+            if (entities.get(i) instanceof Triggers.Touchable touchable && !entities.get(i).removed) touchable.touch(inside, touchers);
+        }
+        for (int i = 0; i < entities.size(); i++) {
+            LogicEntity entity = entities.get(i);
             if (entity.removed || entity.nextThink > time) continue;
             entity.nextThink = LogicEntity.NEVER;
             entity.think();
@@ -218,7 +389,8 @@ public final class MapLogic {
         if (name.endsWith("*")) {
             String prefix = name.substring(0, name.length() - 1);
             List<LogicEntity> found = new ArrayList<>();
-            for (LogicEntity entity : entities) {
+            for (int i = 0; i < entities.size(); i++) {
+                LogicEntity entity = entities.get(i);
                 if (!entity.removed && entity.name().toLowerCase(Locale.ROOT).startsWith(prefix) && !entity.name().isEmpty()) found.add(entity);
             }
             return found;
@@ -238,7 +410,7 @@ public final class MapLogic {
         if (name.endsWith("*")) {
             String prefix = name.substring(0, name.length() - 1);
             List<LogicEntity> found = new ArrayList<>();
-            for (LogicEntity entity : entities) if (!entity.removed && entity.classname.startsWith(prefix)) found.add(entity);
+            for (int i = 0; i < entities.size(); i++) if (!entities.get(i).removed && entities.get(i).classname.startsWith(prefix)) found.add(entities.get(i));
             return found;
         }
         List<LogicEntity> found = byClass.get(name);
@@ -275,7 +447,7 @@ public final class MapLogic {
             player.getZ() - placement.translation().getZ()};
     }
 
-    LogicEntity entity(int index) { return index >= 0 && index < entities.length ? entities[index] : null; }
+    LogicEntity entity(int index) { return index >= 0 && index < entities.size() ? entities.get(index) : null; }
 
     double time() { return time; }
 
@@ -301,7 +473,7 @@ public final class MapLogic {
 
     double[] position(LogicEntity entity) {
         if (entity.index < 0) return null;
-        LogicTable.Entity source = record(entity.index);
+        LogicTable.Entity source = record(entity.source);
         if (source.origin() != null) return source.origin();
         if (source.volume() >= 0) {
             double[] b = table.volumes().get(source.volume()).bounds();
@@ -312,13 +484,13 @@ public final class MapLogic {
 
     LogicTable.Volume volume(LogicEntity entity) {
         if (entity.index < 0) return null;
-        int volume = record(entity.index).volume();
+        int volume = record(entity.source).volume();
         return volume < 0 ? null : table.volumes().get(volume);
     }
 
     LogicTable.Scene scene(LogicEntity entity) {
         if (entity.index < 0) return null;
-        int scene = record(entity.index).scene();
+        int scene = record(entity.source).scene();
         return scene < 0 ? null : table.scenes().get(scene);
     }
 
@@ -372,7 +544,7 @@ public final class MapLogic {
         if (full) {
             for (LogicEntity entity : entities) if (entity instanceof SoundEntities.Synced synced && !entity.removed) states.add(synced.soundState());
         } else {
-            for (int index : soundChanges) if (entities[index] instanceof SoundEntities.Synced synced) states.add(synced.soundState());
+            for (int index : soundChanges) if (entity(index) instanceof SoundEntities.Synced synced) states.add(synced.soundState());
         }
         LogicNetwork.Update update = new LogicNetwork.Update(states, List.copyOf(soundEvents), List.copyOf(stoppedSounds));
         soundChanges.clear();
@@ -408,10 +580,10 @@ public final class MapLogic {
 
     String status() {
         int live = 0;
-        for (LogicEntity entity : entities) if (entity != null && !entity.removed) live++;
+        for (LogicEntity entity : entities) if (!entity.removed) live++;
         StringBuilder text = new StringBuilder(String.format(Locale.ROOT,
             "%s: time %.2fs, %d/%d entities, %d queued, %d inputs, %d outputs fired, %d VScript calls skipped",
-            placement.mapId(), time, live, entities.length, queue.size(), inputsFired, outputsFired, scriptCalls));
+            placement.mapId(), time, live, entities.size(), queue.size(), inputsFired, outputsFired, scriptCalls));
         if (!unhandled.isEmpty()) {
             text.append("\n  unhandled (most frequent first):");
             unhandled.entrySet().stream().sorted((a, b) -> b.getValue() - a.getValue()).limit(12)
@@ -442,11 +614,20 @@ public final class MapLogic {
     CompoundTag save() {
         dirty = false;
         CompoundTag tag = new CompoundTag();
-        tag.putInt("entity_count", entities.length);
+        tag.putInt("entity_count", mapEntities);
+        tag.putInt("template_instance", templateInstance);
+        ListTag copyList = new ListTag();
+        for (Map.Entry<Integer, int[]> copy : copies.entrySet()) {
+            if (entity(copy.getKey()) == null || entity(copy.getKey()).removed) continue;
+            int[] made = copy.getValue();
+            copyList.add(new net.minecraft.nbt.IntArrayTag(new int[]{copy.getKey(), made[0], made[1], made[2]}));
+        }
+        tag.put("copies", copyList);
         tag.putString("load_type", loadType.name());
         tag.putDouble("time", time);
         CompoundTag states = new CompoundTag();
         for (LogicEntity entity : entities) {
+            if (entity.removed && isCopy(entity)) continue;
             CompoundTag state = new CompoundTag();
             entity.save(state);
             if (!state.isEmpty()) states.put(Integer.toString(entity.index), state);
@@ -457,13 +638,13 @@ public final class MapLogic {
             CompoundTag item = new CompoundTag();
             item.putDouble("time", event.time());
             if (event.target() != null) item.putString("target", event.target());
-            if (event.direct() != null && event.direct().index >= 0) item.putInt("direct", event.direct().index);
+            if (event.direct() != null && event.direct().index >= 0 && !event.direct().removed) item.putInt("direct", event.direct().index);
             else if (event.direct() != null) continue;
             item.putString("input", event.input());
             if (event.value() != null) item.putString("value", event.value());
             if (event.activator() instanceof PlayerActor player) item.putUUID("activator_player", player.id());
-            else if (event.activator() instanceof LogicEntity entity && entity.index >= 0) item.putInt("activator", entity.index);
-            if (event.caller() != null && event.caller().index >= 0) item.putInt("caller", event.caller().index);
+            else if (event.activator() instanceof LogicEntity entity && entity.index >= 0 && !entity.removed) item.putInt("activator", entity.index);
+            if (event.caller() != null && event.caller().index >= 0 && !event.caller().removed) item.putInt("caller", event.caller().index);
             events.add(item);
         }
         tag.put("events", events);
@@ -481,8 +662,26 @@ public final class MapLogic {
         } finally {
             restoring = false;
         }
-        if (tag.getInt("entity_count") != entities.length) return false;
+        if (tag.getInt("entity_count") != mapEntities) return false;
         time = tag.getDouble("time");
+        // The copies first, each spawned as it was made, so states and links find them.
+        for (Tag value : tag.getList("copies", Tag.TAG_INT_ARRAY)) {
+            int[] made = ((net.minecraft.nbt.IntArrayTag) value).getAsIntArray();
+            Templates.Group group = made.length == 4 && made[0] >= mapEntities ? templates.get(made[2]) : null;
+            if (group == null) continue;
+            // Slots freed before the save stay free until the copy that had them is back.
+            while (entities.size() < made[0]) {
+                LogicEntity vacant = new LogicEntity(this, entities.size(), null);
+                vacant.removed = true;
+                freeSlots.put(vacant.index, Double.NEGATIVE_INFINITY);
+                entities.add(vacant);
+            }
+            LogicEntity copy = Templates.restore(this, group, made[1], made[3], made[0]);
+            if (copy == null) continue;
+            copy.spawn();
+            copy.activate();
+        }
+        templateInstance = tag.getInt("template_instance");
         CompoundTag states = tag.getCompound("entities");
         for (LogicEntity entity : entities) {
             String key = Integer.toString(entity.index);

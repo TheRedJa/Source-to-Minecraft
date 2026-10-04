@@ -1,6 +1,148 @@
 # src2mc implementation handoff
 
-Updated: 2026-10-04 (Europe/Berlin), DEV-0.29.0 (B3 fixes after the first in-game test)
+Updated: 2026-10-04 (Europe/Berlin), DEV-0.32.0 (point_template, awaiting the user's in-game test)
+
+## NEXT TASK: none chosen yet -- ask the user (point_template work is user-confirmed)
+
+DEV-0.33.1 user-confirmed 2026-10-04: no glowing belt modules, no hitches over 30 ms. The
+whole point_template / conveyor chain (D25, DEV-0.32.0 to 0.33.1) is confirmed working on
+sp_a2_bts4. Nothing committed yet (commit only when asked). Open candidates: D25 "Not done"
+list, `.phy` prop collision (user wants it later, do NOT start unasked), env_sprite, lights,
+VScript (bts4 turret production line needs it plus NPC turrets).
+
+## DONE: belt module glow (DEV-0.33.1)
+
+DEV-0.33.0 confirmed (2026-10-04): no stray hitboxes, belts run after 5 min and after leaving
+and returning, no wrong invisible walls on wakeup/furnace. Left: every few belt modules glow.
+Cause (by code reading): first light taken while the reused sub-level was still at the belt's
+end; relit only when one cell's light changed. DEV-0.33.1: no lighting while the carrier is
+hidden; relight after 2 blocks of movement.
+
+
+DEV-0.32.3 test (2026-10-04): no flinging, only falling at the end (Source's). Still: after
+~1.5 min invisible belt hitboxes and missing debris, conveyors breaking. Found by a 5-minute
+logic simulation: `MapLogic.reusableSlot` removed the TreeMap entry it was iterating; TreeMap
+reuses the node for the successor, so the returned slot differed from the removed one and slots
+went to two entities. Fixed (regression test `freedSlotsAreHandedOutOnceEach` fails on the old
+code). User chose "closest to Source" for invisible world brushes: solid or player-clip world
+brushes with no drawn side now collide, cut to the map's cell box (bounds unchanged on all 10
+maps, collision +1-7 %). User asked whether all collision should use .phy: answered (props only;
+brushes already are Source's collision); NOT to implement yet.
+
+DEV-0.32.2 test (2026-10-04): standing on belts works, falling off at the end is Source's (the
+end node kills the train). Bugs: sometimes flung back to the belt start; after a while or
+after leaving and returning, conveyors break (debris gone, invisible belt hitboxes moving
+side to side, no collision). Cause found in code: copy slots were reused in the same tick
+(kill at the end + new train at the start), so the sub-level keyed by slot jumped end->start
+solid with the player; slots taken by another kind of entity made stale sub-levels follow
+it. DEV-0.32.3: slots reused only a second later; MoverSystem lets a dead entity's
+sub-level go at once (entity -1, hidden, passable, stays put) and pools it after 20 ticks;
+handover hides and unsolids 3 ticks; original movers can take a sub-level back after a
+restart. Items 6-7 of the last checklist (other maps' new mover collision, "world too"
+decision) still open.
+
+
+DEV-0.32.1 confirmed (2026-10-04): hitches gone (max 18 ms, rare tiny spikes acceptable), no
+pop-in. Reported: belts have no collision. Cause: the train brush `*147` is a 2-unit
+`tools/toolsplayerclip` plate, solid contents, every side nodraw; the converter drops brushes
+with no drawn side. DEV-0.32.2: such brushes collide on movers exported anyway
+(`MoverGeometry.only_unseen` keeps invisible-only entities from becoming movers; mover counts
+unchanged on all 10 maps, 11-12 more movers with collision on escape_02/metro, 2 each on
+wakeup/sp_a3_01/sp_a3_end). Open decision for the user: invisible solid world brushes (28-125
+per map) still do not collide.
+
+
+User test of DEV-0.32.0 (2026-10-04): (a) conveyors loop, (b) debris rides, (e) other maps fine;
+(c) annoying hitches up to 49 ms: `/src2mc_anim status` showed builds 47 ms max and lights
+79 ms max on the render thread (mounted debris relit as it moves). DEV-0.32.1: mounted and
+mover-carried animated props light on a worker (WorldSnapshot, light-byte patches), first
+tessellation on a worker, hidden movers not relit. (d) the turret production line shows
+nothing: it starts at `turret_sequence_start_trigger`, but runs on the turret NPC
+(npc_portal_turret_floor, not run or drawn) and VScript (turret_factory_working.nut) -- later
+with VScript, user agrees it is VScript.
+
+
+User test of DEV-0.31.0 (2026-10-04): testchmb_a_00 elevator door collision works; sp_a2_bts4
+performance fixed except "some rare tiny single frame hitches". User chose A: full
+point_template with gibs. Implemented in DEV-0.32.0 (D25, format section 18, protocol "10"),
+all 10 bundles re-exported and installed; Rust 596, Java suite, jar, realMapsRun on all 10
+pass. Simulated bts4 (no client): ~20 belt trains per conveyor alive at once, gibs spawn at
+the belt start, get parented to the passing train by the trigger, ride, die with the train.
+
+What was built: converter makes point_template members logic props (`templated_of`);
+`Templates` (groups, fixup, ForceSpawn, restore), `Rigid` motions, `LogicEntity.source`,
+SetParent/ClearParent with hold, `MapLogic` growable slots + free-slot reuse + saved copies,
+mover-touched triggers (`Triggers.Toucher`, flag 64), `MoverRegistry.Instance.source`,
+`MoverSystem.assignCopies` (sub-level pool, 3-tick hide on hand-over), `PropMounts` +
+`PropSync.MountPayload`, `AnimatedPropRenderer` draws mounts (static models as one bone,
+geometry cached per model+tint, `/src2mc_anim status` shows build/light ms max and mounts),
+templated originals start hidden and not solid (`Templates.removedAtSpawn`).
+
+Checklist for the user (fresh `/src2mc reload`, re-place sp_a2_bts4, start logic):
+1. Both gib conveyors keep running: belt modules keep coming, never stop.
+2. Turret debris drops onto the belt start every few seconds and rides along.
+3. Frame time while they run; `/src2mc_anim status` (build/light ms max, mounted count) and
+   `/src2mc_movers status` if hitches.
+4. Turret production line (turret carts on trains) still behaves as before or better.
+5. Other maps unchanged (furnace's templated button and particles now appear only when
+   the logic spawns them, as in Source).
+
+Gaps (D25 Not done): moving point_template, usable copies, sounds in templates,
+SetParentAttachment, collision of mounted props, solid riding props touching triggers.
+
+Implemented and installed (all 10 bundles and schematics regenerated; Rust 595 tests, Java 135
+tests and `realMapsRun` on all 10 bundles pass; `/src2mc reload`, re-place, start logic):
+
+- Converter: `src/source/anim.rs` reads skeleton + sequences after SDK 2013 `bone_setup.cpp`
+  (`.ani` blocks, sections, signed value runs); `src/output/animation.rs` writes `.s2anim`
+  (block space, i16 rotations, still tracks one value, frames only for reachable sequences);
+  `logic_props::requests_of` finds SetAnimation/SetDefaultAnimation/DefaultAnim names;
+  animated dynamic props are logic props (`sequence`, `poses`, logic props version 2); still
+  dynamic props are exported posed at sequence 0 frame 0 (`ModProp.posed`, model form 1);
+  meshes now keep per-vertex bone bindings (bones join the vertex intern key).
+- Mod: `AnimationAsset` (decode/validate, localPose, skinning), `DynamicProp` (CDynamicProp +
+  CBaseAnimating rules, replaces `Movers.DynamicProp`), `PropStates.State` carries sequence,
+  cycle, rate, map time, parity, pose; `PropSync` sends the map time (protocol "9");
+  `CollisionShapes` layers the pose tables; `AnimatedPropRenderer` draws placed and riding
+  animated props (rigid bone buffers by matrix, blended triangles CPU-skinned, Source crossfade);
+  `LogicPropRenderer` and `MoverRenderer` leave animated props to it.
+- Fixed before handing over: an animated prop's spawn pose widened its bounds and put
+  escape_02's debris root 1,000 blocks up (map height 1440); bounds stay the model's own box.
+
+Checklist (fresh `/src2mc reload`, maps re-placed, logic started):
+1. Furnace `cellardoor1` (#2209, near 2196 3649 -2720 Source): press its button
+   (`cellardoor1_button1`, the infra_button may need its key; or
+   `/src2mc logic fire cellardoor1 SetAnimation open`, then `... close`). The door slides open
+   over its sequence, the buttons press in; once open you can walk through, once closed it blocks.
+2. Furnace buttons (`door_button_model_4..6`, `stop_button_mdl_1`) press in and out; the
+   minitrain switches (`minitrain_mdl_switch`, riding the train) flip while the train moves;
+   brake levers (`brake_useless1..4`, `car_light_brake`) swing.
+3. Furnace clock (#1640, DefaultAnim `hour3`) turns slowly; cockroaches (#1329 ff., `idle`) crawl.
+4. Portal 2 sp_a2_bts4 vert doors: `/src2mc logic fire entry_airlock_door-door_1 SetAnimation
+   vert_door_opening` (and `vert_door_closing`); collision follows once each finishes.
+5. testchmb_a_00: the relaxation vault `bed_cover` opens at the start (its logic), elevator
+   doors (`elevator_door_model_middle`, riding the elevator) open/close.
+6. escape_02 `glados_body` idles; the finale's debris (`gladdysdestruction/*`) fall.
+7. Compare: `/src2mc_anim status` (built, posed, skinned upload ms), `/src2mc_anim draw off`
+   (animated props vanish), frame time near many animated props (metro, escape_02).
+   Check lighting/shading of moving parts (normals turn with the bones) with and without the
+   shaderpack; check that still dynamic props that moved to sequence 0 look right (furnace
+   `knife_switch_001_cover`, tunnel4 `glass_metal_door_break_001`, metro `vent_005b`).
+
+Known gaps (D24 "Not done"): include models, IK, procedural bones, local hierarchy, auto layers,
+animation events (sequence sounds), pose parameters, bone attachments. User wants `.phy` hull collision later, which will
+replace the pose-following mesh collision (memory `phy-collision-later`).
+
+Later (user): `env_sprite`, lights, VScript, INFRA gameplay. Each step ends with the user's
+in-game test.
+Also open: train/rotator sounds (MoveSound, StartSound, rotator `message` loop) are not
+played; `MoveToPathNode`/`TeleportToPathNode`/`LockOrientation` (INFRA FGD extras) unhandled;
+props riding a hidden func_brush hide with it (Source would still draw them); triggers are
+touched by players only, so INFRA's cart bumpers (`car_multiple*`, "everything" flag, touched
+by the other carts' props in Source) never fire from cart contact. B2 leftovers: `Alpha`/`renderamt` ignored; static prop
+tint only read for lump versions 7-9; `trigger_remove` with carried props needs gameplay.
+
+## DONE: B3 texts, fades, shakes, INFRA chapter titles (DEV-0.29.0, user-confirmed 2026-10-04)
 
 User test of DEV-0.28.0: `/src2mc logic fire @chapter_title_text Display` failed to parse (Brigadier
 string arg rejects `@`; now `fire <target> <input> [param]` is one greedy text); furnace's
@@ -12,42 +154,6 @@ spikes only while logic runs: 15 func_rotating movers relit per vertex on the re
 every few frames (logic itself 0.12 ms/tick, no prop churn, measured by the `churn` test); per-
 vertex mover relights now sample a WorldSnapshot on the mesh workers, only the upload stays on
 the render thread (`/src2mc_movers status` shows worker ms and upload ms). User recheck (2026-10-04): escape_02 spikes gone; title forced and on the level change looks good; shakes work (the catwalk one only reaches players on the ground within 500 units, as in Source; `/src2mc logic list <name>` shows a shake's reach).
-
-## NEXT TASK: pick the next item with the user (B3 user-confirmed 2026-10-04, DEV-0.29.0)
-
-B2 and the DEV-0.27.1 door-button aim fix are user-confirmed (2026-10-03), committed as 4f249a5.
-B3 is implemented, all 10 bundles regenerated and installed; not user-tested yet (see D23).
-Findings: INFRA maps contain no game_text at all; INFRA's server.dll creates
-`@chapter_title_text`/`@chapter_subtitle_text` and runs `scripts/vscripts/chapter_titles.nut`
-(table per map: tokens, displayOnSpawn, delay). The converter now writes both as
-`engine_entities`/`engine_events` (format 16); text timings are Portal 2's same-named
-entities' (unverified for INFRA, ask the user to compare). Shake moves the camera through an
-access transformer on `Camera.setPosition`, applied in `ViewportEvent.ComputeFov`.
-
-Checklist (fresh `/src2mc reload`, maps re-placed, logic started):
-1. Furnace chapter title: comes only on a level change into furnace (its `logic_auto`
-   OnMapTransition), so use the tunnel4 -> furnace chain; or force it:
-   `/src2mc logic fire @chapter_title_text Display` and `... @chapter_subtitle_text Display`.
-   Expect "Chapter 4" over "Heavy Industry of the Past", upper middle, scanning out blue-ish
-   to grey. Compare size, place, timing with INFRA.
-2. Shakes: `/src2mc logic fire furn_globalshake StartShake` (furnace); tunnel4
-   `explosion_relay` Trigger. View jitters and rolls, then settles.
-3. Fades: escape_02 `fade_to_red` (trigger in the map) or `/src2mc logic fire fade_to_white Fade`;
-   testchmb_a_00 starts with `fade_intro` (fade from black).
-4. `/src2mc_screen status|clear` if something sticks.
-
-Then, in the agreed order:
-
-Later (user): skeletal animation (test case: furnace `cellardoor1` #2209, a prop_dynamic
-slid by `SetAnimation open/close`; its `func_door` #2112 is an invisible clip, not exported),
-`env_sprite`, lights, VScript, INFRA gameplay. Each step ends with the user's in-game test.
-Also open: train/rotator sounds (MoveSound, StartSound, rotator `message` loop) are not
-played; `MoveToPathNode`/`TeleportToPathNode`/`LockOrientation` (INFRA FGD extras) unhandled;
-props riding a hidden func_brush hide with it (Source would still draw them); triggers are
-touched by players only, so INFRA's cart bumpers (`car_multiple*`, "everything" flag, touched
-by the other carts' props in Source) never fire from cart contact. B2 leftovers: a riding
-logic prop's collision stays merged in its mover's; `Alpha`/`renderamt` ignored; static prop
-tint only read for lump versions 7-9; `trigger_remove` with carried props needs gameplay.
 
 ## DONE: B2 (DEV-0.27.0, awaiting user test)
 

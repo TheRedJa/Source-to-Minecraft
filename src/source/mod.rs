@@ -5,6 +5,7 @@
 //! matching the average colour the compiler baked into the BSP; this module is
 //! what turns that into the real texture.
 
+pub mod anim;
 pub mod captions;
 pub mod extract;
 pub mod infra;

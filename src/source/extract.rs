@@ -116,6 +116,45 @@ pub struct ModProp {
     /// The model in each of its skin families, for a prop the logic changes;
     /// empty otherwise. A `Skin` input can pick any of them.
     pub skins: Vec<Arc<crate::source::mdl::Model>>,
+    /// The skeleton and sequences of a dynamic prop that animates; its
+    /// `model` and `skins` are then in the reference pose its bones move.
+    pub animation: Option<AnimatedProp>,
+    /// `model` and `skins` are a still dynamic prop's sequence 0, which
+    /// differs from the model's reference pose.
+    pub posed: bool,
+}
+
+/// What an animated prop's model can play, and where it starts.
+pub struct AnimatedProp {
+    pub animation: Arc<crate::source::anim::Animation>,
+    /// The sequences the map can make it play.
+    pub sequences: std::collections::BTreeSet<usize>,
+    /// The sequence it spawns in.
+    pub spawn: usize,
+    /// The model posed at the first frame of `spawn`.
+    pub spawn_model: Arc<crate::source::mdl::Model>,
+}
+
+impl ModProp {
+    /// The model as the prop stands when the map spawns: what it collides as.
+    pub fn standing_model(&self) -> &Arc<crate::source::mdl::Model> {
+        self.animation
+            .as_ref()
+            .map_or(&self.model, |a| &a.spawn_model)
+    }
+}
+
+/// Posed models are only kept when they differ from the reference pose by
+/// more than this many Source units somewhere.
+const POSE_TOLERANCE: f64 = 0.01;
+
+fn moved(a: &crate::source::mdl::Model, b: &crate::source::mdl::Model) -> bool {
+    a.parts.iter().zip(&b.parts).any(|(p, q)| {
+        p.triangles
+            .iter()
+            .zip(&q.triangles)
+            .any(|(s, t)| (0..3).any(|c| (s[c] - t[c]).length() > POSE_TOLERANCE))
+    })
 }
 
 pub fn extract_mod_props(map: &Map, config: &Config) -> Vec<ModProp> {
@@ -138,6 +177,23 @@ pub fn extract_mod_props(map: &Map, config: &Config) -> Vec<ModProp> {
     } else {
         Default::default()
     };
+    let lump: Vec<Vec<(String, String)>> = map
+        .bsp
+        .entities
+        .iter()
+        .map(|raw| {
+            raw.properties()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect()
+        })
+        .collect();
+    let requests = crate::bsp::logic_props::requests_of(&lump);
+    let mut animations: std::collections::HashMap<
+        String,
+        Option<Arc<crate::source::anim::Animation>>,
+    > = Default::default();
+    let mut posed: std::collections::HashMap<(String, i32), Arc<crate::source::mdl::Model>> =
+        Default::default();
     props
         .into_iter()
         .enumerate()
@@ -148,7 +204,7 @@ pub fn extract_mod_props(map: &Map, config: &Config) -> Vec<ModProp> {
             {
                 return None;
             }
-            let model = models.get_skin(&prop.model, prop.skin)?;
+            let mut model = models.get_skin(&prop.model, prop.skin)?;
             let size = model.bounds.size() * prop.scale;
             let longest = size.x.max(size.y).max(size.z);
             let logic = prop.entity.and_then(|entity| roles.get(&entity).copied());
@@ -179,12 +235,86 @@ pub fn extract_mod_props(map: &Map, config: &Config) -> Vec<ModProp> {
                 );
                 bounds.extend(prop.place(p));
             }
-            let skins = match logic {
+            let mut skins: Vec<Arc<crate::source::mdl::Model>> = match logic {
                 Some(_) => (0..model.skins.len().max(1))
                     .filter_map(|family| models.get_skin(&prop.model, family as i32))
                     .collect(),
                 None => Vec::new(),
             };
+            // A dynamic prop is drawn in its sequence: the one it plays, or
+            // sequence 0 at its first frame, which `CDynamicProp` keeps when
+            // nothing animates it.
+            let mut animation = None;
+            let dynamic = prop.entity.is_some()
+                && crate::bsp::logic_props::DYNAMIC_PROP_CLASSES
+                    .contains(&prop.classname.to_ascii_lowercase().as_str());
+            let skeleton = if dynamic {
+                animations
+                    .entry(prop.model.to_ascii_lowercase())
+                    .or_insert_with(|| crate::source::anim::read(&vfs, &prop.model).map(Arc::new))
+                    .clone()
+            } else {
+                None
+            };
+            if let (Some(skeleton), Some(entity)) = (skeleton, prop.entity) {
+                let keys = &lump[entity];
+                let key = |name: &str| {
+                    keys.iter()
+                        .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                        .map(|(_, v)| v.trim().to_string())
+                        .unwrap_or_default()
+                };
+                if logic.is_some_and(|role| role.animated) {
+                    let names = requests.get(&entity);
+                    let spawn = skeleton.spawn_sequence(&key("DefaultAnim"));
+                    let sequences = skeleton.reachable(
+                        names.into_iter().flatten().map(String::as_str),
+                        crate::bsp::logic_props::atoi_text(&key("RandomAnimation")) != 0,
+                    );
+                    let spawn_model = Arc::new(crate::source::anim::pose_model(
+                        &model,
+                        &skeleton,
+                        &skeleton.sequences[spawn].frames[0],
+                    ));
+                    animation = Some(AnimatedProp {
+                        animation: skeleton,
+                        sequences,
+                        spawn,
+                        spawn_model,
+                    });
+                } else {
+                    let mut pose = |model: &Arc<crate::source::mdl::Model>, skin: i32| {
+                        posed
+                            .entry((prop.model.to_ascii_lowercase(), skin))
+                            .or_insert_with(|| {
+                                let still = crate::source::anim::pose_model(
+                                    model,
+                                    &skeleton,
+                                    &skeleton.sequences[0].frames[0],
+                                );
+                                if moved(model, &still) {
+                                    Arc::new(still)
+                                } else {
+                                    model.clone()
+                                }
+                            })
+                            .clone()
+                    };
+                    model = pose(&model, prop.skin);
+                    skins = skins
+                        .iter()
+                        .enumerate()
+                        .map(|(family, skin)| pose(skin, family as i32))
+                        .collect();
+                }
+            }
+            // An animated prop keeps its model's own box: a sequence can park it far
+            // away (escape_02's debris wait above the map), and the box places its
+            // root block.
+            let posed = !Arc::ptr_eq(&model, &models.get_skin(&prop.model, prop.skin)?);
+            if posed {
+                bounds = placed_bounds(&prop, &model);
+            }
             Some(ModProp {
                 source_ordinal: ordinal as u64,
                 prop,
@@ -192,9 +322,29 @@ pub fn extract_mod_props(map: &Map, config: &Config) -> Vec<ModProp> {
                 bounds,
                 logic,
                 skins,
+                animation,
+                posed,
             })
         })
         .collect()
+}
+
+/// The world box around a model placed as `prop` places it, from the
+/// model's triangles.
+fn placed_bounds(
+    prop: &crate::bsp::props::Prop,
+    model: &crate::source::mdl::Model,
+) -> crate::geom::Aabb {
+    let mut bounds = crate::geom::Aabb::empty();
+    for corner in 0..8 {
+        let b = &model.bounds;
+        bounds.extend(prop.place(crate::geom::Vec3::new(
+            if corner & 1 == 0 { b.min.x } else { b.max.x },
+            if corner & 2 == 0 { b.min.y } else { b.max.y },
+            if corner & 4 == 0 { b.min.z } else { b.max.z },
+        )));
+    }
+    bounds
 }
 
 impl Assets {
