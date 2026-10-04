@@ -1,11 +1,27 @@
 # src2mc
 
-Convert Source Engine maps (`.bsp`) into Minecraft 1.21.1, so that recreating a
-game's geometry does not start with days of manual blocking-out.
+Bring Source Engine maps (`.bsp`) into Minecraft 1.21.1 -- not just their
+shape, but how they look, sound and behave -- so that recreating a game does
+not start with days of manual blocking-out.
 
 Built for recreating the Half-Life 2 universe (Half-Life 2, **Entropy: Zero**
 and **Entropy: Zero 2**). Portal, Portal 2 and INFRA convert as well, and are
 the current in-game test maps.
+
+**At a glance** -- a Rust converter plus a NeoForge companion mod that give you:
+
+| | |
+|---|---|
+| **Geometry** | Exact Source surfaces drawn on ordinary, editable blocks; sub-block (1/16) collision; displacement terrain |
+| **Looks** | Real Source textures (own atlas, mipmaps), every prop as its real mesh with skins and tints, Minecraft lighting, Iris shaderpacks |
+| **Performance** | Source's PVS, frustum and GPU occlusion culling, batched props, threaded mesh building |
+| **Sound** | Soundscapes, ambient sounds and per-material footsteps, re-encoded to Ogg; captions |
+| **Logic** | Source's entity I/O on the server: triggers, buttons, doors, relays, timers, level changes, `point_template`, scripted text and screen effects |
+| **Motion** | Doors, lifts, trains and conveyors as Sable sub-levels you can ride; animated props |
+| **Input** | BSP v19/20/21/22, loose files or inside VPKs; in-game tested on Portal, Portal 2 and INFRA maps |
+| **Scale** | ~66k lines (Rust converter, Java mod), 600+ Rust tests, campaigns of many maps in one bundle |
+
+Not yet: VScript, breakable movers, `.phy` prop collision.
 
 There are two ways to get a map into Minecraft:
 
