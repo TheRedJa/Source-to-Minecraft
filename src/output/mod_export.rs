@@ -17,10 +17,13 @@ pub struct ModelAsset {
     /// The tint, RGB; white for none.
     pub color: [u8; 3],
     pub surface_prop: Option<String>,
+    /// The `.s2anim` payload of an animated prop's model.
+    pub animation: Option<Vec<u8>>,
 }
 
-/// What identifies a model reference: mesh, provenance, materials and tint.
-pub type ModelKey = (String, String, Vec<u32>, [u8; 3]);
+/// What identifies a model reference: mesh, provenance, materials, tint and
+/// animation.
+pub type ModelKey = (String, String, Vec<u32>, [u8; 3], Option<String>);
 
 pub struct TextureAsset {
     pub content_id: String,
@@ -38,6 +41,8 @@ pub struct Prop {
     pub scale: f64,
     pub material_ids: Vec<u32>,
     pub color: [u8; 3],
+    /// Content ID of the model's animation, for an animated prop.
+    pub animation: Option<String>,
 }
 
 /// A prop the map's logic changes (format section 18).
@@ -52,6 +57,11 @@ pub struct LogicPropExport {
     /// Its own collision table, map-local, when it has collision the logic
     /// can take away.
     pub collision: Option<Vec<u8>>,
+    /// The sequence an animated prop spawns in.
+    pub sequence: Option<usize>,
+    /// For a prop whose collision follows its bones: the collision table of
+    /// the pose each sequence leaves it in, by sequence.
+    pub poses: Vec<(usize, Vec<u8>)>,
 }
 
 pub enum LogicPlacement {
@@ -129,6 +139,7 @@ pub struct MoverPropExport {
     pub scale: f64,
     pub skin: i32,
     pub color: [u8; 3],
+    pub animation: Option<String>,
 }
 
 pub struct WrittenCampaign {
@@ -193,8 +204,10 @@ pub fn from_conversion(
     let (mut solid_props, mut prop_cells) = (0, 0);
     // A prop the logic can remove keeps its collision in a table of its own,
     // added to the map's cells at runtime while it stands.
-    let removable =
-        |item: &crate::source::extract::ModProp| item.logic.is_some_and(|role| role.collision);
+    let removable = |item: &crate::source::extract::ModProp| {
+        item.logic.is_some_and(|role| role.collision) || follows_pose(item)
+    };
+    let mut pose_collision: BTreeMap<usize, Vec<(usize, Vec<u8>)>> = BTreeMap::new();
     let mut logic_collision: BTreeMap<usize, Vec<u8>> = BTreeMap::new();
     if let Some(collision) = collision.as_mut() {
         let (merged, apart): (Vec<_>, Vec<_>) = extracted.iter().partition(|item| !removable(item));
@@ -206,19 +219,21 @@ pub fn from_conversion(
             collision,
         );
         for item in apart {
-            let Some(volume) = prop_volume(config, &conversion.transform, item) else {
+            let Some(own) = apart_collision(
+                config,
+                &conversion.transform,
+                &conversion.grid,
+                item,
+                collision,
+            ) else {
                 continue;
             };
-            let shapes = separate_prop_collision(collision, &conversion.grid, volume);
-            if shapes.is_empty() {
-                continue;
-            }
             let entity = item.prop.entity.context("logic prop without an entity")?;
-            logic_collision.insert(
-                entity,
-                crate::output::cell_collision::encode(&shapes)
-                    .context("encoding a logic prop's collision")?,
-            );
+            let (spawn, poses) = own.encode([0; 3])?;
+            logic_collision.insert(entity, spawn);
+            if !poses.is_empty() {
+                pose_collision.insert(entity, poses);
+            }
         }
     }
     crate::timing::mark("export: prop collision");
@@ -314,31 +329,37 @@ pub fn from_conversion(
     // Keyed by skin and tint as well: one mesh, but each skin its own
     // material slots, and each tint its own reference. A prop the logic
     // changes brings every skin family of its model.
-    #[allow(clippy::type_complexity)]
-    let mut model_by_path: BTreeMap<
-        (String, i32, [u8; 3]),
-        (String, Vec<u32>, Vec<u8>, Option<String>),
-    > = BTreeMap::new();
+    // Keyed by form too: a still dynamic prop is its sequence 0, an animated
+    // one its reference pose with the animation that moves it.
+    let mut model_by_path: BTreeMap<ModelUse, BuiltModel> = BTreeMap::new();
+    // The sequences an animated model keeps the frames of: every one any of
+    // the map's props of that model can come to play.
+    let mut kept_sequences: BTreeMap<String, BTreeSet<usize>> = BTreeMap::new();
+    for item in extracted.iter().chain(riding.values().flatten()) {
+        if let Some(animated) = &item.animation {
+            kept_sequences
+                .entry(item.prop.model.clone())
+                .or_default()
+                .extend(&animated.sequences);
+        }
+    }
     let wanted = extracted
         .iter()
         .chain(riding.values().flatten())
         .flat_map(|item| {
-            std::iter::once((
-                (item.prop.model.clone(), item.prop.skin, item.prop.color),
-                &item.model,
-            ))
-            .chain(item.skins.iter().enumerate().map(|(family, model)| {
-                (
-                    (item.prop.model.clone(), family as i32, item.prop.color),
-                    model,
-                )
-            }))
+            std::iter::once((model_use(item, item.prop.skin), item, &item.model)).chain(
+                item.skins
+                    .iter()
+                    .enumerate()
+                    .map(move |(family, model)| (model_use(item, family as i32), item, model)),
+            )
         });
-    for (key, model) in wanted {
+    for (key, item, model) in wanted {
         if model_by_path.contains_key(&key) {
             continue;
         }
-        let (mesh, slots) = crate::output::mesh::from_source_model(model, UNITS_PER_BLOCK)?;
+        let (mesh, slots, bindings) =
+            crate::output::mesh::from_source_model(model, UNITS_PER_BLOCK)?;
         let slot_ids = slots
             .into_iter()
             .map(|name| {
@@ -364,7 +385,29 @@ pub fn from_conversion(
             .collect::<Vec<_>>();
         let bytes = crate::output::mesh::encode(&mesh)?;
         let id = bundle::content_id(&bytes);
-        model_by_path.insert(key, (id, slot_ids, bytes, model.surface_prop.clone()));
+        let animation = match &item.animation {
+            Some(animated) => {
+                let bytes = crate::output::animation::encode(
+                    &animated.animation,
+                    model.root,
+                    &bindings,
+                    &kept_sequences[&item.prop.model],
+                )
+                .with_context(|| format!("encoding the animation of {}", item.prop.model))?;
+                Some((bundle::content_id(&bytes), bytes))
+            }
+            None => None,
+        };
+        model_by_path.insert(
+            key,
+            BuiltModel {
+                id,
+                slots: slot_ids,
+                bytes,
+                surface_prop: model.surface_prop.clone(),
+                animation,
+            },
+        );
     }
     crate::timing::mark("export: prop meshes");
     // Props go exactly where the map puts them. They used to be settled onto
@@ -382,13 +425,13 @@ pub fn from_conversion(
     let logic_skins = |item: &crate::source::extract::ModProp| -> Vec<ModelKey> {
         (0..item.skins.len())
             .map(|family| {
-                let (id, slots, _, _) =
-                    &model_by_path[&(item.prop.model.clone(), family as i32, item.prop.color)];
+                let built = &model_by_path[&model_use(item, family as i32)];
                 (
-                    id.clone(),
+                    built.id.clone(),
                     item.prop.model.clone(),
-                    slots.clone(),
+                    built.slots.clone(),
                     item.prop.color,
+                    built.animation_id(),
                 )
             })
             .collect()
@@ -405,6 +448,8 @@ pub fn from_conversion(
                 skin: item.prop.skin,
                 start_hidden: role.start_hidden,
                 collision: logic_collision.remove(&entity),
+                sequence: item.animation.as_ref().map(|a| a.spawn),
+                poses: pose_collision.remove(&entity).unwrap_or_default(),
             });
         }
         let transformed_bounds = conversion.transform.transform_bounds(item.bounds);
@@ -436,19 +481,19 @@ pub fn from_conversion(
             cell_max[axis] = cell_max[axis].max(root_cell[axis]);
             cell_min[axis] = cell_min[axis].min(root_cell[axis]);
         }
-        let (model_content_id, slots, _, _) =
-            &model_by_path[&(item.prop.model.clone(), item.prop.skin, item.prop.color)];
+        let built = &model_by_path[&model_use(&item, item.prop.skin)];
         let origin = conversion.transform.to_block_space(item.prop.origin);
         props.push(Prop {
             source_ordinal: item.source_ordinal,
             source_model: item.prop.model.clone(),
-            model_content_id: model_content_id.clone(),
+            model_content_id: built.id.clone(),
             root_cell,
             translation: [origin.x, origin.y, origin.z],
             rotation: crate::output::display::rotation(&item.prop, &conversion.transform),
             scale: item.prop.scale,
-            material_ids: slots.clone(),
+            material_ids: built.slots.clone(),
             color: item.prop.color,
+            animation: built.animation_id(),
         });
     }
     if let Some(collision) = collision.as_mut() {
@@ -470,40 +515,68 @@ pub fn from_conversion(
             .map(|mover| mover.collision.clone())
             .unwrap_or_default();
         let riders = riding.remove(&entity).unwrap_or_default();
+        // Brushes drawn nowhere collide on a mover that is there anyway, but do
+        // not make one of an entity that is nothing else: hundreds of INFRA's
+        // invisible button volumes would each become a sub-level.
+        if shape.is_some_and(|mover| mover.only_unseen) && riders.is_empty() {
+            mover_collision = Default::default();
+        }
+        // A rider the logic can take the collision of, or whose collision
+        // follows its pose, keeps it in tables of its own, mover-local once
+        // the mover's cells are known; the rest is the mover's.
+        let (merged, apart): (Vec<_>, Vec<_>) = riders.iter().partition(|item| !removable(item));
         add_prop_collision(
             config,
             &conversion.transform,
             grid,
-            &riders.iter().collect::<Vec<_>>(),
+            &merged,
             &mut mover_collision,
         );
+        let mut rider_collision = BTreeMap::new();
+        for item in apart {
+            if let Some(own) = apart_collision(
+                config,
+                &conversion.transform,
+                grid,
+                item,
+                &mut mover_collision,
+            ) {
+                rider_collision.insert(
+                    item.prop.entity.context("logic prop without an entity")?,
+                    own,
+                );
+            }
+        }
+        let mut rider_logic = Vec::new();
         let mut props = Vec::with_capacity(riders.len());
         for item in &riders {
-            let (model_content_id, slots, _, _) =
-                &model_by_path[&(item.prop.model.clone(), item.prop.skin, item.prop.color)];
+            let built = &model_by_path[&model_use(item, item.prop.skin)];
             let origin = conversion.transform.to_block_space(item.prop.origin);
             let bounds = conversion.transform.transform_bounds(item.bounds);
             if let (Some(role), Some(prop_entity)) = (item.logic, item.prop.entity) {
-                logic_props.push(LogicPropExport {
+                rider_logic.push(LogicPropExport {
                     entity: prop_entity,
                     placed: LogicPlacement::Mover(entity),
                     skins: logic_skins(item),
                     skin: item.prop.skin,
                     start_hidden: role.start_hidden,
                     collision: None,
+                    sequence: item.animation.as_ref().map(|a| a.spawn),
+                    poses: Vec::new(),
                 });
             }
             props.push((
                 MoverPropExport {
                     entity: item.prop.entity.context("mover prop without an entity")?,
                     source_model: item.prop.model.clone(),
-                    model_content_id: model_content_id.clone(),
-                    material_ids: slots.clone(),
+                    model_content_id: built.id.clone(),
+                    material_ids: built.slots.clone(),
                     translation: [origin.x, origin.y, origin.z],
                     rotation: crate::output::display::rotation(&item.prop, &conversion.transform),
                     scale: item.prop.scale,
                     skin: item.prop.skin,
                     color: item.prop.color,
+                    animation: built.animation_id(),
                 },
                 bounds,
             ));
@@ -525,13 +598,24 @@ pub fn from_conversion(
             props,
         )? {
             Some(mover) => {
+                for mut record in rider_logic {
+                    if let Some(own) = rider_collision.remove(&record.entity) {
+                        (record.collision, record.poses) = own
+                            .encode(mover.cell_origin)
+                            .map(|(spawn, poses)| (Some(spawn), poses))?;
+                    }
+                    logic_props.push(record);
+                }
                 attached_props += mover.props.len();
                 if mover.surface_blocks.is_empty() {
                     thin_movers += 1;
                 }
                 movers.push(mover);
             }
-            None => empty_movers += 1,
+            None => {
+                logic_props.extend(rider_logic);
+                empty_movers += 1;
+            }
         }
     }
     let blocks = conversion
@@ -634,15 +718,14 @@ pub fn from_conversion(
     crate::timing::mark("export: prop roots and diagnostics");
     let models: Vec<ModelAsset> = model_by_path
         .into_iter()
-        .map(
-            |((source_model, _, color), (_, materials, bytes, surface_prop))| ModelAsset {
-                source_model,
-                bytes,
-                materials,
-                color,
-                surface_prop,
-            },
-        )
+        .map(|((source_model, _, color, _), built)| ModelAsset {
+            source_model,
+            bytes: built.bytes,
+            materials: built.slots,
+            color,
+            surface_prop: built.surface_prop,
+            animation: built.animation.map(|(_, bytes)| bytes),
+        })
         .collect();
     let pvs = if let Some((visibility, index)) = visibility.as_ref().zip(pvs_index.as_ref()) {
         let rows = visibility.rows.clone();
@@ -768,6 +851,46 @@ pub fn from_conversion(
         logic_props,
         diagnostics: metadata::Diagnostics::new(diagnostics)?,
     })
+}
+
+/// A model as a prop wears it: path, skin, tint, and form (0 as loaded, 1 a
+/// still dynamic prop's sequence 0, 2 an animated prop's reference pose).
+type ModelUse = (String, i32, [u8; 3], u8);
+
+fn model_use(item: &crate::source::extract::ModProp, skin: i32) -> ModelUse {
+    let form = if item.animation.is_some() {
+        2
+    } else if item.posed {
+        1
+    } else {
+        0
+    };
+    (item.prop.model.clone(), skin, item.prop.color, form)
+}
+
+/// One model reference's mesh, material slots and animation.
+struct BuiltModel {
+    id: String,
+    slots: Vec<u32>,
+    bytes: Vec<u8>,
+    surface_prop: Option<String>,
+    animation: Option<(String, Vec<u8>)>,
+}
+
+impl BuiltModel {
+    fn animation_id(&self) -> Option<String> {
+        self.animation.as_ref().map(|(id, _)| id.clone())
+    }
+}
+
+/// A placed animated prop, whose collision follows its pose. Source only
+/// moves the collision of a model of several physics solids, its bone
+/// followers; but props collide here as their drawn mesh, not their `.phy`,
+/// and the clip brushes a map moves along with a single-solid door are left
+/// out, so every animated prop follows (user, 2026-10-04, until `.phy`
+/// collision replaces the mesh), riding a mover or not.
+fn follows_pose(item: &crate::source::extract::ModProp) -> bool {
+    item.animation.is_some()
 }
 
 /// Move one mover's geometry and riders out of map-local cells into its own.
@@ -937,6 +1060,16 @@ fn prop_volume(
     transform: &crate::voxel::transform::Transform,
     item: &crate::source::extract::ModProp,
 ) -> Option<std::collections::HashMap<IVec3, crate::voxel::collision::SubCells>> {
+    prop_volume_of(config, transform, item, item.standing_model())
+}
+
+/// [`prop_volume`] with the prop's model in another pose.
+fn prop_volume_of(
+    config: &crate::config::Config,
+    transform: &crate::voxel::transform::Transform,
+    item: &crate::source::extract::ModProp,
+    model: &crate::source::mdl::Model,
+) -> Option<std::collections::HashMap<IVec3, crate::voxel::collision::SubCells>> {
     use crate::bsp::props::{SOLID_BBOX, SOLID_NONE};
     use crate::voxel::collision::{box_volume, shell_volume};
     let size = item.bounds.size();
@@ -949,14 +1082,77 @@ fn prop_volume(
         let bounds = transform.transform_bounds(item.bounds);
         return Some(box_volume(bounds.min, bounds.max));
     }
-    let triangles: Vec<[crate::geom::Vec3; 3]> = item
-        .model
+    let triangles: Vec<[crate::geom::Vec3; 3]> = model
         .parts
         .iter()
         .flat_map(|part| &part.triangles)
         .map(|tri| tri.map(|v| transform.to_block_space(item.prop.place(v))))
         .collect();
     Some(shell_volume(&triangles))
+}
+
+/// A removable prop's own collision: as it spawns, and for one whose
+/// collision follows its pose, as each sequence leaves it; per cell of the
+/// grid it is in.
+struct ApartCollision {
+    spawn: BTreeMap<IVec3, Vec<crate::voxel::collision::Box16>>,
+    poses: Vec<(usize, BTreeMap<IVec3, Vec<crate::voxel::collision::Box16>>)>,
+}
+
+impl ApartCollision {
+    /// Both encoded, with `origin` moved to cell zero.
+    #[allow(clippy::type_complexity)]
+    fn encode(self, origin: IVec3) -> Result<(Vec<u8>, Vec<(usize, Vec<u8>)>)> {
+        let shift = |shapes: BTreeMap<IVec3, Vec<crate::voxel::collision::Box16>>| {
+            shapes
+                .into_iter()
+                .map(|(cell, boxes)| (sub(cell, origin), boxes))
+                .collect::<BTreeMap<_, _>>()
+        };
+        let spawn = crate::output::cell_collision::encode(&shift(self.spawn))
+            .context("encoding a logic prop's collision")?;
+        let poses = self
+            .poses
+            .into_iter()
+            .map(|(sequence, shapes)| {
+                crate::output::cell_collision::encode(&shift(shapes))
+                    .map(|bytes| (sequence, bytes))
+                    .context("encoding a pose's collision")
+            })
+            .collect::<Result<_>>()?;
+        Ok((spawn, poses))
+    }
+}
+
+/// [`ApartCollision`] of one prop, its carriers added to `collision`; `None`
+/// for a prop without collision.
+fn apart_collision(
+    config: &crate::config::Config,
+    transform: &crate::voxel::transform::Transform,
+    grid: &crate::voxel::grid::VoxelGrid,
+    item: &crate::source::extract::ModProp,
+    collision: &mut crate::voxel::collision::CellCollision,
+) -> Option<ApartCollision> {
+    let volume = prop_volume(config, transform, item)?;
+    let spawn = separate_prop_collision(collision, grid, volume);
+    if spawn.is_empty() {
+        return None;
+    }
+    // One table per pose a sequence leaves it in.
+    let mut poses = Vec::new();
+    if let Some(animated) = item.animation.as_ref().filter(|_| follows_pose(item)) {
+        for &sequence in &animated.sequences {
+            let model = crate::source::anim::pose_model(
+                &item.model,
+                &animated.animation,
+                animated.animation.settled(sequence),
+            );
+            if let Some(volume) = prop_volume_of(config, transform, item, &model) {
+                poses.push((sequence, separate_prop_collision(collision, grid, volume)));
+            }
+        }
+    }
+    Some(ApartCollision { spawn, poses })
 }
 
 /// A removable prop's collision as a table of its own, per cell, by the
@@ -1491,6 +1687,10 @@ pub fn write_campaign(
         let mut model_refs = Vec::new();
         for model in map.models {
             let content_id = archive.add_content("meshes", "s2mesh", model.bytes)?;
+            let animation = match model.animation {
+                Some(bytes) => Some(archive.add_content("animations", "s2anim", bytes)?),
+                None => None,
+            };
             ensure!(
                 !model.source_model.is_empty(),
                 "source model path must not be empty"
@@ -1500,6 +1700,7 @@ pub fn write_campaign(
                 source_model: model.source_model,
                 materials: model.materials,
                 color: (model.color != [255; 3]).then_some(model.color),
+                animation,
                 surface_prop: model.surface_prop,
             });
         }
@@ -1515,6 +1716,7 @@ pub fn write_campaign(
                         model.source_model.clone(),
                         model.materials.clone(),
                         model.color.unwrap_or([255; 3]),
+                        model.animation.clone(),
                     ),
                     index as u32,
                 )
@@ -1562,6 +1764,7 @@ pub fn write_campaign(
                     prop.source_model.clone(),
                     prop.material_ids.clone(),
                     prop.color,
+                    prop.animation.clone(),
                 ))
                 .with_context(|| format!("prop {stable_id:x?} references a missing model"))?;
             blocks.push((prop.root_cell, root_id));
@@ -1647,6 +1850,7 @@ pub fn write_campaign(
                             prop.source_model.clone(),
                             prop.material_ids.clone(),
                             prop.color,
+                            prop.animation.clone(),
                         ))
                         .with_context(|| {
                             format!(
@@ -1721,6 +1925,16 @@ pub fn write_campaign(
                     }
                     None => None,
                 };
+                let mut poses = Vec::with_capacity(prop.poses.len());
+                for (sequence, bytes) in prop.poses {
+                    let sequence = u32::try_from(sequence).context("pose sequence index")?;
+                    let path = logic_props::LogicProp::pose_path(&map.map_id, entity, sequence);
+                    archive.add(&path, bytes)?;
+                    poses.push(logic_props::Pose {
+                        sequence,
+                        collision: path,
+                    });
+                }
                 records.push(logic_props::LogicProp {
                     entity,
                     stable_id,
@@ -1729,6 +1943,12 @@ pub fn write_campaign(
                     skin: prop.skin,
                     start_hidden: prop.start_hidden,
                     collision,
+                    sequence: prop
+                        .sequence
+                        .map(u32::try_from)
+                        .transpose()
+                        .context("spawn sequence")?,
+                    poses,
                 });
             }
             records.sort_by_key(|record| record.entity);
@@ -1919,6 +2139,7 @@ mod tests {
                 materials: vec![0],
                 color: [255; 3],
                 surface_prop: None,
+                animation: None,
             }],
             pvs: None,
             occlusion: None,
@@ -1937,6 +2158,7 @@ mod tests {
                 scale: 1.0,
                 material_ids: vec![0],
                 color: [255; 3],
+                animation: None,
             }],
             diagnostics: metadata::Diagnostics::new(Vec::new()).unwrap(),
         }
@@ -2142,6 +2364,7 @@ mod tests {
             materials: vec![1],
             color: [255; 3],
             surface_prop: None,
+            animation: None,
         });
         map.props.push(Prop {
             source_ordinal: 1,
@@ -2153,6 +2376,7 @@ mod tests {
             scale: 1.0,
             material_ids: vec![1],
             color: [255; 3],
+            animation: None,
         });
         let dir = temp_dir("material-bindings");
         let written = write_campaign(&dir, "fixture", vec![map]).unwrap();
@@ -2185,6 +2409,7 @@ mod tests {
                 materials,
                 color: red,
                 surface_prop: None,
+                animation: None,
             });
         }
         map.materials.push(map.materials[0].clone());
@@ -2199,6 +2424,7 @@ mod tests {
             scale: 1.0,
             material_ids: vec![1],
             color: red,
+            animation: None,
         });
         let mut shapes = BTreeMap::new();
         shapes.insert([2, 0, 0], vec![[0, 0, 0, 16, 8, 16]]);
@@ -2216,12 +2442,15 @@ mod tests {
                         "models/b.mdl".to_string(),
                         materials,
                         red,
+                        None,
                     )
                 })
                 .collect(),
             skin: 1,
             start_hidden: true,
             collision: Some(crate::output::cell_collision::encode(&shapes).unwrap()),
+            sequence: None,
+            poses: Vec::new(),
         });
         let dir = temp_dir("logic-props");
         let written = write_campaign(&dir, "fixture", vec![map]).unwrap();
@@ -2247,7 +2476,7 @@ mod tests {
         assert_eq!(
             read("maps/map/logic_props.json"),
             format!(
-                "{{\"format\":\"src2mc-logic-props\",\"version\":1,\"props\":[{{\"entity\":40,\"stable_id\":\"{id}\",\"skins\":[1,2],\"skin\":1,\"start_hidden\":true,\"collision\":\"maps/map/logic_props/40.s2coll\"}}]}}\n"
+                "{{\"format\":\"src2mc-logic-props\",\"version\":3,\"props\":[{{\"entity\":40,\"stable_id\":\"{id}\",\"skins\":[1,2],\"skin\":1,\"start_hidden\":true,\"collision\":\"maps/map/logic_props/40.s2coll\"}}]}}\n"
             )
         );
         assert!(
@@ -2271,6 +2500,7 @@ mod tests {
             scale: 1.0,
             skin: 1,
             color: [255; 3],
+            animation: None,
         }
     }
 
@@ -2376,6 +2606,7 @@ mod tests {
             materials: vec![0],
             color: [255; 3],
             surface_prop: None,
+            animation: None,
         });
         let mut grid = crate::voxel::grid::VoxelGrid::new();
         grid.set([5, 0, 5], 1);

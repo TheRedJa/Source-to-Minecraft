@@ -67,6 +67,8 @@ public final class MoverRenderer {
         final AtlasIndex atlas;
         final Map<PageClass, PackedVertices> meshes;
         final Map<PageClass, VertexBuffer> buffers = new HashMap<>();
+        /** Each buffer's bytes, kept so a relight sends only them again; see {@link PackedVertices.LightPatch}. */
+        final Map<PageClass, PackedVertices.LightPatch> patches = new HashMap<>();
         final boolean shaders;
         final boolean complete;
         final double[] bounds;
@@ -85,13 +87,21 @@ public final class MoverRenderer {
             this.mover = mover; this.bundle = bundle; this.atlas = atlas; this.meshes = meshes; this.shaders = shaders;
             this.complete = complete; this.bounds = bounds; this.propStates = propStates;
         }
-        @Override public void close() { buffers.values().forEach(VertexBuffer::close); buffers.clear(); }
+        @Override public void close() {
+            buffers.values().forEach(VertexBuffer::close);
+            buffers.clear();
+            List<PackedVertices.LightPatch> kept = List.copyOf(patches.values());
+            patches.clear();
+            // A worker may still be writing them.
+            if (relighting != null && !relighting.isDone()) relighting.whenComplete((ignored, failure) -> kept.forEach(PackedVertices.LightPatch::close));
+            else kept.forEach(PackedVertices.LightPatch::close);
+        }
     }
 
     private static final Map<UUID, Built> BUILT = new HashMap<>();
     private static long frame, generationSequence = -1;
     private static boolean enabled = true, perVertexLight = true, turnShading = true;
-    private static long drawnLast, relights, workerRelights, workerNanos, uploadNanosLast, uploadNanosMax;
+    private static long drawnLast, relights, workerRelights, workerNanos, uploadNanosLast, uploadNanosMax, sentBytes;
     /** A moving mover is lit again at most this often, in frames, once it moved or turned this far. */
     private static final int RELIGHT_FRAMES = 6, LIGHT_CHECK_FRAMES = 20;
     private static final double RELIGHT_DISTANCE = 0.25, RELIGHT_ANGLE = Math.toRadians(5);
@@ -105,7 +115,7 @@ public final class MoverRenderer {
         return "src2mc movers: " + MoverRegistry.instances(true).size() + " known, " + BUILT.size() + " built, "
             + drawnLast + " drawn last frame, " + relights + " relit (" + workerRelights + " on workers, "
             + String.format(java.util.Locale.ROOT, "%.2f ms each; upload %.2f ms last frame, %.2f ms max", workerRelights == 0 ? 0 : workerNanos / 1e6 / workerRelights,
-                uploadNanosLast / 1e6, uploadNanosMax / 1e6) + "); light " + (perVertexLight ? "per vertex" : "one per mover")
+                uploadNanosLast / 1e6, uploadNanosMax / 1e6) + String.format(java.util.Locale.ROOT, ", %.1f MB light bytes sent", sentBytes / 1e6) + "); light " + (perVertexLight ? "per vertex" : "one per mover")
             + ", shading " + (turnShading ? "turned" : "unturned") + (enabled ? "" : " (drawing off)");
     }
 
@@ -179,6 +189,8 @@ public final class MoverRenderer {
                 if (!built.relighting.isDone()) continue;
                 finishRelight(built);
             }
+            // A hidden mover -- a template's, or a copy's waiting to be handed over -- is lit once shown.
+            if ((MoverRegistry.state(true, resolved) & MoverRegistry.HIDDEN) != 0) continue;
             if (needsLight(level, subLevel, resolved, built)) {
                 // The first light and the one-light mode are quick and needed now; per-vertex
                 // relights of a moving mover sample a copy of the world on a worker.
@@ -225,7 +237,9 @@ public final class MoverRenderer {
                 vertices.setLight(i, light);
             }
             vertices.index();
-            built.buffers.put(entry.getKey(), vertices.upload(MapSurfaceRenderer.neutralEntityId(), MapSurfaceRenderer.indexedMeshes()).buffer());
+            var uploaded = vertices.upload(MapSurfaceRenderer.neutralEntityId(), MapSurfaceRenderer.indexedMeshes(), perVertexLight);
+            built.buffers.put(entry.getKey(), uploaded.buffer());
+            if (uploaded.kept() != null) built.patches.put(entry.getKey(), uploaded.kept());
         }
         built.light = middle;
         built.litPosition = new Vector3d(pose.position().x(), pose.position().y(), pose.position().z());
@@ -258,11 +272,13 @@ public final class MoverRenderer {
         built.litOrientation = orientation;
         built.litFrame = frame;
         built.litPerVertex = true;
+        Map<PageClass, PackedVertices.LightPatch> patches = Map.copyOf(built.patches);
         built.relighting = MeshBuildPool.submit(() -> {
             long started = System.nanoTime();
             Map<Long, Integer> cache = new HashMap<>();
             Vector3d point = new Vector3d(), normal = new Vector3d();
-            for (PackedVertices vertices : built.meshes.values()) {
+            for (var entry : built.meshes.entrySet()) {
+                PackedVertices vertices = entry.getValue();
                 for (int i = 0; i < vertices.vertices(); i++) {
                     // Drawn at R (plot - C) + position, as the draw places it.
                     orientation.transform(point.set(plotOrigin.getX() + vertices.x(i) - rotationPoint.x,
@@ -270,7 +286,10 @@ public final class MoverRenderer {
                     orientation.transform(normal.set(vertices.nx(i), vertices.ny(i), vertices.nz(i)));
                     vertices.setLight(i, LightSampler.smooth(world, point.x, point.y, point.z, (float) normal.x, (float) normal.y, (float) normal.z, cache));
                 }
-                vertices.index();
+                // Only the light bytes change; a buffer without kept bytes is built again.
+                PackedVertices.LightPatch patch = patches.get(entry.getKey());
+                if (patch != null) vertices.patchLight(patch);
+                else vertices.index();
             }
             synchronized (MoverRenderer.class) { workerNanos += System.nanoTime() - started; workerRelights++; }
             return null;
@@ -288,8 +307,15 @@ public final class MoverRenderer {
             built.litFrame = Long.MIN_VALUE;
             return;
         }
-        built.close();
         for (var entry : built.meshes.entrySet()) {
+            PackedVertices.LightPatch patch = built.patches.get(entry.getKey());
+            VertexBuffer buffer = built.buffers.get(entry.getKey());
+            if (patch != null && buffer != null) {
+                patch.send(buffer);
+                sentBytes += patch.bytes();
+                continue;
+            }
+            if (buffer != null) buffer.close();
             built.buffers.put(entry.getKey(), entry.getValue().upload(MapSurfaceRenderer.neutralEntityId(), MapSurfaceRenderer.indexedMeshes()).buffer());
         }
         relights++;
@@ -313,13 +339,20 @@ public final class MoverRenderer {
      */
     private static List<dev.theredja.src2mc.world.PropStates.State> propStates(ClientLevel level, MoverRegistry.Resolved resolved) {
         BundleMap map = resolved.map();
-        if (map.logicProps() == null) return List.of();
+        // A copy's riders are copies too, each drawn by its mount.
+        if (map.logicProps() == null || resolved.instance().copy()) return List.of();
         var key = dev.theredja.src2mc.world.PropStates.key(level, resolved.placement());
         List<dev.theredja.src2mc.world.PropStates.State> states = new ArrayList<>();
         for (MoverTable.Prop moverProp : resolved.mover().props()) {
             var logicProp = map.logicProps().byEntity(moverProp.entity());
-            if (logicProp != null && logicProp.mover() == resolved.mover().entity())
-                states.add(dev.theredja.src2mc.world.PropStates.effective(true, key, map, logicProp));
+            if (logicProp == null || logicProp.mover() != resolved.mover().entity()) continue;
+            var state = dev.theredja.src2mc.world.PropStates.effective(true, key, map, logicProp);
+            // One parented anew at runtime is drawn by its mount, not here.
+            if (dev.theredja.src2mc.world.PropMounts.mounted(key, logicProp.entity())) state = new dev.theredja.src2mc.world.PropStates.State(
+                dev.theredja.src2mc.world.PropStates.HIDDEN, state.skin(), state.color());
+            // An animated rider is drawn on its own; only its look, not its pose, would build the mover again.
+            states.add(AnimatedPropRenderer.animated(map, logicProp, state)
+                ? new dev.theredja.src2mc.world.PropStates.State(state.flags(), state.skin(), state.color()) : state);
         }
         return states;
     }
@@ -353,14 +386,15 @@ public final class MoverRenderer {
         }
         boolean complete = true;
         var stateKey = dev.theredja.src2mc.world.PropStates.key(level, resolved.placement());
-        for (MoverTable.Prop moverProp : mover.props()) {
+        for (MoverTable.Prop moverProp : resolved.instance().copy() ? List.<MoverTable.Prop>of() : mover.props()) {
             int modelIndex = moverProp.model();
             BundleModel model = map.models().get(modelIndex);
             int tint = model.color();
             var logicProp = map.logicProps() == null ? null : map.logicProps().byEntity(moverProp.entity());
             if (logicProp != null && logicProp.mover() == mover.entity()) {
                 var state = dev.theredja.src2mc.world.PropStates.effective(true, stateKey, map, logicProp);
-                if (state.hidden()) continue;
+                if (state.hidden() || AnimatedPropRenderer.animated(map, logicProp, state)
+                    || dev.theredja.src2mc.world.PropMounts.mounted(stateKey, logicProp.entity())) continue;
                 modelIndex = logicProp.model(state.skin());
                 model = map.models().get(modelIndex);
                 tint = state.color();

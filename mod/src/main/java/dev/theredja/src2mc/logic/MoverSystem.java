@@ -77,6 +77,19 @@ public final class MoverSystem {
     }
 
     private static final Map<UUID, Live> LIVE = new HashMap<>();
+    /**
+     * Sub-levels handed to another copy, by the game time they were: hidden a few ticks while
+     * Sable carries them to the new place, so no client sees them sweep across the map.
+     */
+    private static final Map<UUID, Long> HANDED_OVER = new HashMap<>();
+    private static final int HANDOVER_TICKS = 3;
+    /**
+     * Sub-levels whose entity is gone, by the game time they were let go: handed to another copy
+     * only a second later, once whoever stood on one has fallen off -- Sable carries what stands
+     * on a sub-level wherever it is moved.
+     */
+    private static final Map<UUID, Long> RELEASED = new HashMap<>();
+    private static final int RELEASE_TICKS = 20;
     private static long ensureEpoch = -1, ensureGeneration = -1;
     private static int ticks;
 
@@ -100,8 +113,9 @@ public final class MoverSystem {
             for (Tag element : tag.getList("movers", Tag.TAG_COMPOUND)) {
                 CompoundTag mover = (CompoundTag) element;
                 UUID uuid = mover.getUUID("sub_level");
+                int entity = mover.getInt("entity");
                 data.entries.put(uuid, new Entry(new MoverRegistry.Instance(mover.getLong("anchor"), mover.getString("campaign"),
-                    mover.getString("map"), mover.getInt("entity"), uuid), mover.getInt("signature")));
+                    mover.getString("map"), entity, mover.contains("source") ? mover.getInt("source") : entity, uuid), mover.getInt("signature")));
             }
             for (Tag element : tag.getList("removals", Tag.TAG_INT_ARRAY)) data.removals.add(NbtUtils.loadUUID(element));
             return data;
@@ -115,6 +129,7 @@ public final class MoverSystem {
                 mover.putString("campaign", entry.instance.campaignId());
                 mover.putString("map", entry.instance.mapId());
                 mover.putInt("entity", entry.instance.entity());
+                mover.putInt("source", entry.instance.source());
                 mover.putUUID("sub_level", entry.instance.subLevel());
                 mover.putInt("signature", entry.signature);
                 movers.add(mover);
@@ -159,6 +174,7 @@ public final class MoverSystem {
         if (running.isEmpty()) return;
         Map<Long, MapLogic> byAnchor = new HashMap<>();
         for (MapLogic logic : running) byAnchor.put(logic.placement.anchorWorld().asLong(), logic);
+        assignCopies(level, byAnchor);
         List<UUID> changed = new ArrayList<>();
         List<Integer> states = new ArrayList<>();
         for (Entry entry : loaded(level).entries.values()) {
@@ -166,6 +182,9 @@ public final class MoverSystem {
             LogicEntity entity = logic == null ? null : logic.entity(entry.instance.entity());
             if (entity == null) continue;
             int state = entity.moverState();
+            Long handed = HANDED_OVER.get(entry.instance.subLevel());
+            if (handed != null && level.getGameTime() - handed < HANDOVER_TICKS) state |= MoverRegistry.HIDDEN | MoverRegistry.NOT_SOLID;
+            else if (handed != null) HANDED_OVER.remove(entry.instance.subLevel());
             Integer stored = MoverRegistry.storedState(false, entry.instance.subLevel());
             if (stored != null && stored == state) continue;
             MoverRegistry.setState(false, entry.instance.subLevel(), state);
@@ -175,6 +194,73 @@ public final class MoverSystem {
         if (!changed.isEmpty()) {
             PacketDistributor.sendToPlayersInDimension(level,
                 new MoverNetwork.StatePayload(changed, states.stream().mapToInt(Integer::intValue).toArray()));
+        }
+    }
+
+    /**
+     * Gives every copy of a mover a point_template made a sub-level: one of the same bundle mover
+     * whose entity is gone -- the template's own, or an earlier copy's -- else a new one. A
+     * conveyor that makes a train every few seconds so keeps as many as are out at once.
+     */
+    private static void assignCopies(ServerLevel level, Map<Long, MapLogic> byAnchor) {
+        ServerSubLevelContainer container = SubLevelContainer.getContainer(level);
+        if (container == null) return;
+        Data data = loaded(level);
+        long now = level.getGameTime();
+        boolean changed = false;
+        for (MapLogic logic : byAnchor.values()) {
+            long anchor = logic.placement.anchorWorld().asLong();
+            Set<Integer> carried = new HashSet<>();
+            List<Entry> free = new ArrayList<>();
+            Set<Integer> waiting = new HashSet<>();
+            for (Entry entry : List.copyOf(data.entries.values())) {
+                if (entry.instance.anchor() != anchor) continue;
+                int slot = entry.instance.entity();
+                LogicEntity holder = slot < 0 ? null : logic.entity(slot);
+                if (holder != null && !holder.removed && holder.source == entry.instance.source() && carried.add(slot)) continue;
+                if (slot >= 0) {
+                    // Its entity is gone: let it go at once, hidden and passable where it stands.
+                    MoverRegistry.Instance released = new MoverRegistry.Instance(anchor, entry.instance.campaignId(), entry.instance.mapId(),
+                        -1, entry.instance.source(), entry.instance.subLevel());
+                    data.entries.put(released.subLevel(), new Entry(released, entry.signature));
+                    MoverRegistry.put(false, released);
+                    MoverRegistry.setState(false, released.subLevel(), MoverRegistry.HIDDEN | MoverRegistry.NOT_SOLID);
+                    RELEASED.put(released.subLevel(), now);
+                    changed = true;
+                    continue;
+                }
+                Long released = RELEASED.get(entry.instance.subLevel());
+                if (released == null || now - released >= RELEASE_TICKS) free.add(entry);
+                else waiting.add(entry.instance.source());
+            }
+            // Every mover entity without a sub-level: a copy, or the map's own after the logic started again.
+            for (int slot = 0; slot < logic.slots(); slot++) {
+                LogicEntity entity = logic.entity(slot);
+                if (entity.removed || !logic.isMover(entity) || carried.contains(slot)) continue;
+                Entry pooled = null;
+                for (Entry entry : free) if (entry.instance.source() == entity.source) { pooled = entry; break; }
+                if (pooled != null) {
+                    free.remove(pooled);
+                    MoverRegistry.Instance instance = new MoverRegistry.Instance(anchor, pooled.instance.campaignId(), pooled.instance.mapId(),
+                        slot, entity.source, pooled.instance.subLevel());
+                    data.entries.put(instance.subLevel(), new Entry(instance, pooled.signature));
+                    MoverRegistry.put(false, instance);
+                    RELEASED.remove(instance.subLevel());
+                    HANDED_OVER.put(instance.subLevel(), now);
+                    changed = true;
+                } else if (logic.isCopy(entity) || !waiting.contains(entity.source)) {
+                    int index = logic.map.movers().indexOfEntity(entity.source);
+                    if (index >= 0 && spawn(level, container, data, logic.placement, logic.map, logic.map.movers().movers().get(index), slot)) changed = true;
+                } else {
+                    // The map's own mover, its logic started again: it takes one of its own once let go.
+                    continue;
+                }
+                carried.add(slot);
+            }
+        }
+        if (changed) {
+            data.setDirty();
+            sync(level);
         }
     }
 
@@ -193,15 +279,15 @@ public final class MoverSystem {
             MapPlacement placement = placements.get(instance.anchor());
             BundleMap map = placement == null ? null : generation.findMap(placement.campaignId(), placement.mapId()).orElse(null);
             boolean mapLoaded = placement != null && map != null;
-            MoverTable.Mover mover = mapLoaded && map.movers() != null && map.movers().indexOfEntity(instance.entity()) >= 0
-                ? map.movers().movers().get(map.movers().indexOfEntity(instance.entity())) : null;
+            MoverTable.Mover mover = mapLoaded && map.movers() != null && map.movers().indexOfEntity(instance.source()) >= 0
+                ? map.movers().movers().get(map.movers().indexOfEntity(instance.source())) : null;
             boolean stale = placement == null || !placement.mapId().equals(instance.mapId()) || !placement.campaignId().equals(instance.campaignId())
                 || (mapLoaded && (mover == null || signature(mover) != entry.signature));
             if (stale) {
                 remove(level, container, data, instance.subLevel());
                 changed = true;
             } else {
-                present.add(instance.anchor() + "/" + instance.entity());
+                present.add(instance.anchor() + "/" + instance.source());
             }
         }
         for (MapPlacement placement : placements.values()) {
@@ -209,7 +295,7 @@ public final class MoverSystem {
             if (map == null || map.movers() == null) continue;
             for (MoverTable.Mover mover : map.movers().movers()) {
                 if (present.contains(placement.anchorWorld().asLong() + "/" + mover.entity())) continue;
-                if (spawn(level, container, data, placement, map, mover)) changed = true;
+                if (spawn(level, container, data, placement, map, mover, mover.entity())) changed = true;
             }
         }
         if (changed) {
@@ -232,9 +318,9 @@ public final class MoverSystem {
         }
     }
 
-    /** Builds one mover's sub-level: its blocks in a new plot, placed and locked where its map puts it. */
+    /** Builds one mover's sub-level, for entity slot {@code entity}: its blocks in a new plot, placed and locked where its map puts it. */
     private static boolean spawn(ServerLevel level, ServerSubLevelContainer container, Data data, MapPlacement placement,
-                                 BundleMap map, MoverTable.Mover mover) {
+                                 BundleMap map, MoverTable.Mover mover, int entity) {
         double[] origin = entityOrigin(map, mover);
         BlockPos translation = placement.translation();
         Pose3d pose = new Pose3d();
@@ -267,9 +353,9 @@ public final class MoverSystem {
             LevelChunk chunk = plot.getChunk(plot.toLocal(new ChunkPos(pos)));
             SubLevelAssemblyHelper.markAndNotifyBlock(level, pos, chunk, air, state, 3, 512);
         }
-        subLevel.setName(map.mapId() + " " + mover.classname() + " #" + mover.entity());
+        subLevel.setName(map.mapId() + " " + mover.classname() + " #" + mover.entity() + (entity != mover.entity() ? " copy" : ""));
         MoverRegistry.Instance instance = new MoverRegistry.Instance(placement.anchorWorld().asLong(), placement.campaignId(),
-            placement.mapId(), mover.entity(), subLevel.getUniqueId());
+            placement.mapId(), entity, mover.entity(), subLevel.getUniqueId());
         data.entries.put(instance.subLevel(), new Entry(instance, signature(mover)));
         MoverRegistry.put(false, instance);
         place(level, subLevel, currentPose(level, instance));
@@ -347,7 +433,11 @@ public final class MoverSystem {
         }
         LogicEntity entity = logic.entity(instance.entity());
         MoverRegistry.Resolved resolved = MoverRegistry.resolve(level, instance.subLevel());
-        if (entity == null || resolved == null) return MoverPose.IDENTITY;
+        if (entity == null || resolved == null) {
+            // Let go of: it stays where it was until another entity takes it.
+            Live live = LIVE.get(instance.subLevel());
+            return live != null && live.pose != null ? live.pose : MoverPose.IDENTITY;
+        }
         MoverPose pose = entity.worldPose(logic.time() + partialTick * MapLogic.TICK_SECONDS, entityOrigin(resolved.map(), resolved.mover()));
         return pose == null ? MoverPose.IDENTITY : pose;
     }
@@ -516,6 +606,8 @@ public final class MoverSystem {
 
     public static void onServerStopped(net.neoforged.neoforge.event.server.ServerStoppedEvent event) {
         LIVE.clear();
+        HANDED_OVER.clear();
+        RELEASED.clear();
         MoverRegistry.clear(false);
         ensureEpoch = -1;
         ensureGeneration = -1;

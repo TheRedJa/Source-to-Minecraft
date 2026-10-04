@@ -152,6 +152,9 @@ pub struct ModelReference {
     /// RGB tint the model is drawn with; absent for white, which is none.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub color: Option<[u8; 3]>,
+    /// Content ID of the `.s2anim` that moves an animated prop's mesh.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub animation: Option<String>,
     /// The model's Source `$surfaceprop`, when it declares one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub surface_prop: Option<String>,
@@ -573,6 +576,7 @@ mod tests {
                     source_model: "a.mdl".into(),
                     materials: vec![0],
                     color: None,
+                    animation: None,
                     surface_prop: None,
                 },
                 ModelReference {
@@ -580,6 +584,7 @@ mod tests {
                     source_model: "b.mdl".into(),
                     materials: vec![0],
                     color: None,
+                    animation: None,
                     surface_prop: Some("metal".into()),
                 },
             ],

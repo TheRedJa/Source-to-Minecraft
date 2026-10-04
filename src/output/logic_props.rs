@@ -8,7 +8,7 @@ use anyhow::{Context, Result, ensure};
 use serde::Serialize;
 
 pub const FORMAT: &str = "src2mc-logic-props";
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 3;
 
 /// Logic props in one map. Real maps have up to a few hundred; each can add
 /// one bundle entry, so this also bounds a map's share of the entry limit.
@@ -42,9 +42,25 @@ pub struct LogicProp {
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub start_hidden: bool,
     /// `maps/<map-id>/logic_props/<entity>.s2coll`; absent without
-    /// removable collision.
+    /// removable collision. Map-local for a placed prop, mover-local for a
+    /// riding one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub collision: Option<String>,
+    /// The sequence an animated prop spawns in; absent for one whose model
+    /// has no animation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sequence: Option<u32>,
+    /// For a prop whose collision follows its bones, the collision of the
+    /// pose each sequence it can play leaves it in, by ascending sequence.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub poses: Vec<Pose>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Pose {
+    pub sequence: u32,
+    /// `maps/<map-id>/logic_props/<entity>_<sequence>.s2coll`.
+    pub collision: String,
 }
 
 impl LogicPropTable {
@@ -83,6 +99,11 @@ impl LogicProp {
         format!("maps/{map_id}/logic_props/{entity}.s2coll")
     }
 
+    /// The canonical path of the collision of one of its poses.
+    pub fn pose_path(map_id: &str, entity: u32, sequence: u32) -> String {
+        format!("maps/{map_id}/logic_props/{entity}_{sequence}.s2coll")
+    }
+
     fn validate(&self, map_id: &str, model_count: u32) -> Result<()> {
         ensure!(
             self.stable_id.is_some() != self.mover.is_some(),
@@ -105,13 +126,25 @@ impl LogicProp {
         );
         if let Some(path) = &self.collision {
             ensure!(
-                self.mover.is_none(),
-                "a riding prop's collision is its mover's"
-            );
-            ensure!(
                 path == &LogicProp::collision_path(map_id, self.entity),
                 "non-canonical logic prop collision path"
             );
+        }
+        if !self.poses.is_empty() {
+            ensure!(
+                self.collision.is_some() && self.sequence.is_some(),
+                "only an animated prop with collision of its own has poses"
+            );
+            ensure!(
+                self.poses.windows(2).all(|p| p[0].sequence < p[1].sequence),
+                "poses must be unique and in sequence order"
+            );
+            for pose in &self.poses {
+                ensure!(
+                    pose.collision == LogicProp::pose_path(map_id, self.entity, pose.sequence),
+                    "non-canonical pose collision path"
+                );
+            }
         }
         Ok(())
     }
@@ -130,6 +163,8 @@ mod tests {
             skin: 1,
             start_hidden: false,
             collision: None,
+            sequence: None,
+            poses: Vec::new(),
         }
     }
 
@@ -151,12 +186,47 @@ mod tests {
         assert_eq!(
             text,
             format!(
-                "{{\"format\":\"src2mc-logic-props\",\"version\":1,\"props\":[\
+                "{{\"format\":\"src2mc-logic-props\",\"version\":3,\"props\":[\
                  {{\"entity\":4,\"stable_id\":\"{id}\",\"skins\":[0,1],\"skin\":1}},\
                  {{\"entity\":9,\"stable_id\":\"{id}\",\"skins\":[0,1],\"skin\":1,\"start_hidden\":true,\"collision\":\"maps/m/logic_props/9.s2coll\"}},\
                  {{\"entity\":12,\"mover\":3,\"skins\":[0,1],\"skin\":1}}]}}\n"
             )
         );
+    }
+
+    /// An animated prop names the sequence it spawns in; one whose collision
+    /// follows its bones lists a collision per pose, in sequence order.
+    #[test]
+    fn animated_props_carry_their_sequence_and_poses() {
+        let mut door = placed(7);
+        door.collision = Some(LogicProp::collision_path("m", 7));
+        door.sequence = Some(2);
+        door.poses = [0, 3]
+            .map(|sequence| Pose {
+                sequence,
+                collision: LogicProp::pose_path("m", 7, sequence),
+            })
+            .to_vec();
+        let text = String::from_utf8(
+            LogicPropTable::new(vec![door.clone()])
+                .encode("m", 2)
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(text.ends_with(
+            "\"collision\":\"maps/m/logic_props/7.s2coll\",\"sequence\":2,\"poses\":[\
+             {\"sequence\":0,\"collision\":\"maps/m/logic_props/7_0.s2coll\"},\
+             {\"sequence\":3,\"collision\":\"maps/m/logic_props/7_3.s2coll\"}]}]}\n"
+        ));
+        let mut unordered = door.clone();
+        unordered.poses.reverse();
+        assert!(LogicPropTable::new(vec![unordered]).encode("m", 2).is_err());
+        let mut still = door.clone();
+        still.sequence = None;
+        assert!(LogicPropTable::new(vec![still]).encode("m", 2).is_err());
+        let mut elsewhere = door;
+        elsewhere.poses[0].collision = "maps/m/logic_props/7.s2coll".into();
+        assert!(LogicPropTable::new(vec![elsewhere]).encode("m", 2).is_err());
     }
 
     #[test]
@@ -177,7 +247,7 @@ mod tests {
         assert!(
             LogicPropTable::new(vec![riding_collision])
                 .encode("m", 2)
-                .is_err()
+                .is_ok()
         );
     }
 }

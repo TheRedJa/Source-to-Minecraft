@@ -204,13 +204,16 @@ pub fn from_brush_mesh(source: &crate::convert::BrushMesh) -> Result<(Mesh, Vec<
 pub fn from_source_model(
     source: &crate::source::mdl::Model,
     units: f64,
-) -> Result<(Mesh, Vec<String>)> {
+) -> Result<(Mesh, Vec<String>, Vec<crate::source::mdl::Weights>)> {
     ensure!(units.is_finite() && units > 0.0, "invalid model scale");
     let mut vertices = Vec::new();
     let mut indices = Vec::new();
     let mut submeshes = Vec::new();
     let mut materials = Vec::new();
-    let mut interned: HashMap<[u32; 8], u32> = HashMap::new();
+    // A vertex's values and its bones, as bits.
+    type VertexKey = ([u32; 8], [(u8, u32); 3]);
+    let mut interned: HashMap<VertexKey, u32> = HashMap::new();
+    let mut bindings = Vec::new();
     for part in &source.parts {
         ensure!(
             part.triangles.len() == part.normals.len() && part.triangles.len() == part.uvs.len(),
@@ -222,7 +225,20 @@ pub fn from_source_model(
         let first_index = indices.len() as u32;
         let slot = materials.len() as u32;
         materials.push(part.material.clone());
-        for ((tri, normals), uvs) in part.triangles.iter().zip(&part.normals).zip(&part.uvs) {
+        for (t, ((tri, normals), uvs)) in part
+            .triangles
+            .iter()
+            .zip(&part.normals)
+            .zip(&part.uvs)
+            .enumerate()
+        {
+            // The corner's bones join the key: two vertices that only differ
+            // in what moves them stay two.
+            let weights = part
+                .weights
+                .get(t)
+                .copied()
+                .unwrap_or([[(0, 1.0), (0, 0.0), (0, 0.0)]; 3]);
             let geometric = (tri[1] - tri[0]).cross(tri[2] - tri[0]).normalized();
             if geometric.length() <= 1.0e-12 {
                 continue;
@@ -248,7 +264,10 @@ pub fn from_source_model(
                     values.iter().all(|v| v.is_finite()),
                     "source model value cannot be represented as f32"
                 );
-                let key = values.map(|v| if v == 0.0 { 0 } else { v.to_bits() });
+                let key = (
+                    values.map(|v| if v == 0.0 { 0 } else { v.to_bits() }),
+                    weights[c].map(|(bone, weight)| (bone, weight.to_bits())),
+                );
                 let index = match interned.get(&key) {
                     Some(i) => *i,
                     None => {
@@ -258,6 +277,7 @@ pub fn from_source_model(
                             normal: values[3..6].try_into().unwrap(),
                             uv: values[6..8].try_into().unwrap(),
                         });
+                        bindings.push(weights[c]);
                         interned.insert(key, i);
                         i
                     }
@@ -296,7 +316,7 @@ pub fn from_source_model(
         submeshes,
     };
     encode(&mesh)?;
-    Ok((mesh, materials))
+    Ok((mesh, materials, bindings))
 }
 
 pub fn encode(mesh: &Mesh) -> Result<Vec<u8>> {

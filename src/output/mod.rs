@@ -1,5 +1,6 @@
 //! Writing converted maps to disk.
 
+pub mod animation;
 pub mod atlas;
 pub mod audio;
 pub mod bake;

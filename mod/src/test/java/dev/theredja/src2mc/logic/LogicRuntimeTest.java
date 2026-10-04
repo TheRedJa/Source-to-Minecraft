@@ -316,6 +316,165 @@ final class LogicRuntimeTest {
         assertEquals(2, (box.minZ + box.maxZ) / 2, 1e-6);
     }
 
+    /** A box brush from map-local corners: inside where every plane's {@code n . p <= d}. */
+    private static LogicTable.Volume box(double minX, double minY, double minZ, double maxX, double maxY, double maxZ) {
+        double[][] planes = {{1, 0, 0, maxX}, {-1, 0, 0, -minX}, {0, 1, 0, maxY}, {0, -1, 0, -minY}, {0, 0, 1, maxZ}, {0, 0, -1, -minZ}};
+        return new LogicTable.Volume(new double[]{minX, minY, minZ, maxX, maxY, maxZ}, List.<double[][]>of(planes));
+    }
+
+    /** {@code entity} with brush volume {@code volume}, standing at a map-local point. */
+    private static LogicTable.Entity brush(LogicTable.Entity entity, int volume, double x, double y, double z) {
+        return new LogicTable.Entity(entity.classname(), entity.keyvalues(), entity.outputs(), new double[]{x, y, z}, volume, -1);
+    }
+
+    /** {@link #run} with brush volumes and movers: each {@code moverEntities} lump index is a one-cell mover at the origin. */
+    private static MapLogic runWith(List<LogicTable.Volume> volumes, int[] moverEntities, LogicTable.Entity... entities) {
+        List<LogicTable.Entity> list = new ArrayList<>(List.of(entity("worldspawn")));
+        list.addAll(List.of(entities));
+        LogicTable table = new LogicTable(new double[]{0, 0, 0}, list, volumes, List.of(), Map.of());
+        List<dev.theredja.src2mc.bundle.MoverTable.Mover> movers = new ArrayList<>();
+        for (int entity : moverEntities) movers.add(new dev.theredja.src2mc.bundle.MoverTable.Mover(entity, list.get(entity).classname(),
+            new int[]{0, 0, 0}, new int[]{1, 1, 1}, null, null, new int[]{0, 0, 0}, new int[0], List.of()));
+        BundleMap map = new BundleMap("m", "m.bsp", new int[]{0, 0, 0}, new int[]{15, 15, 15}, new int[]{0, 0, 0},
+            List.of(), List.of(), List.of(), false, new SurfaceTable(List.of(), Map.of()), java.util.Set.of(), null, null, null, null, null, table,
+            new dev.theredja.src2mc.bundle.MoverTable(movers));
+        MapLogic logic = new MapLogic(PLACEMENT, map);
+        logic.spawn(MapLogic.LoadType.NEW_GAME);
+        return logic;
+    }
+
+    /**
+     * CPointTemplate: its entities leave the map as it spawns; each ForceSpawn makes copies whose
+     * names, and the group's outputs at them, carry the instance (precaching counted one, so the
+     * first copy is 2); a member nothing in the group names keeps its name in every copy.
+     */
+    @Test void aPointTemplateMakesRenamedCopiesOnForceSpawn() {
+        MapLogic logic = run(
+            entity("point_template", "targetname", "tpl", "Template01", "box", "Template02", "relay_*",
+                "OnEntitySpawned", "spawned,Add,1,0,-1"),
+            entity("prop_dynamic", "targetname", "box", "OnUser1", "relay_a,Trigger,,0,-1"),
+            entity("logic_relay", "targetname", "relay_a", "OnTrigger", "box,Skin,1,0,-1"),
+            entity("logic_relay", "targetname", "relay_b"),
+            entity("logic_relay", "targetname", "outside", "OnTrigger", "relay_b,Disable,,0,-1"),
+            entity("math_counter", "targetname", "spawned"));
+        assertTrue(logic.find("box", null, null, null).isEmpty(), "taken out as the map spawns");
+        assertTrue(logic.find("relay_b", null, null, null).isEmpty());
+        assertTrue(Templates.removedAtSpawn(logic.table).get(2) && Templates.removedAtSpawn(logic.table).get(3));
+        logic.queue(0, "tpl", null, "ForceSpawn", null, null, null);
+        logic.queue(0.1, "tpl", null, "ForceSpawn", null, null, null);
+        seconds(logic, 0.2);
+        assertTrue(state(logic, "spawned").startsWith("2 "), state(logic, "spawned"));
+        LogicEntity first = logic.findFirst("box&0002", null, null, null), second = logic.findFirst("box&0003", null, null, null);
+        assertTrue(first != null && second != null && first.source == 2 && first.index >= 7, "copies of box in slots of their own");
+        assertTrue(logic.findFirst("relay_a&0003", null, null, null) != null);
+        assertEquals(2, logic.find("relay_b", null, null, null).size(), "nothing names relay_b: its copies keep the name");
+        logic.queue(0, "box&0003", null, "FireUser1", null, null, null);
+        logic.queue(0, "outside", null, "Trigger", null, null, null);
+        seconds(logic, 0.1);
+        assertEquals(0, first.skin, "the second group's relay reaches its own box only");
+        assertEquals(1, second.skin);
+        for (LogicEntity relay : logic.find("relay_b", null, null, null)) assertEquals("disabled", relay.state(), "an unrenamed copy is reached by its name");
+        // Removed copies give their slots to the next made a second later, not at once.
+        int slot = first.index;
+        logic.queue(0, "box&0002", null, "Kill", null, null, null);
+        logic.queue(0.1, "tpl", null, "ForceSpawn", null, null, null);
+        seconds(logic, 0.2);
+        assertTrue(logic.entity(slot) == first, "too soon: " + logic.entity(slot).describe());
+        logic.queue(1.0, "tpl", null, "ForceSpawn", null, null, null);
+        seconds(logic, 1.1);
+        assertTrue(logic.entity(slot) != first && logic.entity(slot).name().endsWith("&0005"), logic.entity(slot).describe());
+    }
+
+    /**
+     * Freed slots are handed out once each, whatever order they were freed in: a conveyor frees
+     * and takes them in a jumble, and a slot handed out twice put two entities in one place.
+     */
+    @Test void freedSlotsAreHandedOutOnceEach() {
+        MapLogic logic = run(
+            entity("point_template", "targetname", "tpl", "Template01", "box"),
+            entity("logic_relay", "targetname", "box"));
+        for (int i = 0; i < 40; i++) logic.queue(0, "tpl", null, "ForceSpawn", null, null, null);
+        seconds(logic, 0.1);
+        List<LogicEntity> boxes = new ArrayList<>(logic.find("box", null, null, null));
+        assertEquals(40, boxes.size());
+        // The upper half freed long enough ago, then the lower half just now: the slots ready
+        // to be taken again sit inside the free ones, not at their start.
+        boxes.sort(java.util.Comparator.comparingInt(box -> box.index));
+        for (int i = 20; i < 40; i += 2) boxes.get(i).remove();
+        seconds(logic, 1.2);
+        for (int i = 1; i < 20; i += 2) boxes.get(i).remove();
+        for (int i = 0; i < 40; i++) logic.queue(0, "tpl", null, "ForceSpawn", null, null, null);
+        seconds(logic, 0.1);
+        java.util.Set<Integer> seen = new java.util.HashSet<>();
+        for (int slot = 0; slot < logic.slots(); slot++) {
+            LogicEntity entity = logic.entity(slot);
+            assertEquals(slot, entity.index, "slot " + slot + " holds " + entity.describe());
+        }
+        for (LogicEntity box : logic.find("box", null, null, null)) {
+            assertTrue(seen.add(box.index), "two boxes in slot " + box.index);
+            assertTrue(logic.entity(box.index) == box, box.describe() + " is not in its slot");
+        }
+    }
+
+    @Test void copiesAreSavedAndMadeAgainOnLoad() {
+        LogicTable.Entity[] map = {
+            entity("point_template", "targetname", "tpl", "Template01", "box"),
+            entity("prop_dynamic", "targetname", "box", "parentname", "nobody")};
+        MapLogic logic = run(map);
+        logic.queue(0, "tpl", null, "ForceSpawn", null, null, null);
+        logic.queue(0.1, "box", null, "Skin", "3", null, null);
+        seconds(logic, 0.2);
+        LogicEntity copy = logic.findFirst("box", null, null, null);
+        assertTrue(copy != null && copy.skin == 3);
+        CompoundTag saved = logic.save();
+        MapLogic loaded = run(map);
+        assertTrue(loaded.load(saved));
+        LogicEntity again = loaded.findFirst("box", null, null, null);
+        assertTrue(again != null && again.index == copy.index && again.source == 2 && again.skin == 3, again == null ? "none" : again.describe());
+    }
+
+    /** SetParent keeps the entity where it is and moves it with the new parent from then on. */
+    @Test void setParentHoldsTheWorldPlaceAndRidesFromThere() {
+        MapLogic logic = run(at(entity("func_rotating", "targetname", "turntable", "maxspeed", "90"), 0, 0, 0),
+            at(entity("func_rotating", "targetname", "box", "maxspeed", "0"), 2, 0, 0));
+        logic.queue(0, "turntable", null, "Start", null, null, null);
+        seconds(logic, 0.05);
+        double start = logic.time();
+        seconds(logic, 1.0);
+        LogicEntity box = logic.findFirst("box", null, null, null);
+        box.setParent(logic.findFirst("turntable", null, null, null));
+        double attached = logic.time();
+        MoverPose now = box.worldPose(attached, new double[]{2, 0, 0});
+        assertTrue(now == null || (Math.abs(now.x()) < 1e-9 && Math.abs(now.z()) < 1e-9), "still where it was: " + now);
+        // Another quarter turn about the origin takes x 2 to Minecraft's z -2.
+        MoverPose later = box.worldPose(attached + 1.0, new double[]{2, 0, 0});
+        assertEquals(-2, later.x(), 1e-6);
+        assertEquals(-2, later.z(), 1e-6);
+        assertTrue(start > 0);
+    }
+
+    /**
+     * Pushers touch triggers (FinishPushers): a train runs through a trigger that lets everything
+     * through and is filtered to trains, and through one for players only.
+     */
+    @Test void aMovingTrainTouchesTriggersThatLetEverythingThrough() {
+        MapLogic logic = runWith(List.of(box(-0.5, 0, -0.5, 0.5, 1, 0.5), box(-1, 0, 5, 1, 2, 6), box(-1, 0, 5, 1, 2, 6)), new int[]{1},
+            brush(entity("func_tracktrain", "targetname", "train", "target", "a", "startspeed", "320", "spawnflags", "16"), 0, 0, 0, 0),
+            at(entity("path_track", "targetname", "a", "target", "b"), 0, 0, 0),
+            at(entity("path_track", "targetname", "b"), 0, 0, 20),
+            brush(entity("trigger_once", "spawnflags", "64", "filtername", "trains", "OnStartTouch", "hits,Add,1,0,-1",
+                "OnTrigger", "!activator,FireUser1,,0,-1"), 1, 0, 1, 5.5),
+            brush(entity("trigger_multiple", "spawnflags", "1", "OnStartTouch", "players,Add,1,0,-1"), 2, 0, 1, 5.5),
+            entity("filter_activator_class", "targetname", "trains", "filterclass", "func_tracktrain"),
+            entity("math_counter", "targetname", "hits"),
+            entity("math_counter", "targetname", "players"));
+        seconds(logic, 0.1);
+        logic.queue(0, "train", null, "StartForward", null, null, null);
+        seconds(logic, 1.5);
+        assertTrue(state(logic, "hits").startsWith("1 "), state(logic, "hits"));
+        assertTrue(state(logic, "players").startsWith("0 "), state(logic, "players"));
+    }
+
     @Test void aBrushHidesWhenDisabledAndCollidesByItsSolidity() {
         MapLogic logic = run(entity("func_brush", "targetname", "wall", "solidity", "0"),
             entity("func_brush", "targetname", "always", "solidity", "2", "StartDisabled", "1"),
@@ -332,6 +491,99 @@ final class LogicRuntimeTest {
         logic.queue(0, "never", null, "Kill", null, null, null);
         seconds(logic, 0.05);
         assertEquals(hidden | notSolid, logic.findFirst("never", null, null, null) == null ? hidden | notSolid : -1);
+    }
+
+    /** An {@code .s2anim} of one bone and four sequences: idle, open (one second), spin (looping, half a second), press (half a second). */
+    private static byte[] animationBytes() {
+        java.nio.ByteBuffer out = java.nio.ByteBuffer.allocate(4096).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+        out.put(new byte[] {'S', '2', 'A', 'N', 'I', 'M', 0, 0}).putInt(1).putInt(1).putInt(0).putInt(4).putInt(0);
+        out.putInt(-1).putFloat(0).putFloat(0).putFloat(0).putShort((short) 0).putShort((short) 0).putShort((short) 0).putShort((short) 32767);
+        float[] identity = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
+        for (float v : identity) out.putFloat(v);
+        Object[][] sequences = {{"idle", "", 0, 0f, 1}, {"open", "", 0, 1f, 2}, {"spin", "", 1, 2f, 2}, {"press", "ACT_PRESS", 0, 2f, 1}};
+        for (Object[] sequence : sequences) {
+            for (int name = 0; name < 2; name++) {
+                byte[] bytes = ((String) sequence[name]).getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                out.putShort((short) bytes.length).put(bytes);
+            }
+            out.putInt(1).putInt((Integer) sequence[2]).putFloat(0.2f).putFloat(0.2f).putInt(0).putInt(0).putInt(0).putFloat((Float) sequence[3]);
+            out.putFloat(1).putInt((Integer) sequence[4]);
+            int frames = (Integer) sequence[4];
+            out.put((byte) 0).put((byte) (frames > 1 ? 1 : 0));
+            out.putFloat(0).putFloat(0).putFloat(0);
+            for (int frame = 0; frame < (frames > 1 ? frames : 1); frame++)
+                out.putShort((short) 0).putShort(frame == 0 ? 0 : (short) 23170).putShort((short) 0).putShort(frame == 0 ? (short) 32767 : (short) 23170);
+        }
+        return java.util.Arrays.copyOf(out.array(), out.position());
+    }
+
+    /** {@link #run} with entity 1 a logic prop whose model plays {@link #animationBytes}. */
+    private static MapLogic runAnimated(LogicTable.Entity prop, LogicTable.Entity... others) throws Exception {
+        List<LogicTable.Entity> list = new ArrayList<>(List.of(entity("worldspawn"), prop));
+        list.addAll(List.of(others));
+        LogicTable table = new LogicTable(new double[]{0, 0, 0}, list, List.of(), List.of(), Map.of());
+        var animation = dev.theredja.src2mc.bundle.AnimationAsset.decode(animationBytes(), 0);
+        var model = new dev.theredja.src2mc.bundle.BundleModel("a".repeat(64), "models/door.mdl", new int[] {0}, null, null,
+            dev.theredja.src2mc.bundle.BundleModel.WHITE, "b".repeat(64), animation);
+        var props = new dev.theredja.src2mc.bundle.LogicPropTable(List.of(new dev.theredja.src2mc.bundle.LogicPropTable.Prop(
+            1, "c".repeat(64), -1, new int[] {0}, 0, false, null, 0, List.of())));
+        BundleMap map = new BundleMap("m", "m.bsp", new int[]{0, 0, 0}, new int[]{15, 15, 15}, new int[]{0, 0, 0},
+            List.of(), List.of(model), List.of(), false, new SurfaceTable(List.of(), Map.of()), java.util.Set.of(), null, null, null, null, null,
+            table, null, props);
+        MapLogic logic = new MapLogic(PLACEMENT, map);
+        logic.spawn(MapLogic.LoadType.NEW_GAME);
+        return logic;
+    }
+
+    /**
+     * CDynamicProp's sequences: the DefaultAnim plays from spawn; SetAnimation goes to a sequence
+     * by label or activity, fires OnAnimationBegun, thinks every 0.1 s and fires OnAnimationDone
+     * on the first think after the cycle reached its end, then starts the default again. The
+     * clients get the start, not every think; the collision pose is where a sequence settles.
+     */
+    @Test void aDynamicPropPlaysItsSequencesAsCDynamicPropDoes() throws Exception {
+        MapLogic logic = runAnimated(entity("prop_dynamic", "targetname", "door", "DefaultAnim", "spin",
+                "OnAnimationBegun", "begun,Add,1,0,-1", "OnAnimationDone", "done,Add,1,0,-1"),
+            entity("math_counter", "targetname", "begun"), entity("math_counter", "targetname", "done"));
+        LogicEntity door = logic.entity(1);
+        var spawned = door.propState();
+        assertEquals(2, spawned.sequence(), "the default plays from spawn");
+        assertEquals(1f, spawned.rate());
+        assertEquals(2, spawned.pose(), "a looping sequence's pose is where it starts");
+        seconds(logic, 0.3);
+        assertEquals(spawned, door.propState(), "thinks advance the cycle without telling the clients");
+        logic.queue(0, "door", null, "SetAnimation", "OPEN", null, null);
+        seconds(logic, 0.05);
+        var opening = door.propState();
+        assertEquals(1, opening.sequence());
+        assertEquals(0f, opening.cycle());
+        assertTrue(opening.parity() > spawned.parity());
+        assertEquals(2, opening.pose(), "the collision stays until the door has opened");
+        assertTrue(state(logic, "begun").startsWith("2 "), "begun at spawn and on SetAnimation");
+        seconds(logic, 1.0);
+        assertTrue(state(logic, "done").startsWith("0 "), "not done before the cycle reached its end");
+        seconds(logic, 0.25);
+        assertTrue(state(logic, "done").startsWith("1 "), "done on the think after the end");
+        assertEquals(2, door.propState().sequence(), "and the default starts again");
+        assertTrue(state(logic, "begun").startsWith("3 "));
+
+        // By activity; a name the model lacks leaves it on sequence 0, still.
+        logic.queue(0, "door", null, "SetDefaultAnimation", "", null, null);
+        logic.queue(0, "door", null, "SetAnimation", "act_press", null, null);
+        seconds(logic, 0.05);
+        assertEquals(3, door.propState().sequence());
+        seconds(logic, 0.8);
+        assertEquals(0f, door.propState().rate(), "a prop that stopped thinking does not advance");
+        assertEquals(3, door.propState().pose());
+        logic.queue(0, "door", null, "SetAnimation", "nothing", null, null);
+        seconds(logic, 0.05);
+        assertEquals(0, door.propState().sequence());
+
+        CompoundTag saved = logic.save();
+        MapLogic loaded = runAnimated(entity("prop_dynamic", "targetname", "door", "DefaultAnim", "spin"),
+            entity("math_counter", "targetname", "begun"), entity("math_counter", "targetname", "done"));
+        assertTrue(loaded.load(saved));
+        assertEquals(door.propState(), loaded.entity(1).propState(), "the animation survives a save");
     }
 
     /**
@@ -557,6 +809,17 @@ final class LogicRuntimeTest {
                 }
             }
             System.out.println(map.mapId() + ": started " + started2 + " trains and rotators");
+            // point_template copies: alive, slots used, and those drawn by a mount.
+            int copies = 0;
+            java.util.Map<String, Integer> byClass = new java.util.TreeMap<>();
+            for (int i = 0; i < logic.slots(); i++) {
+                LogicEntity entity = logic.entity(i);
+                if (entity.removed || !logic.isCopy(entity)) continue;
+                copies++;
+                byClass.merge(entity.classname, 1, Integer::sum);
+            }
+            System.out.println(map.mapId() + ": " + copies + " template copies alive in " + logic.slots() + " slots, " + logic.mounts().size()
+                + " mounted " + byClass);
             // Every logic prop names a model in each skin, and its state is one the client can draw.
             if (map.logicProps() != null) {
                 int changed = 0;
@@ -569,6 +832,31 @@ final class LogicRuntimeTest {
                         System.out.println("  " + entity.describe() + ": " + dev.theredja.src2mc.world.PropStates.initial(map, prop) + " -> " + state);
                 }
                 System.out.println(map.mapId() + ": " + map.logicProps().props().size() + " logic props, " + changed + " changed by the logic");
+                // Every animated prop: its state names a sequence of its model, and every sequence
+                // with frames poses the skeleton somewhere real.
+                int animated = 0, playing = 0, poses = 0;
+                java.util.Set<dev.theredja.src2mc.bundle.AnimationAsset> checked = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+                for (var prop : map.logicProps().props()) {
+                    var asset = map.models().get(prop.model(0)).animation();
+                    if (asset == null) continue;
+                    animated++;
+                    var state = logic.entity(prop.entity()).propState();
+                    assertTrue(state.sequence() >= 0 && state.sequence() < asset.sequences().size(), "sequence of " + prop.entity());
+                    if (state.rate() != 0 || state.sequence() != prop.sequence()) playing++;
+                    if (prop.collision() != null) assertTrue(dev.theredja.src2mc.world.PropStates.collision(prop, state) != null);
+                    if (!checked.add(asset)) continue;
+                    float[] positions = new float[asset.boneCount() * 3], rotations = new float[asset.boneCount() * 4], skin = new float[asset.boneCount() * 12];
+                    for (int s = 0; s < asset.sequences().size(); s++) {
+                        if (asset.sequence(s).frames() == 0) continue;
+                        for (float cycle : new float[] {0, 0.5f, 1}) {
+                            asset.localPose(s, cycle, positions, rotations);
+                            asset.skinning(positions, rotations, skin);
+                            for (float v : skin) assertTrue(Float.isFinite(v) && Math.abs(v) < 1e5, map.mapId() + " model " + prop.model(0) + " sequence " + s);
+                            poses++;
+                        }
+                    }
+                }
+                System.out.println(map.mapId() + ": " + animated + " animated props, " + playing + " playing or moved on, " + poses + " poses checked");
             }
             // Every scene, started once: each speak event must reach the clients as a voice line.
             int expected = 0, voices = 0;

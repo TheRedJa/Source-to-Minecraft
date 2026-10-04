@@ -30,11 +30,12 @@ final class LogicEntities {
             case "logic_timer" -> new Timer(map, index, entity);
             case "filter_activator_name", "filter_activator_class", "filter_multi" -> new Filter(map, index, entity);
             case "func_instance_io_proxy" -> new InstanceProxy(map, index, entity);
+            case "point_template" -> new Templates.PointTemplate(map, index, entity);
             case "trigger_once", "trigger_multiple" -> new Triggers.Trigger(map, index, entity);
             case "trigger_changelevel" -> new Triggers.ChangeLevel(map, index, entity);
             case "func_button", "func_rot_button", "momentary_rot_button" -> new Movers.Button(map, index, entity);
             case "func_brush" -> new Movers.Brush(map, index, entity);
-            case "prop_dynamic", "prop_dynamic_override", "prop_dynamic_ornament" -> new Movers.DynamicProp(map, index, entity);
+            case "prop_dynamic", "prop_dynamic_override", "prop_dynamic_ornament" -> new DynamicProp(map, index, entity);
             case "func_tracktrain" -> new Trains.TrackTrain(map, index, entity);
             case "path_track" -> new Trains.PathTrack(map, index, entity);
             case "func_rotating" -> new Trains.Rotating(map, index, entity);

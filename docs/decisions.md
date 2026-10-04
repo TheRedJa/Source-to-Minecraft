@@ -602,8 +602,8 @@ props some input changes (format section 18) and the mod keeps those apart.
   the lump's diffuse modulation, read for versions 7 to 9 only, the layout the
   test maps were checked against (Portal 2's gel tubes are orange and blue).
   The tint is part of the model reference, so placement records are unchanged.
-- **Not yet.** `SetAnimation` (skeletal animation), `Alpha`/`renderamt`, and
-  `trigger_remove` taking a carried prop.
+- **Not yet.** `Alpha`/`renderamt`, and `trigger_remove` taking a carried
+  prop. Skeletal animation came with D24.
 
 ## D23 — Texts, fades and shakes follow Source's client code
 
@@ -647,4 +647,158 @@ player" being every player inside the map), and the client follows
   Source's view effects; `/src2mc_screen clear` does it by hand.
 - **Not yet.** `env_fade`'s `FadeReverse` (Portal 2, not used by the test
   maps), `env_hudhint`, `env_instructor_hint`, `point_clientcommand`.
+
+## D24 — Props play their sequences as Source's bone setup and CDynamicProp do
+
+A `prop_dynamic` the map tells to `SetAnimation` — a button pressing in, a
+lever, a door sliding open, a clock, a windmill — moves its bones along one of
+its model's sequences; 304 such props across the ten test maps (furnace 52,
+metro 85). The converter writes each animated model's skeleton and sequences
+(format section 19) next to its mesh, the server plays them by
+`CDynamicProp`'s rules, and the client poses the mesh.
+
+- **Reading.** `vmdl` panics on animation kept in an `.ani` file, reads the
+  value streams unsigned and stops at frame 255, so the converter reads the
+  skeleton and animation itself, line by line after the 2013 SDK's
+  `bone_setup.cpp` (`CalcAnimation`, `CalcBoneQuaternion`, `CalcBonePosition`,
+  `ExtractAnimValue`) and `studio.cpp` (`pAnim`, sections, animation blocks).
+  Every animated model of the test maps reads. Its own bone weights come from
+  the `.vvd` as stored (`vmdl` divides them by the bone count).
+- **Which sequences.** All keep their name and timing, so `LookupSequence`
+  (label, then activity with a weighted pick) finds what Source would; only
+  those the map can reach carry frames: sequence 0, every `SetAnimation` and
+  `SetDefaultAnimation` parameter and `DefaultAnim`, the idle ones of a random
+  animator, and a transition graph's sequences. escape_02 adds 13 MB
+  uncompressed (8 MB in the bundle), furnace 0.2 MB.
+- **Server.** `DynamicProp` follows `props.cpp`: `PropSetAnim`,
+  `PropSetSequence` through `GotoSequence`'s transition graph,
+  `FinishSetSequence`, `ResetSequence`, `AnimThink` every 0.1 s with
+  `StudioFrameAdvance` (0.2 s at most per advance), `OnAnimationBegun`,
+  `OnAnimationDone` on the first think after the cycle reaches its end, then
+  the `DefaultAnim` again, and the random animator's idle picks (with
+  Source's doubled first think time). `SetPlaybackRate` and `SetCycle` are
+  `CBaseAnimating`'s. A one-frame sequence never finishes, as in Source.
+- **Clients.** The state carries the sequence, the cycle at a map time and the
+  rate, sent when Source would make the cycle jump, not every think; each
+  client advances it on its own clock, synced to the map's with every state,
+  as Source's client interpolates the cycle. A sequence change fades the old
+  one out over `min(old fade-out, new fade-in)` with `C_AnimationLayer`'s
+  spline (`CSequenceTransitioner`), unless the new one snaps.
+- **Drawing.** A triangle whose three corners follow one bone alone is drawn
+  in that bone's buffer with the bone's transform, so posing costs a matrix;
+  only triangles several bones pull are skinned on the CPU, by their corners
+  and each point by its corners as the studio renderer does, and uploaded
+  again when the pose changes. Normals stay model-space and the shading
+  lights turn back per buffer, as for movers. `/src2mc_anim status|draw`.
+- **Still dynamic props** are exported in sequence 0's first frame, which
+  `CDynamicProp` keeps when nothing animates it, rather than the reference
+  pose (user, 2026-10-04: yes); 7 models of the test maps differ, up to 136
+  units.
+- **Collision follows the pose** of every animated prop: the converter writes
+  the collision of each pose a reachable sequence leaves the prop in (its last
+  frame, or its first for one that loops), and the mod switches to it once the
+  sequence has played; a door blocks until open and frees once shut. Source
+  only moves the collision of a model with several physics solids (bone
+  followers); single-solid doors such as furnace's `cellardoor1` are opened
+  there by an invisible clip brush. Props collide here as their drawn mesh
+  and clip brushes are left out, so following the pose is what reproduces
+  that (user, 2026-10-04: all animated props, "but later i would like to
+  switch to use .phy full for collision"). Revisit with `.phy` collision.
+  A prop riding a mover keeps its own collision in the mover's cells the same
+  way (logic props version 3), so testchmb_a_00's elevator doors stop
+  blocking once open; it also frees a riding prop the logic hides or makes
+  not solid, which stayed merged in its mover before.
+- **Relighting a moving mover** sends only new light bytes: the buffer's
+  bytes are kept after the first upload, a worker writes each vertex's light
+  into them and the render thread hands them to `glBufferSubData`. Building
+  the whole buffer again on the render thread cost sp_a2_bts4's conveyors
+  (four movers with hundreds of thousands of vertices of debris and belt
+  modules) a spike of up to 96 ms every few frames.
+- **Not done.** Include models (none in the test maps), IK rules and locks,
+  procedural bones (metro's `switch_010_key_anim`), local hierarchy, auto
+  layers, animation events (sounds and effects a sequence triggers), pose
+  parameters other than at spawn, bone-attached children (`parentname`
+  with an attachment rides the prop's origin).
+
+## D25 — point_template copies entities at runtime, as Source does
+
+sp_a2_bts4's conveyors loop through `point_template` `ForceSpawn`: each belt
+train that passes a node near the start makes a new train and belt module at
+the start, a timer drops a random piece of turret debris at a fixed spot, a
+`trigger_once` that lets everything through (spawnflag 64) parents it to the
+train touching it (`SetParent !activator`), and the end node kills the train
+and what rides it. Without templates the conveyors ran once and stopped (user,
+2026-10-04: "they should repeat and never stop"; chose the full behaviour,
+debris included).
+
+- **Templates** follow `MapEntity_ParseAllEntities`, `point_template.cpp` and
+  `templateentities.cpp`: each template in lump order takes what its
+  `TemplateNN` name out of the map before anything spawns (spawnflag 1 keeps
+  them; a later template cannot find what an earlier one took), and
+  `ForceSpawn` makes copies at the compiled places (templates here do not
+  move), spawns them, links their parents, activates them and fires
+  `OnEntitySpawned`. Name fixup (`Templates_ReconnectIOForGroup`, not with
+  spawnflag 2) appends `&NNNN` to a keyvalue up to its first comma or an
+  output target that names a group member, and to that member's name; the
+  instance counter starts after one count per template, as precaching does.
+  Output targets are compared on their own, which also covers Portal 2's
+  ESC-separated outputs.
+- **Runtime entities.** A copy takes a slot after the lump's
+  (`LogicEntity.source` is the record it was made from); a removed copy's
+  slot goes to a copy made a second or more later, so a conveyor running for
+  hours does not grow the entity list. Taken at once, the end node's kill and
+  the start's new train shared a slot: the sub-level jumped from the end to
+  the start, solid, carrying the player, and slots taken by another kind of
+  entity moved stale sub-levels with it (user test, 2026-10-04). Copies are saved by slot, record, template and instance
+  and made again on load.
+- **Parenting** is a rigid move: world = parent . hold . own. The map's links
+  hold nothing; `SetParent`/`ClearParent` and a copy's `parentname` at spawn
+  keep the entity's world place. Removing a parent removes its children.
+- **Movers.** A sub-level whose entity is gone is let go at once (entity -1,
+  hidden and passable, left where it is) and handed to a new entity of the
+  same bundle mover a second later at the earliest, once whoever stood on it
+  has fallen off; else a copy gets a new one. Handed over, it stays hidden and
+  passable 3 ticks while Sable carries it to its new place. A copy's sub-level draws no riders baked in; they are copies too.
+- **Mounted props.** A copy of a logic prop, or one re-parented at runtime,
+  is sent to the clients as a mount (its record, the mover entity it rides
+  or none, its move relative to that mover's) and drawn by the animated prop
+  renderer, still models as one rigid bone, with tessellated geometry shared
+  per model and tint, cut on a worker the first time. Their collision is not
+  done yet. A copy or a prop riding a mover is lit on a worker against a
+  copy of the world, and relit by sending only its light bytes, as movers
+  are: lighting debris on the render thread cost up to 80 ms and cutting it
+  up to 47 ms (user test, 2026-10-04). Hidden movers are not relit. A prop
+  on a hidden sub-level is not lit, and one that moved 2 blocks since it was
+  lit is lit again: belt modules lit on a reused sub-level before Sable had
+  carried it from the belt's end kept that light along the belt, every few
+  modules glowing (user test, 2026-10-04).
+- **Triggers** are touched by solid movers as well as players, by the
+  mover's moved brush box, when the trigger lets everything through
+  (`FinishPushers` touches triggers for every pusher). Solid props riding a
+  mover (`PhysicsRelinkChildren`) do not touch them yet.
+- **Invisible mover brushes collide.** The conveyor trains are a 2-unit
+  `tools/toolsplayerclip` plate with solid contents under a belt prop that
+  does not collide (`solid 0`); the converter dropped brushes with no drawn
+  side, so the belts had no collision (user, 2026-10-04: "makes this map
+  unplayable"). A mover now collides with such brushes when it is exported
+  anyway; an entity of nothing else stays no mover, or INFRA's invisible
+  button volumes would be 50 to 100 more sub-levels per map. World brushes of
+  that kind (28 to 125 per test map) collide too (user, 2026-10-04: "whats
+  closest to source engine"): solid contents or player clips, every side
+  undrawn, cut to the cells the rest of the map fills, so clips far in the
+  void do not widen a map (sp_a1_wakeup would have grown by 161 blocks). Map
+  bounds are unchanged on all ten test maps; collision tables grew 1 to 7 %.
+  Monster clips stop only NPCs and stay out; brush entities other than movers
+  (triggers are invisible and solid too) are not affected.
+- **Slots handed out twice.** Freed slots were kept in a TreeMap and taken by
+  removing the entry being iterated; TreeMap reuses a deleted node for its
+  successor, so the slot returned was not the one removed and a slot could go
+  to two entities. On sp_a2_bts4 that put trains, belt modules and triggers in
+  one slot after about a minute: debris and belts vanished, sub-levels followed
+  the wrong entity, and both conveyors died within two minutes (user test,
+  2026-10-04). A 5-minute simulation now holds about 17 and 22 trains with
+  every module and debris on them.
+- **Not done.** A moving point_template, copies of usable entities (their
+  use boxes are the client's lump records), ambient sounds in templates,
+  `SetParentAttachment`, and collision of mounted props.
 

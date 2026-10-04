@@ -19,7 +19,16 @@ use std::sync::Arc;
 
 /// One material's triangles and the texture coordinates of their corners, as
 /// they are gathered before becoming a [`Part`].
-type Geometry = (Vec<[Vec3; 3]>, Vec<[Vec3; 3]>, Vec<[[f64; 2]; 3]>);
+type Geometry = (
+    Vec<[Vec3; 3]>,
+    Vec<[Vec3; 3]>,
+    Vec<[[f64; 2]; 3]>,
+    Vec<[Weights; 3]>,
+);
+
+/// A vertex's bones, as `mstudioboneweight_t` stores them: up to three bone
+/// indices and their weights, which sum to one; unused slots weigh nothing.
+pub type Weights = [(u8, f32); 3];
 
 /// One model's triangles that share a material.
 #[derive(Debug, Clone)]
@@ -48,6 +57,8 @@ pub struct Part {
     /// several on anything large: `props_wasteland/rockcliff02a` stretches one
     /// sheet over 39 blocks of cliff.
     pub uv_per_unit: f64,
+    /// Each corner's bones, parallel to `triangles`.
+    pub weights: Vec<[Weights; 3]>,
 }
 
 /// A studio model flattened to what voxelization needs.
@@ -63,6 +74,9 @@ pub struct Model {
     pub skins: Vec<Vec<String>>,
     /// The model's `$surfaceprop`, lowercased; what it sounds like to walk on.
     pub surface_prop: Option<String>,
+    /// The rotation `parts` were turned by from the model's own space, row
+    /// major: animation, which works in the model's own space, undoes it.
+    pub root: [[f64; 3]; 3],
 }
 
 impl Model {
@@ -116,6 +130,21 @@ fn quiet_panics() {
             }
         }));
     });
+}
+
+/// A vertex's bones as the `.vvd` stores them. `vmdl` divides each weight by
+/// the bone count, which the weights already sum to one without.
+fn bone_weights(weights: &vmdl::vvd::BoneWeights) -> Weights {
+    let raw: &[u8] = bytemuck::bytes_of(weights);
+    let weight = |i: usize| f32::from_le_bytes(raw[i * 4..i * 4 + 4].try_into().unwrap());
+    let count = usize::from(raw[15]).min(3);
+    std::array::from_fn(|i| {
+        if i < count {
+            (raw[12 + i], weight(i))
+        } else {
+            (0, 0.0)
+        }
+    })
 }
 
 /// The index buffer has several possible names; Source picks by renderer, and
@@ -248,7 +277,7 @@ impl<'a> Models<'a> {
                     self.material_of(&model, texture)
                 })
                 .collect();
-            let (triangles, normals, uvs) = parts.entry(materials).or_default();
+            let (triangles, normals, uvs, weights) = parts.entry(materials).or_default();
             for strip in mesh.vertex_strip_indices() {
                 let indices: Vec<usize> = strip.collect();
                 for tri in indices.chunks_exact(3) {
@@ -265,6 +294,7 @@ impl<'a> Models<'a> {
                     uvs.push([a, b, c].map(|v| -> [f64; 2] {
                         std::array::from_fn(|axis| f64::from(v.texture_coordinates[axis]))
                     }));
+                    weights.push([a, b, c].map(|v| bone_weights(&v.bone_weights)));
                 }
             }
         }
@@ -288,17 +318,22 @@ impl<'a> Models<'a> {
         Model {
             parts: parts
                 .into_iter()
-                .map(|(mut materials, (triangles, normals, uvs))| Part {
+                .map(|(mut materials, (triangles, normals, uvs, weights))| Part {
                     uv_per_unit: uv_rate(&triangles, &uvs),
                     triangles,
                     normals,
                     uvs,
+                    weights,
                     material: materials.swap_remove(0),
                 })
                 .collect(),
             bounds,
             skins,
             surface_prop,
+            // cgmath is column major.
+            root: std::array::from_fn(|row| {
+                std::array::from_fn(|column| f64::from(root[column][row]))
+            }),
         }
     }
 

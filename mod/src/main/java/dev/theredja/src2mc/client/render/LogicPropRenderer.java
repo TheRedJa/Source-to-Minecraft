@@ -132,6 +132,8 @@ public final class LogicPropRenderer {
                 if (prop.stableId() == null) continue;
                 if (!PropRenderer.rootActive(placement, prop.stableId())) continue;
                 PropStates.State state = PropStates.effective(true, stateKey, map, prop);
+                // An animated one is posed by AnimatedPropRenderer, and so is one parented anew.
+                if (AnimatedPropRenderer.animated(map, prop, state) || dev.theredja.src2mc.world.PropMounts.mounted(stateKey, prop.entity())) continue;
                 if (state.hidden()) { hidden++; continue; }
                 if (placed == null) {
                     placed = new HashMap<>();

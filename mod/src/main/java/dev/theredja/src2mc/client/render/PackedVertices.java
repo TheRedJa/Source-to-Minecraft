@@ -51,12 +51,36 @@ final class PackedVertices {
 
     int vertices() { return vertices; }
 
+    /** An independent copy, lights and all; indexing is not copied. */
+    PackedVertices copy() {
+        PackedVertices copy = new PackedVertices();
+        copy.data = Arrays.copyOf(data, vertices * FLOATS);
+        copy.light = Arrays.copyOf(light, vertices);
+        copy.color = Arrays.copyOf(color, vertices);
+        copy.vertices = vertices;
+        copy.minX = minX; copy.minY = minY; copy.minZ = minZ;
+        copy.maxX = maxX; copy.maxY = maxY; copy.maxZ = maxZ;
+        return copy;
+    }
+
     float x(int vertex) { return data[vertex * FLOATS]; }
     float y(int vertex) { return data[vertex * FLOATS + 1]; }
     float z(int vertex) { return data[vertex * FLOATS + 2]; }
     float nx(int vertex) { return data[vertex * FLOATS + 5]; }
     float ny(int vertex) { return data[vertex * FLOATS + 6]; }
     float nz(int vertex) { return data[vertex * FLOATS + 7]; }
+
+    int light(int vertex) { return light[vertex]; }
+
+    float u(int vertex) { return data[vertex * FLOATS + 3]; }
+    float v(int vertex) { return data[vertex * FLOATS + 4]; }
+
+    /** Moves one vertex and turns its normal, for a mesh posed again; uploaded unindexed afterwards. */
+    void set(int vertex, float x, float y, float z, float nx, float ny, float nz) {
+        int at = vertex * FLOATS;
+        data[at] = x; data[at + 1] = y; data[at + 2] = z;
+        data[at + 5] = nx; data[at + 6] = ny; data[at + 7] = nz;
+    }
 
     /** Replaces one vertex's light; {@link #index} again before uploading indexed. */
     void setLight(int vertex, int packedLight) { light[vertex] = packedLight; }
@@ -68,7 +92,66 @@ final class PackedVertices {
         return vertices == 0 ? null : new double[] {minX, minY, minZ, maxX, maxY, maxZ};
     }
 
-    record Uploaded(VertexBuffer buffer, int vertexSize, long bytes) {}
+    /**
+     * {@code kept} holds a copy of the bytes that went up when the upload was asked to keep them,
+     * null otherwise; see {@link LightPatch}.
+     */
+    record Uploaded(VertexBuffer buffer, int vertexSize, long bytes, LightPatch kept) {}
+
+    /**
+     * The vertex bytes of one upload, kept to light it again without building it again: a
+     * worker writes each vertex's new light into them ({@link #patchLight}), the render thread
+     * sends them up in place ({@link #send}). The format, the indices and every other byte stay;
+     * a vertex's light follows from its position and normal, so the distinct vertices of an
+     * indexed upload stay distinct. Native memory; {@link #close} frees it.
+     */
+    static final class LightPatch implements AutoCloseable {
+        private java.nio.ByteBuffer bytes;
+        private final int stride, lightOffset;
+        /** Each uploaded vertex's own vertex; null when they are the same. */
+        private final int[] source;
+
+        private LightPatch(java.nio.ByteBuffer bytes, int stride, int lightOffset, int[] source) {
+            this.bytes = bytes; this.stride = stride; this.lightOffset = lightOffset; this.source = source;
+        }
+
+        /** Sends the patched bytes into {@code buffer}, which they were uploaded to; render thread only. */
+        void send(VertexBuffer buffer) {
+            if (bytes == null || buffer.isInvalid()) return;
+            com.mojang.blaze3d.platform.GlStateManager._glBindBuffer(org.lwjgl.opengl.GL15.GL_ARRAY_BUFFER, buffer.vertexBufferId);
+            org.lwjgl.opengl.GL15.glBufferSubData(org.lwjgl.opengl.GL15.GL_ARRAY_BUFFER, 0, bytes);
+            com.mojang.blaze3d.platform.GlStateManager._glBindBuffer(org.lwjgl.opengl.GL15.GL_ARRAY_BUFFER, 0);
+        }
+
+        long bytes() { return bytes == null ? 0 : bytes.remaining(); }
+
+        @Override public void close() {
+            if (bytes != null) MemoryUtil.memFree(bytes);
+            bytes = null;
+        }
+    }
+
+    /** Writes every vertex's light, as it is now, into the bytes of its upload; any thread. */
+    void patchLight(LightPatch patch) {
+        if (patch.bytes == null) return;
+        long base = MemoryUtil.memAddress(patch.bytes);
+        int count = patch.bytes.remaining() / patch.stride;
+        for (int i = 0; i < count; i++) {
+            int packed = light[patch.source == null ? i : patch.source[i]];
+            long at = base + (long) i * patch.stride + patch.lightOffset;
+            // BufferBuilder.setLight: block light, then sky light, a short each.
+            MemoryUtil.memPutShort(at, (short) (packed & 0xFFFF));
+            MemoryUtil.memPutShort(at + 2, (short) (packed >> 16 & 0xFFFF));
+        }
+    }
+
+    private LightPatch keep(VertexFormat format, java.nio.ByteBuffer uploaded, int[] source) {
+        if (!format.contains(com.mojang.blaze3d.vertex.VertexFormatElement.UV2)) return null;
+        java.nio.ByteBuffer copy = MemoryUtil.memAlloc(uploaded.remaining());
+        MemoryUtil.memCopy(MemoryUtil.memAddress(uploaded), MemoryUtil.memAddress(copy), uploaded.remaining());
+        return new LightPatch(copy, format.getVertexSize(), format.getOffset(com.mojang.blaze3d.vertex.VertexFormatElement.UV2),
+            source == null ? null : source.clone());
+    }
 
     /**
      * Finds the distinct vertices, on a worker. Triangles are written three fresh vertices each,
@@ -126,7 +209,10 @@ final class PackedVertices {
      * because Iris fills its extra attributes per triangle as vertices are added; each distinct
      * vertex then keeps the bytes of its first triangle.
      */
-    Uploaded upload(boolean neutralIds, boolean indexed) {
+    Uploaded upload(boolean neutralIds, boolean indexed) { return upload(neutralIds, indexed, false); }
+
+    /** As {@link #upload(boolean, boolean)}; with {@code keep}, its bytes are kept to be lit again. */
+    Uploaded upload(boolean neutralIds, boolean indexed, boolean keep) {
         int capacity = (int) Math.min(Integer.MAX_VALUE, Math.max(4096L, (long) vertices * 36));
         try (var bytes = new ByteBufferBuilder(capacity)) {
             int[] previousIds = neutralIds ? IrisCompat.setCapturedIds(0, 0, 0) : null;
@@ -144,16 +230,19 @@ final class PackedVertices {
                     soupVertices += vertices;
                     var buffer = new VertexBuffer(VertexBuffer.Usage.STATIC);
                     if (!indexed || firstOf == null) {
+                        LightPatch kept = keep ? keep(format, mesh.vertexBuffer(), null) : null;
                         buffer.bind(); buffer.upload(mesh); VertexBuffer.unbind();
                         uploadedVertices += vertices;
-                        return new Uploaded(buffer, stride, (long) vertices * stride);
+                        return new Uploaded(buffer, stride, (long) vertices * stride, kept);
                     }
                     int distinct = firstOf.length;
                     VertexFormat.IndexType indexType = VertexFormat.IndexType.least(distinct);
+                    LightPatch kept;
                     try (var compact = new ByteBufferBuilder(distinct * stride); var indices = new ByteBufferBuilder(vertices * indexType.bytes)) {
                         long source = MemoryUtil.memAddress(mesh.vertexBuffer());
                         long target = compact.reserve(distinct * stride);
                         for (int i = 0; i < distinct; i++) MemoryUtil.memCopy(source + (long) firstOf[i] * stride, target + (long) i * stride, stride);
+                        kept = keep ? keep(format, MemoryUtil.memByteBuffer(target, distinct * stride), firstOf) : null;
                         long index = indices.reserve(vertices * indexType.bytes);
                         for (int i = 0; i < vertices; i++) {
                             if (indexType == VertexFormat.IndexType.SHORT) MemoryUtil.memPutShort(index + 2L * i, (short) remap[i]);
@@ -167,7 +256,7 @@ final class PackedVertices {
                         VertexBuffer.unbind();
                     }
                     uploadedVertices += distinct;
-                    return new Uploaded(buffer, stride, (long) distinct * stride + (long) vertices * indexType.bytes);
+                    return new Uploaded(buffer, stride, (long) distinct * stride + (long) vertices * indexType.bytes, kept);
                 }
             } finally {
                 IrisCompat.restoreCapturedIds(previousIds);

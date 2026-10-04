@@ -1018,6 +1018,7 @@ name = "src2mc"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "bytemuck",
  "cgmath",
  "clap",
  "fastnbt",

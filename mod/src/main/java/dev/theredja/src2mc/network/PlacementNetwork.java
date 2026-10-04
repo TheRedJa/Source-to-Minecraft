@@ -23,7 +23,9 @@ public final class PlacementNetwork {
         // "6": logic prop state (shown, solid, skin, tint).
         // "7": screen effects (game_text, env_fade, env_shake).
         // "8": shakes carry the map's clock; screen clear payload.
-        var registrar = event.registrar("8");
+        // "9": prop states carry an animated prop's sequence and the map's clock.
+        // "10": movers name the bundle mover they carry apart from their entity; prop mounts.
+        var registrar = event.registrar("10");
         registrar.playToClient(PlacementSyncPayload.TYPE, PlacementSyncPayload.STREAM_CODEC,
             (payload, context) -> {
                 PlacementIndex index = new PlacementIndex();

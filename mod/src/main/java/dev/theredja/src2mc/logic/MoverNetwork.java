@@ -32,6 +32,7 @@ public final class MoverNetwork {
                     buffer.writeUtf(instance.campaignId(), 256);
                     buffer.writeUtf(instance.mapId(), 256);
                     buffer.writeVarInt(instance.entity());
+                    buffer.writeVarInt(instance.source());
                     buffer.writeUUID(instance.subLevel());
                 }
             },
@@ -42,7 +43,7 @@ public final class MoverNetwork {
                 List<MoverRegistry.Instance> instances = new ArrayList<>(count);
                 for (int i = 0; i < count; i++) {
                     instances.add(new MoverRegistry.Instance(buffer.readLong(), buffer.readUtf(256), buffer.readUtf(256),
-                        buffer.readVarInt(), buffer.readUUID()));
+                        buffer.readVarInt(), buffer.readVarInt(), buffer.readUUID()));
                 }
                 return new SyncPayload(dimension, instances);
             });

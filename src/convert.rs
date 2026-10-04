@@ -80,6 +80,10 @@ pub struct MoverGeometry {
     pub fragments: Vec<crate::voxel::fragments::Fragment>,
     /// What the mover's cells are solid as, against `grid`.
     pub collision: crate::voxel::collision::CellCollision,
+    /// Whether its only collision is of brushes no side of which is drawn:
+    /// a use volume such as INFRA's `infra_button`, or an invisible door.
+    /// Such an entity becomes a mover only when props ride it.
+    pub only_unseen: bool,
     /// Drawn faces no brush of the mover could be found behind.
     pub faces_unmatched: usize,
 }
@@ -325,6 +329,70 @@ fn models_to_convert(map: &Map, config: &Config, entities: &[EntityModel]) -> Ve
 fn is_invisible(flags: vbsp::TextureFlags) -> bool {
     use vbsp::TextureFlags as F;
     flags.intersects(F::NODRAW | F::SKIP | F::HINT | F::TRIGGER)
+}
+
+/// Whether a brush no side of which is drawn still collides with a player,
+/// as Source's does: solid contents, or a player clip. Such a brush makes no
+/// block and no mesh, so its volume joins the collision on its own, as a thin
+/// brush's does. Monster clips stop only NPCs, which Minecraft has none of.
+fn collides_unseen(solid: &Solid) -> bool {
+    const SOLID: u32 = 0x1;
+    const AREAPORTAL: u32 = 0x8000;
+    const PLAYERCLIP: u32 = 0x10000;
+    const MONSTERCLIP: u32 = 0x20000;
+    const ORIGIN: u32 = 0x100_0000;
+    let bits = solid.flags.bits();
+    bits & (SOLID | PLAYERCLIP) != 0
+        && bits & (AREAPORTAL | MONSTERCLIP | ORIGIN) == 0
+        && solid
+            .sides
+            .iter()
+            .all(|side| is_invisible(side.texture_flags))
+}
+
+/// `solid` cut down to the cells `min..=max`; `None` when it lies wholly
+/// outside them.
+fn clipped_to_cells(solid: &BlockSolid, min: IVec3, max: IVec3) -> Option<BlockSolid> {
+    let low = Vec3::new(f64::from(min[0]), f64::from(min[1]), f64::from(min[2]));
+    let high = Vec3::new(
+        f64::from(max[0] + 1),
+        f64::from(max[1] + 1),
+        f64::from(max[2] + 1),
+    );
+    let bounds = Aabb::new(
+        Vec3::new(
+            solid.bounds.min.x.max(low.x),
+            solid.bounds.min.y.max(low.y),
+            solid.bounds.min.z.max(low.z),
+        ),
+        Vec3::new(
+            solid.bounds.max.x.min(high.x),
+            solid.bounds.max.y.min(high.y),
+            solid.bounds.max.z.min(high.z),
+        ),
+    );
+    if bounds.min.x >= bounds.max.x || bounds.min.y >= bounds.max.y || bounds.min.z >= bounds.max.z
+    {
+        return None;
+    }
+    let mut planes = solid.planes.clone();
+    let mut side_of_plane = solid.side_of_plane.clone();
+    for (normal, dist) in [
+        (Vec3::new(1.0, 0.0, 0.0), high.x),
+        (Vec3::new(-1.0, 0.0, 0.0), -low.x),
+        (Vec3::new(0.0, 1.0, 0.0), high.y),
+        (Vec3::new(0.0, -1.0, 0.0), -low.y),
+        (Vec3::new(0.0, 0.0, 1.0), high.z),
+        (Vec3::new(0.0, 0.0, -1.0), -low.z),
+    ] {
+        planes.push(crate::geom::Plane::new(normal, dist));
+        side_of_plane.push(usize::MAX);
+    }
+    Some(BlockSolid {
+        planes,
+        bounds,
+        side_of_plane,
+    })
 }
 
 /// The block one brush side contributes, or `None` if it contributes nothing.
@@ -952,13 +1020,25 @@ fn mover_geometry(
         skybox,
         &[],
     );
-    let fragments = polygons
+    let fragments: Vec<crate::voxel::fragments::Fragment> = polygons
         .par_iter()
         .flat_map_iter(|polygon| crate::voxel::fragments::fragments(polygon, &grid))
         .collect();
     let block_solids: Vec<BlockSolid> = solids
         .iter()
         .filter(|solid| makes_blocks(solid, map, config, resolver))
+        .map(|solid| {
+            let origin = origins.get(&solid.model).copied().unwrap_or(Vec3::ZERO);
+            to_block_solid(solid, transform, origin)
+        })
+        .collect();
+    // A brush the mover is made of collides in Source whether or not any side
+    // is drawn: sp_a2_bts4's conveyor trains are a single 2-unit plate of
+    // `tools/toolsplayerclip` with solid contents under a belt prop that does
+    // not collide.
+    let unseen: Vec<BlockSolid> = all
+        .iter()
+        .filter(|solid| collides_unseen(solid))
         .map(|solid| {
             let origin = origins.get(&solid.model).copied().unwrap_or(Vec3::ZERO);
             to_block_solid(solid, transform, origin)
@@ -973,14 +1053,21 @@ fn mover_geometry(
             .iter()
             .filter(|(flags, _)| resolver.decide(*flags) != Decision::Skip)
             .map(|(_, block)| block)
+            .chain(&unseen)
             .collect(),
         terrain: Vec::new(),
     });
+    let only_unseen = grid.iter().next().is_none()
+        && fragments.is_empty()
+        && block_solids.is_empty()
+        && thin.is_empty()
+        && !unseen.is_empty();
     MoverGeometry {
         entity: entity.entity,
         classname: entity.classname.clone(),
         targetname: entity.targetname.clone(),
         model: entity.model,
+        only_unseen,
         grid,
         fragments,
         collision,
@@ -1528,6 +1615,19 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
     // The palette is shared and rarely written to after the first few brushes.
     let palette = Mutex::new(Palette::new());
     let skipped = std::sync::atomic::AtomicUsize::new(0);
+
+    // The world's invisible walls and player clips: in Source they block the
+    // player, here they only collide (user, 2026-10-04: "whats closest to
+    // source engine"). Brush entities are left to their own pipelines: a
+    // trigger's brushes are invisible and solid too, and never collide. They
+    // are cut to the box the rest of the map fills when collision is built:
+    // clips far out in the void would otherwise widen sp_a1_wakeup by 161
+    // blocks of nothing a player can reach.
+    let unseen_solids: Vec<BlockSolid> = solids
+        .iter()
+        .filter(|solid| solid.model == 0 && collides_unseen(solid))
+        .map(|solid| to_block_solid(solid, &transform, Vec3::ZERO))
+        .collect();
 
     // Brushes thinner than the cut-off never reach the voxel grid: filling
     // every cell they touch is what turns a 4-unit plate into a 32-unit wall.
@@ -2126,6 +2226,13 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
                 .as_ref()
                 .is_some_and(|before| before.is_solid(cell) && !grid.is_solid(cell))
         };
+        let unseen_clipped: Vec<BlockSolid> = match grid.bounds() {
+            Some((min, max)) => unseen_solids
+                .iter()
+                .filter_map(|solid| clipped_to_cells(solid, min, max))
+                .collect(),
+            None => Vec::new(),
+        };
         crate::voxel::collision::compute(&crate::voxel::collision::Sources {
             grid: &grid,
             interior: &interior,
@@ -2134,6 +2241,7 @@ pub fn convert(map: &Map, config: &Config) -> anyhow::Result<Conversion> {
                 .iter()
                 .filter(|(flags, _)| resolver.decide(*flags) != Decision::Skip)
                 .map(|(_, block)| block)
+                .chain(&unseen_clipped)
                 .collect(),
             terrain,
         })
@@ -2210,6 +2318,32 @@ mod tests {
             raw_name: name.into(),
             reflectivity: [0.2, 0.2, 0.2],
         }
+    }
+
+    /// An invisible wall reaching far into the void keeps only the part inside
+    /// the cells the map fills, and one wholly outside them is dropped.
+    #[test]
+    fn an_unseen_brush_is_cut_to_the_maps_cells() {
+        let planes = vec![
+            crate::geom::Plane::new(Vec3::new(1.0, 0.0, 0.0), 100.0),
+            crate::geom::Plane::new(Vec3::new(-1.0, 0.0, 0.0), 50.0),
+            crate::geom::Plane::new(Vec3::new(0.0, 1.0, 0.0), 2.0),
+            crate::geom::Plane::new(Vec3::new(0.0, -1.0, 0.0), 0.0),
+            crate::geom::Plane::new(Vec3::new(0.0, 0.0, 1.0), 1.0),
+            crate::geom::Plane::new(Vec3::new(0.0, 0.0, -1.0), 0.0),
+        ];
+        let wall = BlockSolid {
+            side_of_plane: (0..planes.len()).collect(),
+            planes,
+            bounds: Aabb::new(Vec3::new(-50.0, 0.0, 0.0), Vec3::new(100.0, 2.0, 1.0)),
+        };
+        let cut = clipped_to_cells(&wall, [0, 0, 0], [9, 9, 9]).expect("overlaps the cells");
+        assert_eq!(cut.bounds.min, Vec3::new(0.0, 0.0, 0.0));
+        assert_eq!(cut.bounds.max, Vec3::new(10.0, 2.0, 1.0));
+        assert!(cut.contains(Vec3::new(5.0, 1.0, 0.5)));
+        assert!(!cut.contains(Vec3::new(20.0, 1.0, 0.5)));
+        assert!(!cut.contains(Vec3::new(-5.0, 1.0, 0.5)));
+        assert!(clipped_to_cells(&wall, [200, 0, 0], [209, 9, 9]).is_none());
     }
 
     /// Fog volumes are brushes flagged `WINDOW`, because fog is translucent.

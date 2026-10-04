@@ -29,12 +29,24 @@ import net.minecraft.world.phys.shapes.VoxelShape;
  * centre is the plot's own, so neither side has to remember where the blocks went.
  */
 public final class MoverRegistry {
-    /** One mover's sub-level: the placement it belongs to by anchor, the mover by entity index. */
-    public record Instance(long anchor, String campaignId, String mapId, int entity, UUID subLevel) {}
+    /**
+     * One mover's sub-level: the placement it belongs to by anchor, the entity that moves it by
+     * slot, and the bundle mover it carries by {@code source}, the lump entity -- the same for a
+     * map's own mover, the template's entity for a copy a point_template made.
+     */
+    public record Instance(long anchor, String campaignId, String mapId, int entity, int source, UUID subLevel) {
+        public Instance(long anchor, String campaignId, String mapId, int entity, UUID subLevel) { this(anchor, campaignId, mapId, entity, entity, subLevel); }
+        /** Whether it carries a copy, which has none of the mover's riders baked in. */
+        public boolean copy() { return entity != source; }
+    }
 
-    /** An instance with its map, mover and collision shapes found; {@code initialState} is its state before the logic says otherwise. */
+    /**
+     * An instance with its map, mover and collision shapes found; {@code initialState} is its state
+     * before the logic says otherwise. {@code riders} is the collision of the logic props riding it
+     * that keep their own (format.md section 18), null for none.
+     */
     public record Resolved(Instance instance, MapPlacement placement, BundleMap map, MoverTable.Mover mover,
-                           AtomicReferenceArray<VoxelShape> shapes, int initialState) {}
+                           AtomicReferenceArray<VoxelShape> shapes, int initialState, CollisionShapes.LogicProps riders) {}
 
     /** State bits of a mover: not drawn, does not collide. Zero for one drawn and solid. */
     public static final int HIDDEN = 1, NOT_SOLID = 2;
@@ -117,11 +129,12 @@ public final class MoverRegistry {
         if (placement == null) return null;
         BundleMap map = generation.findMap(instance.campaignId(), instance.mapId()).orElse(null);
         if (map == null || map.movers() == null) return null;
-        int index2 = map.movers().indexOfEntity(instance.entity());
+        int index2 = map.movers().indexOfEntity(instance.source());
         if (index2 < 0) return null;
         MoverTable.Mover mover = map.movers().movers().get(index2);
         var shapes = new AtomicReferenceArray<VoxelShape>(mover.collision() == null ? 0 : mover.collision().shapeCount());
-        hit = new Resolved(instance, placement, map, mover, shapes, initialState(map, mover));
+        var riders = CollisionShapes.LogicProps.of(map, new PropStates.Key(level.dimension().location(), instance.anchor()), mover.entity());
+        hit = new Resolved(instance, placement, map, mover, shapes, initialState(map, mover), riders);
         resolved.put(subLevel, hit);
         return hit;
     }
@@ -132,6 +145,8 @@ public final class MoverRegistry {
      * (INFRA puts such brushes in doorways as player clips the logic never turns on), 2 always.
      */
     private static int initialState(BundleMap map, MoverTable.Mover mover) {
+        // A point_template's member is out of the map until it makes a copy.
+        if (dev.theredja.src2mc.logic.Templates.removedAtSpawn(map.logic()).get(mover.entity())) return HIDDEN | NOT_SOLID;
         if (!mover.classname().equals("func_brush") || map.logic() == null || mover.entity() >= map.logic().entities().size()) return 0;
         var entity = map.logic().entities().get(mover.entity());
         return brushState(dev.theredja.src2mc.logic.Variant.integer(entity.value("startdisabled")) != 0,
@@ -168,15 +183,19 @@ public final class MoverRegistry {
         LevelPlot plot = container.getPlot(pos.getX() >> 4, pos.getZ() >> 4);
         if (plot == null) return Shapes.empty();
         Resolved resolved = resolve(level, plot.getSubLevel().getUniqueId());
-        if (resolved == null || (state(level.isClientSide(), resolved) & NOT_SOLID) != 0 || resolved.mover().collision() == null) return Shapes.empty();
+        if (resolved == null || (state(level.isClientSide(), resolved) & NOT_SOLID) != 0) return Shapes.empty();
         BlockPos origin = plotOrigin(plot);
-        int id = resolved.mover().collision().shapeAt(pos.getX() - origin.getX(), pos.getY() - origin.getY(), pos.getZ() - origin.getZ());
-        if (id < 0) return Shapes.empty();
-        VoxelShape shape = resolved.shapes().get(id);
-        if (shape == null) {
-            shape = CollisionShapes.build(resolved.mover().collision().boxes(id));
-            if (!resolved.shapes().compareAndSet(id, null, shape)) shape = resolved.shapes().get(id);
+        int x = pos.getX() - origin.getX(), y = pos.getY() - origin.getY(), z = pos.getZ() - origin.getZ();
+        int id = resolved.mover().collision() == null ? -1 : resolved.mover().collision().shapeAt(x, y, z);
+        VoxelShape shape = Shapes.empty();
+        if (id >= 0) {
+            shape = resolved.shapes().get(id);
+            if (shape == null) {
+                shape = CollisionShapes.build(resolved.mover().collision().boxes(id));
+                if (!resolved.shapes().compareAndSet(id, null, shape)) shape = resolved.shapes().get(id);
+            }
         }
-        return shape;
+        // Riders that keep their own collision add it while they are solid, in the pose they stand in.
+        return resolved.riders() == null ? shape : resolved.riders().apply(level.isClientSide(), x, y, z, shape);
     }
 }
