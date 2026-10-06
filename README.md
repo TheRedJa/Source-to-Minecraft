@@ -21,7 +21,20 @@ the current in-game test maps.
 | **Input** | BSP v19/20/21/22, loose files or inside VPKs; in-game tested on Portal, Portal 2 and INFRA maps |
 | **Scale** | ~66k lines (Rust converter, Java mod), 600+ Rust tests, campaigns of many maps in one bundle |
 
-Not yet: VScript, breakable movers, `.phy` prop collision.
+### How it can look:
+<img width="3440" height="1440" alt="Screenshot_20261006_234201" src="https://github.com/user-attachments/assets/1858758d-abe2-4419-92bd-0215d2c37b53" />
+
+Running at 3440x1440p on an rtx 3060 with 290fps<br>
+<br>
+map: infra_c4_m2_furnace
+
+#
+
+
+
+
+
+
 
 There are two ways to get a map into Minecraft:
 
