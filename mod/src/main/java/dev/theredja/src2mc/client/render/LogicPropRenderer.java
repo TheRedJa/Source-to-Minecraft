@@ -61,6 +61,8 @@ public final class LogicPropRenderer {
         final AABB bounds;
         int light = Integer.MIN_VALUE;
         long litFrame = Long.MIN_VALUE;
+        /** The map's baked light; null for none. */
+        dev.theredja.src2mc.bundle.LightTable lightTable;
         Built(LogicPropTable.Prop prop, BundleManifest bundle, AtlasIndex atlas, int skin, int color, BlockPos origin,
               Map<PageClass, PackedVertices> meshes, AABB bounds) {
             this.prop = prop; this.bundle = bundle; this.atlas = atlas; this.skin = skin; this.color = color; this.origin = origin;
@@ -70,6 +72,11 @@ public final class LogicPropRenderer {
     }
 
     private static final Map<Key, Built> BUILT = new HashMap<>();
+    /**
+     * Each map's props by stable ID, built once per generation: rebuilt every frame it cost a
+     * 9000-entry map a frame near furnace. Keyed by identity: see BundleMap#hashCode.
+     */
+    private static final Map<BundleMap, Map<String, BundleProp>> PLACED = new java.util.IdentityHashMap<>();
     /** Builds a frame may start: each is one prop, tessellated on the render thread. */
     private static final int BUILDS_PER_FRAME = 8;
     private static final int LIGHT_CHECK_FRAMES = 20;
@@ -98,6 +105,17 @@ public final class LogicPropRenderer {
 
     @SubscribeEvent
     public static void render(RenderLevelStageEvent event) {
+        boolean timed = event.getStage() == MapSurfaceRenderer.opaqueStage() || event.getStage() == RenderLevelStageEvent.Stage.AFTER_PARTICLES;
+        GpuTimer.Phase phase = IrisCompat.renderingShadowPass() ? GpuTimer.Phase.LOGIC_PROPS_SHADOW : GpuTimer.Phase.LOGIC_PROPS;
+        if (timed) GpuTimer.begin(phase);
+        try {
+            renderStage(event);
+        } finally {
+            if (timed) GpuTimer.end(phase);
+        }
+    }
+
+    private static void renderStage(RenderLevelStageEvent event) {
         boolean shadowPass = IrisCompat.renderingShadowPass();
         if (event.getStage() == MapSurfaceRenderer.opaqueStage()) {
             if (!shadowPass) prepare();
@@ -136,8 +154,11 @@ public final class LogicPropRenderer {
                 if (AnimatedPropRenderer.animated(map, prop, state) || dev.theredja.src2mc.world.PropMounts.mounted(stateKey, prop.entity())) continue;
                 if (state.hidden()) { hidden++; continue; }
                 if (placed == null) {
-                    placed = new HashMap<>();
-                    for (BundleProp record : map.props()) placed.put(record.stableId(), record);
+                    placed = PLACED.computeIfAbsent(map, ignored -> {
+                        Map<String, BundleProp> byId = new HashMap<>();
+                        for (BundleProp record : map.props()) byId.put(record.stableId(), record);
+                        return byId;
+                    });
                 }
                 BundleProp record = placed.get(prop.stableId());
                 if (record == null) continue;
@@ -176,8 +197,9 @@ public final class LogicPropRenderer {
         return middleLight(level, built) != built.light;
     }
 
+    /** Block light alone: sky light no longer lights the map, so only a light source relights it. */
     private static int middleLight(ClientLevel level, Built built) {
-        return LevelRenderer.getLightColor(level, BlockPos.containing(built.bounds.getCenter()));
+        return level.getBrightness(net.minecraft.world.level.LightLayer.BLOCK, BlockPos.containing(built.bounds.getCenter()));
     }
 
     /** The prop in one skin and tint, or null while its mesh is still loading. */
@@ -189,12 +211,17 @@ public final class LogicPropRenderer {
         double[] t = record.translation();
         BlockPos origin = BlockPos.containing(t[0], t[1], t[2]);
         Map<PageClass, PackedVertices> meshes = new HashMap<>();
+        // Source lights a dynamic prop by the ambient cube where it stands.
+        float[] cube = BakedLighting.cube(map.light(), t[0], t[1], t[2]);
+        float[] rgb = new float[3], baked = new float[4];
         for (var batch : PropRenderer.tessellate(bundle, map, placement, worn, mesh).entrySet()) {
             PackedVertices out = meshes.computeIfAbsent(new PageClass(batch.getKey().page(), batch.getKey().renderClass()), ignored -> new PackedVertices());
             for (PropTessellator.Triangle triangle : batch.getValue()) {
                 for (PropTessellator.Vertex vertex : List.of(triangle.a(), triangle.b(), triangle.c())) {
+                    dev.theredja.src2mc.bundle.LightTable.evaluate(cube, vertex.nx(), vertex.ny(), vertex.nz(), rgb);
+                    baked[0] = rgb[0]; baked[1] = rgb[1]; baked[2] = rgb[2]; baked[3] = BakedLighting.VERTEX;
                     out.add((float) (vertex.x() - origin.getX()), (float) (vertex.y() - origin.getY()), (float) (vertex.z() - origin.getZ()),
-                        (float) vertex.u(), (float) vertex.v(), (float) vertex.nx(), (float) vertex.ny(), (float) vertex.nz(), 0, color);
+                        (float) vertex.u(), (float) vertex.v(), (float) vertex.nx(), (float) vertex.ny(), (float) vertex.nz(), 0, color, baked);
                 }
             }
         }
@@ -209,7 +236,9 @@ public final class LogicPropRenderer {
         AABB bounds = box == null ? new AABB(world)
             : new AABB(box[0], box[1], box[2], box[3], box[4], box[5]).move(world.getX(), world.getY(), world.getZ()).inflate(0.01);
         builds++;
-        return new Built(prop, bundle, map.atlas(), model, color, origin, meshes, bounds);
+        Built built = new Built(prop, bundle, map.atlas(), model, color, origin, meshes, bounds);
+        built.lightTable = map.light();
+        return built;
     }
 
     /** Lights every vertex where it stands, as the aggregates do, and uploads the buffers again. */
@@ -239,7 +268,7 @@ public final class LogicPropRenderer {
     }
 
     private static void draw(RenderLevelStageEvent event, boolean translucent) {
-        if (!enabled || BUILT.isEmpty()) return;
+        if (!enabled || BUILT.isEmpty() || !BakedLighting.ready()) return;
         boolean shadowPass = IrisCompat.renderingShadowPass();
         Vec3 camera = event.getCamera().getPosition();
         BundleGeneration generation = Src2mc.bundles().active();
@@ -263,9 +292,7 @@ public final class LogicPropRenderer {
                 if (suppressDepthWrite) com.mojang.blaze3d.systems.RenderSystem.depthMask(false);
                 buffer.getValue().bind();
                 buffer.getValue().drawWithShader(modelView, event.getProjectionMatrix(),
-                    translucent ? GameRenderer.getRendertypeEntityTranslucentShader()
-                        : key.renderClass() == BundleMaterial.RenderClass.SOLID
-                            ? GameRenderer.getRendertypeEntitySolidShader() : GameRenderer.getRendertypeEntityCutoutShader());
+                    BakedLighting.prepare(built.lightTable, key.renderClass(), null, null));
                 type.clearRenderState();
                 if (suppressDepthWrite) com.mojang.blaze3d.systems.RenderSystem.depthMask(true);
                 drawn++;
@@ -278,5 +305,6 @@ public final class LogicPropRenderer {
     public static void clear() {
         BUILT.values().forEach(Built::close);
         BUILT.clear();
+        PLACED.clear();
     }
 }

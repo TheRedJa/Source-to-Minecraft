@@ -33,7 +33,6 @@ import net.minecraft.core.SectionPos;
 import net.minecraft.ChatFormatting;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.chat.MutableComponent;
-import net.minecraft.nbt.CompoundTag;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.phys.AABB;
 import net.neoforged.api.distmarker.Dist;
@@ -259,27 +258,32 @@ public final class PropRenderer {
         GpuTimer.end(GpuTimer.Phase.PROPS_TRANSLUCENT);
     }
 
-    /** @return the number of roots inspected, or -1 when this frame skipped the periodic recheck. */
+    /**
+     * Rechecks one slice of the roots, a different one each frame, so every root is rechecked once
+     * every {@link #ROOT_RECHECK_FRAMES} frames without one frame paying for all of them. Roots of a
+     * placement or generation that is gone need no sweep: either change clears everything.
+     *
+     * @return the number of roots inspected.
+     */
     private static int updateRoots(BundleGeneration generation, ClientLevel clientLevel, List<MapPlacement> placements) {
-        if (frame % ROOT_RECHECK_FRAMES != 1) return -1;
-        Set<PropKey> seen = new HashSet<>();
+        int slice = (int) Math.floorMod(frame, (long) ROOT_RECHECK_FRAMES), scanned = 0;
+        ChunkWindow window = ChunkWindow.of(clientLevel);
         for (MapPlacement placement : placements) {
             BundleMap map = generation.findMap(placement.campaignId(), placement.mapId()).orElse(null);
             if (map == null) continue;
-            for (BundleProp prop : map.props()) {
-                PropKey key = new PropKey(placement, prop.stableId()); seen.add(key);
-                RootStatus status = rootStatus(clientLevel, placement, map, prop);
+            List<BundleProp> props = map.props();
+            for (int index = slice; index < props.size(); index += ROOT_RECHECK_FRAMES) {
+                BundleProp prop = props.get(index);
+                PropKey key = new PropKey(placement, prop.stableId());
+                RootStatus status = rootStatus(clientLevel, window, placement, map, prop);
                 boolean active = status == RootStatus.ACTIVE;
                 Boolean wasActive = ROOTS.put(key, active);
                 ROOT_STATUS.put(key, status);
                 if (wasActive != null && wasActive != active) removeProp(key);
+                scanned++;
             }
         }
-        ROOTS.keySet().removeIf(key -> {
-            if (seen.contains(key)) return false;
-            removeProp(key); ROOT_STATUS.remove(key); return true;
-        });
-        return seen.size();
+        return scanned;
     }
 
     /** A model's mesh when it is loaded; asking starts loading it. For aiming at a prop. */
@@ -295,25 +299,50 @@ public final class PropRenderer {
         return tessellateProp(new PropSource(bundle, map, placement, prop), mesh);
     }
 
-    private static RootStatus rootStatus(ClientLevel clientLevel, MapPlacement placement, BundleMap map, BundleProp prop) {
+    /**
+     * The chunks around the player that the client's chunk cache can hold: its storage spans the
+     * view distance plus 3 around the centre the server sets, the player's chunk. Asking the cache
+     * about a chunk outside it takes a branch HotSpot had compiled out, and once it stopped
+     * recompiling that method every such lookup deoptimized it: ~20000 times a second near
+     * furnace, most of the root scan's time (JFR, 2026-10-05). One chunk of margin is left for the
+     * centre lagging the player.
+     */
+    private record ChunkWindow(int centerX, int centerZ, int radius) {
+        static ChunkWindow of(ClientLevel level) {
+            Minecraft minecraft = Minecraft.getInstance();
+            var player = minecraft.player;
+            BlockPos at = player != null ? player.blockPosition() : BlockPos.containing(minecraft.gameRenderer.getMainCamera().getPosition());
+            return new ChunkWindow(SectionPos.blockToSectionCoord(at.getX()), SectionPos.blockToSectionCoord(at.getZ()),
+                Math.max(2, minecraft.options.getEffectiveRenderDistance()) + 2);
+        }
+
+        boolean holds(int chunkX, int chunkZ) {
+            return Math.abs(chunkX - centerX) <= radius && Math.abs(chunkZ - centerZ) <= radius;
+        }
+    }
+
+    private static RootStatus rootStatus(ClientLevel clientLevel, ChunkWindow window, MapPlacement placement, BundleMap map, BundleProp prop) {
         int[] root = prop.rootCell();
         BlockPos position = placement.translation().offset(root[0], root[1], root[2]);
-        // hasChunkAt avoids forcing a client chunk load merely to render a prop.
-        if (!clientLevel.hasChunkAt(position)) return RootStatus.UNLOADED;
-        if (!clientLevel.getBlockState(position).is(Src2mcWorldContent.PROP_ROOT.get())) return RootStatus.MISSING;
-        BlockEntity blockEntity = clientLevel.getBlockEntity(position);
+        int chunkX = SectionPos.blockToSectionCoord(position.getX()), chunkZ = SectionPos.blockToSectionCoord(position.getZ());
+        if (!window.holds(chunkX, chunkZ) || clientLevel.isOutsideBuildHeight(position)) return RootStatus.UNLOADED;
+        // Without creating one: a prop alone never loads a client chunk.
+        var chunk = clientLevel.getChunkSource().getChunk(chunkX, chunkZ, false);
+        if (chunk == null) return RootStatus.UNLOADED;
+        if (!chunk.getBlockState(position).is(Src2mcWorldContent.PROP_ROOT.get())) return RootStatus.MISSING;
+        BlockEntity blockEntity = chunk.getBlockEntity(position, net.minecraft.world.level.chunk.LevelChunk.EntityCreationType.IMMEDIATE);
         if (!(blockEntity instanceof Src2mcDataBlockEntity data)) return RootStatus.SCHEMA;
-        CompoundTag tag = data.payload();
         // The immutable, hash-validated bundle table is the authority for the
         // transform and model reference. WorldEdit preserves the identity but
         // may rewrite numeric NBT representation during its Sponge-v3 paste.
         // Requiring an exact re-serialization here would reject an otherwise
         // valid root. Its expected world cell still prevents moved/copied roots
-        // from rendering as the original placement.
-        if (tag.getInt("schema_version") != 1) return RootStatus.SCHEMA;
-        if (!placement.campaignId().equals(tag.getString("campaign_id"))) return RootStatus.CAMPAIGN;
-        if (!map.mapId().equals(tag.getString("map_id"))) return RootStatus.MAP;
-        return prop.stableId().equals(tag.getString("stable_id")) ? RootStatus.ACTIVE : RootStatus.IDENTITY;
+        // from rendering as the original placement. Read in place: copying each
+        // root's payload was most of the render thread's time near a map.
+        if (data.payloadInt("schema_version") != 1) return RootStatus.SCHEMA;
+        if (!placement.campaignId().equals(data.payloadString("campaign_id"))) return RootStatus.CAMPAIGN;
+        if (!map.mapId().equals(data.payloadString("map_id"))) return RootStatus.MAP;
+        return prop.stableId().equals(data.payloadString("stable_id")) ? RootStatus.ACTIVE : RootStatus.IDENTITY;
     }
 
     private static void buildVisibleProps(BundleGeneration generation, Minecraft minecraft, List<MapPlacement> placements) {
@@ -414,6 +443,7 @@ public final class PropRenderer {
         BundleProp prop = source.prop();
         BundleModel model = map.models().get(prop.modelIndex());
         Map<BatchKey, List<PropTessellator.Triangle>> triangles = new HashMap<>();
+        float[] vertexLight = BakedLighting.propVertexLight(map, prop, mesh.vertexCount());
         for (RuntimeMesh.Submesh submesh : mesh.submeshes()) {
             if (submesh.materialSlot() < 0 || submesh.materialSlot() >= model.materialSlotCount()) continue;
             int materialId = model.materialIds()[submesh.materialSlot()];
@@ -422,7 +452,8 @@ public final class PropRenderer {
             if (!material.textured() || material.renderClass() == BundleMaterial.RenderClass.FALLBACK) continue;
             AtlasIndex.Texture texture = map.atlas().textures().get(material.texture().contentId());
             if (texture == null) continue;
-            List<PropTessellator.Triangle> tessellated = PropTessellator.tessellate(mesh, submesh, prop, material.texture(), texture, map.atlas().pageSize());
+            List<PropTessellator.Triangle> tessellated = PropTessellator.tessellate(mesh, submesh, prop, material.texture(), texture,
+                map.atlas().pageSize(), vertexLight);
             // $nocull: the back is its own triangle, wound the other way with the normal turned
             // round, so it is culled, lit and shaded from the side it faces.
             if (material.doubleSided()) tessellated = PropTessellator.withBackFaces(tessellated);
@@ -511,16 +542,31 @@ public final class PropRenderer {
         int baseX = section.x() << 4, baseY = section.y() << 4, baseZ = section.z() << 4;
         Map<Long, Integer> lightCache = new HashMap<>();
         Map<PageClass, PackedVertices> result = new HashMap<>();
+        float[] baked = new float[4];
         for (Contributor contributor : in.contributors) {
             int tint = contributor.source.map().models().get(contributor.source.prop().modelIndex()).color();
+            // A prop without vertex light takes the ambient cube where it stands, as Source lights
+            // a dynamic prop: at its origin.
+            float[] cube = null;
             for (var batch : tessellateProp(contributor.source, contributor.mesh).entrySet()) {
                 if (!batch.getKey().section().equals(at)) continue;
                 PackedVertices out = result.computeIfAbsent(new PageClass(batch.getKey().page(), batch.getKey().renderClass()), ignored -> new PackedVertices());
                 for (PropTessellator.Triangle triangle : batch.getValue()) {
                     for (PropTessellator.Vertex vertex : List.of(triangle.a(), triangle.b(), triangle.c())) {
                         int light = sampleVertexLight(in, section.placement(), vertex, lightCache);
+                        if (vertex.lit()) {
+                            baked[0] = (float) vertex.r(); baked[1] = (float) vertex.g(); baked[2] = (float) vertex.b(); baked[3] = BakedLighting.VERTEX;
+                        } else {
+                            if (cube == null) {
+                                double[] t = contributor.source.prop().translation();
+                                cube = BakedLighting.cube(contributor.source.map().light(), t[0], t[1], t[2]);
+                            }
+                            float[] rgb = new float[3];
+                            dev.theredja.src2mc.bundle.LightTable.evaluate(cube, vertex.nx(), vertex.ny(), vertex.nz(), rgb);
+                            baked[0] = rgb[0]; baked[1] = rgb[1]; baked[2] = rgb[2]; baked[3] = BakedLighting.VERTEX;
+                        }
                         out.add((float) (vertex.x() - baseX), (float) (vertex.y() - baseY), (float) (vertex.z() - baseZ),
-                            (float) vertex.u(), (float) vertex.v(), (float) vertex.nx(), (float) vertex.ny(), (float) vertex.nz(), light, tint);
+                            (float) vertex.u(), (float) vertex.v(), (float) vertex.nx(), (float) vertex.ny(), (float) vertex.nz(), light, tint, baked);
                     }
                 }
             }
@@ -602,8 +648,10 @@ public final class PropRenderer {
         double[] b = vertices.bounds();
         AABB bounds = new AABB(b[0], b[1], b[2], b[3], b[4], b[5]).move(origin.getX(), origin.getY(), origin.getZ()).inflate(0.01);
         Contributor first = input.contributors.isEmpty() ? null : input.contributors.get(0);
-        return new Mesh(first == null ? null : first.source.bundle(), first == null ? null : first.source.map().atlas(), uploaded.buffer(),
+        Mesh mesh = new Mesh(first == null ? null : first.source.bundle(), first == null ? null : first.source.map().atlas(), uploaded.buffer(),
             origin, bounds, uploaded.bytes(), vertices.triangles());
+        mesh.light = first == null ? null : first.source.map().light();
+        return mesh;
     }
 
     /** One sample per vertex, along the vertex's own normal. One value for the whole triangle is
@@ -647,6 +695,7 @@ public final class PropRenderer {
     }
 
     private static void draw(RenderLevelStageEvent event, BundleGeneration generation, boolean translucent, boolean shadowPass) {
+        if (!BakedLighting.ready()) return;
         long started = System.nanoTime();
         var camera = event.getCamera().getPosition();
         List<Map.Entry<AggregateKey, Mesh>> visible = new ArrayList<>();
@@ -714,7 +763,7 @@ public final class PropRenderer {
                 PERF.add(PropRenderPerf.M_STATE_SWITCHES, 1);
             }
             Matrix4f modelView = new Matrix4f(event.getModelViewMatrix()).translate((float) (mesh.origin.getX() - camera.x), (float) (mesh.origin.getY() - camera.y), (float) (mesh.origin.getZ() - camera.z));
-            mesh.buffer.bind(); mesh.buffer.drawWithShader(modelView, event.getProjectionMatrix(), translucent ? GameRenderer.getRendertypeEntityTranslucentShader() : key.renderClass() == BundleMaterial.RenderClass.SOLID ? GameRenderer.getRendertypeEntitySolidShader() : GameRenderer.getRendertypeEntityCutoutShader());
+            mesh.buffer.bind(); mesh.buffer.drawWithShader(modelView, event.getProjectionMatrix(), BakedLighting.prepare(mesh.light, key.renderClass(), null, null));
             drawCalls++;
             triangles += mesh.triangles;
         }
@@ -756,7 +805,13 @@ public final class PropRenderer {
         return dirtied;
     }
     private static void discardExpiredMeshes() {
-        List<PropKey> expired = LAST_VISIBLE.entrySet().stream().filter(item -> frame - item.getValue() > MESH_GRACE_FRAMES).map(Map.Entry::getKey).toList();
+        // Meshes have MESH_GRACE_FRAMES of grace; looking for expired ones every frame walked every
+        // visible prop each frame for nothing.
+        if (frame % ROOT_RECHECK_FRAMES != 0) return;
+        List<PropKey> expired = new ArrayList<>();
+        for (Map.Entry<PropKey, Long> item : LAST_VISIBLE.entrySet()) {
+            if (frame - item.getValue() > MESH_GRACE_FRAMES) expired.add(item.getKey());
+        }
         if (expired.isEmpty()) return;
         int dirtied = 0;
         for (PropKey key : expired) dirtied += removeProp(key);
@@ -832,6 +887,8 @@ public final class PropRenderer {
     private enum RootStatus { ACTIVE, UNLOADED, MISSING, SCHEMA, CAMPAIGN, MAP, IDENTITY }
     private static final class Mesh implements AutoCloseable {
         final BundleManifest bundle; final AtlasIndex atlas; final VertexBuffer buffer; final BlockPos origin; final AABB bounds; final long estimatedVboBytes; final long triangles;
+        /** The map's baked light; null for none. */
+        dev.theredja.src2mc.bundle.LightTable light;
         Mesh(BundleManifest bundle, AtlasIndex atlas, VertexBuffer buffer, BlockPos origin, AABB bounds, long estimatedVboBytes, long triangles) { this.bundle = bundle; this.atlas = atlas; this.buffer = buffer; this.origin = origin; this.bounds = bounds; this.estimatedVboBytes = estimatedVboBytes; this.triangles = triangles; }
         @Override public void close() { buffer.close(); }
     }

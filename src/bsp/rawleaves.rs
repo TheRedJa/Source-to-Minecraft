@@ -32,7 +32,14 @@ pub struct RawLeaf {
     pub maxs: [i16; 3],
     pub first: u16,
     pub count: u16,
+    /// A version-0 leaf's own ambient light cube, six `ColorRGBExp32`
+    /// values; later versions keep their samples in the leaf ambient lumps.
+    pub cube: Option<[[u8; 4]; 6]>,
 }
+
+/// Where a version-0 leaf's light cube starts: right after the 30 bytes of
+/// `dleaf_t` fields (noclip.website's `BSPFile.ts` reads it there).
+const LEAF_CUBE_OFFSET: usize = 30;
 
 /// Read every leaf's brush range from `data`, preserving BSP leaf indices.
 pub fn leaves(data: &[u8]) -> Result<Vec<RawLeaf>> {
@@ -73,6 +80,12 @@ pub fn leaves(data: &[u8]) -> Result<Vec<RawLeaf>> {
             ],
             first: u16::from_le_bytes([leaf[at], leaf[at + 1]]),
             count: u16::from_le_bytes([leaf[at + 2], leaf[at + 3]]),
+            cube: (stride == LEAF_STRIDE_V0).then(|| {
+                std::array::from_fn(|side| {
+                    let start = LEAF_CUBE_OFFSET + side * 4;
+                    leaf[start..start + 4].try_into().unwrap()
+                })
+            }),
         });
     }
     Ok(ranges)

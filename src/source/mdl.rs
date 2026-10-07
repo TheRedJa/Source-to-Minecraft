@@ -24,6 +24,7 @@ type Geometry = (
     Vec<[Vec3; 3]>,
     Vec<[[f64; 2]; 3]>,
     Vec<[Weights; 3]>,
+    Vec<[u32; 3]>,
 );
 
 /// A vertex's bones, as `mstudioboneweight_t` stores them: up to three bone
@@ -59,6 +60,10 @@ pub struct Part {
     pub uv_per_unit: f64,
     /// Each corner's bones, parallel to `triangles`.
     pub weights: Vec<[Weights; 3]>,
+    /// Each corner's hardware vertex: its place among LOD 0's `.vtx` vertices,
+    /// mesh after mesh, which is how vrad orders a static prop's `.vhv` light.
+    /// `u32::MAX` where the `.vtx` does not list the vertex.
+    pub hardware: Vec<[u32; 3]>,
 }
 
 /// A studio model flattened to what voxelization needs.
@@ -234,11 +239,12 @@ impl<'a> Models<'a> {
             .find_map(|suffix| self.vfs.open(&format!("{stem}{suffix}")))
             .and_then(|data| vmdl::Vtx::read(&data).ok())?;
 
-        Some(self.flatten(vmdl::Model::from_parts(mdl, vtx, vvd)))
+        let hardware = hardware_vertices(&mdl, &vtx);
+        Some(self.flatten(vmdl::Model::from_parts(mdl, vtx, vvd), &hardware))
     }
 
     /// Turn a parsed model into triangles grouped by material.
-    fn flatten(&self, model: vmdl::Model) -> Model {
+    fn flatten(&self, model: vmdl::Model, hardware: &HashMap<usize, u32>) -> Model {
         use cgmath::{Matrix4, Transform, Vector3};
 
         // Static props are authored in their final orientation and both of
@@ -277,7 +283,8 @@ impl<'a> Models<'a> {
                     self.material_of(&model, texture)
                 })
                 .collect();
-            let (triangles, normals, uvs, weights) = parts.entry(materials).or_default();
+            let (triangles, normals, uvs, weights, hardware_corners) =
+                parts.entry(materials).or_default();
             for strip in mesh.vertex_strip_indices() {
                 let indices: Vec<usize> = strip.collect();
                 for tri in indices.chunks_exact(3) {
@@ -295,6 +302,10 @@ impl<'a> Models<'a> {
                         std::array::from_fn(|axis| f64::from(v.texture_coordinates[axis]))
                     }));
                     weights.push([a, b, c].map(|v| bone_weights(&v.bone_weights)));
+                    hardware_corners.push(
+                        [tri[0], tri[1], tri[2]]
+                            .map(|i| hardware.get(&i).copied().unwrap_or(u32::MAX)),
+                    );
                 }
             }
         }
@@ -318,14 +329,17 @@ impl<'a> Models<'a> {
         Model {
             parts: parts
                 .into_iter()
-                .map(|(mut materials, (triangles, normals, uvs, weights))| Part {
-                    uv_per_unit: uv_rate(&triangles, &uvs),
-                    triangles,
-                    normals,
-                    uvs,
-                    weights,
-                    material: materials.swap_remove(0),
-                })
+                .map(
+                    |(mut materials, (triangles, normals, uvs, weights, hardware))| Part {
+                        uv_per_unit: uv_rate(&triangles, &uvs),
+                        triangles,
+                        normals,
+                        uvs,
+                        weights,
+                        hardware,
+                        material: materials.swap_remove(0),
+                    },
+                )
                 .collect(),
             bounds,
             skins,
@@ -377,6 +391,44 @@ impl<'a> Models<'a> {
             .or_else(|| candidates.first().cloned())
             .unwrap_or(name)
     }
+}
+
+/// Each `.vvd` vertex's hardware vertex: its place among LOD 0's `.vtx`
+/// strip-group vertices, mesh after mesh, skipping meshes with none, as vrad
+/// numbers a static prop's per-vertex light. The first listing wins; vrad
+/// lights a vertex once.
+fn hardware_vertices(mdl: &vmdl::Mdl, vtx: &vmdl::Vtx) -> HashMap<usize, u32> {
+    let mdl_meshes = mdl
+        .body_parts
+        .iter()
+        .flat_map(|part| part.models.iter())
+        .flat_map(|model| {
+            model
+                .meshes
+                .iter()
+                .map(move |mesh| (mesh, model.vertex_offset))
+        });
+    let vtx_meshes = vtx
+        .body_parts
+        .iter()
+        .flat_map(|part| part.models.iter())
+        .flat_map(|model| model.lods.first())
+        .flat_map(|lod| lod.meshes.iter());
+    let mut hardware = HashMap::new();
+    let mut next = 0u32;
+    for ((mesh, model_offset), vtx_mesh) in mdl_meshes.zip(vtx_meshes) {
+        let base = i64::from(mesh.vertex_offset) + i64::from(model_offset);
+        for group in &vtx_mesh.strip_groups {
+            for vertex in &group.vertices {
+                if let Ok(index) = usize::try_from(base + i64::from(vertex.original_mesh_vertex_id))
+                {
+                    hardware.entry(index).or_insert(next);
+                }
+                next = next.saturating_add(1);
+            }
+        }
+    }
+    hardware
 }
 
 #[cfg(test)]

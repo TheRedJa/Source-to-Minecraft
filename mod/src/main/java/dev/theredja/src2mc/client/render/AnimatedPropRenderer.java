@@ -108,6 +108,8 @@ public final class AnimatedPropRenderer {
         final Map<Part, PackedVertices> rigid;
         final Map<Part, double[]> rigidBounds;
         final Map<Part, Blended> blended;
+        /** The map's baked light; null for none. */
+        dev.theredja.src2mc.bundle.LightTable lightTable;
         final Map<Part, VertexBuffer> buffers = new HashMap<>();
         final float[] positions, rotations, skin, previousPositions, previousRotations;
         /** Model-space corners posed this frame, by mesh vertex; {@code posedFrame} says which are current. */
@@ -206,6 +208,17 @@ public final class AnimatedPropRenderer {
 
     @SubscribeEvent
     public static void render(RenderLevelStageEvent event) {
+        boolean timed = event.getStage() == MapSurfaceRenderer.opaqueStage() || event.getStage() == RenderLevelStageEvent.Stage.AFTER_PARTICLES;
+        GpuTimer.Phase phase = IrisCompat.renderingShadowPass() ? GpuTimer.Phase.ANIMATED_PROPS_SHADOW : GpuTimer.Phase.ANIMATED_PROPS;
+        if (timed) GpuTimer.begin(phase);
+        try {
+            renderStage(event);
+        } finally {
+            if (timed) GpuTimer.end(phase);
+        }
+    }
+
+    private static void renderStage(RenderLevelStageEvent event) {
         boolean shadowPass = IrisCompat.renderingShadowPass();
         if (event.getStage() == MapSurfaceRenderer.opaqueStage()) {
             if (!shadowPass) prepare(event);
@@ -432,6 +445,7 @@ public final class AnimatedPropRenderer {
         geometry.blended().forEach((part, built) -> blended.put(part, new Blended(built)));
         builds++;
         Built built = new Built(prop, model, color, bundle, map.atlas(), animation, mesh, rigid, geometry.rigidBounds(), blended);
+        built.lightTable = map.light();
         // A still model's box is where it stays.
         if (animation == null) bounds(built);
         return built;
@@ -482,9 +496,12 @@ public final class AnimatedPropRenderer {
         return new Geometry(rigid, rigidBounds, blended);
     }
 
+    /** Lit by the ambient cube where the prop is, set for each draw, as Source lights a dynamic prop. */
+    private static final float[] AMBIENT_LIT = {0, 0, 0, BakedLighting.AMBIENT};
+
     private static void add(PackedVertices out, PropTessellator.Vertex vertex, int color) {
         out.add((float) vertex.x(), (float) vertex.y(), (float) vertex.z(), (float) vertex.u(), (float) vertex.v(),
-            (float) vertex.nx(), (float) vertex.ny(), (float) vertex.nz(), 0, color);
+            (float) vertex.nx(), (float) vertex.ny(), (float) vertex.nz(), 0, color, AMBIENT_LIT);
     }
 
     /** The one bone all three corners follow wholly, or -1 for a triangle several bones pull. */
@@ -664,12 +681,19 @@ public final class AnimatedPropRenderer {
         if (frame - built.litFrame < LIGHT_CHECK_FRAMES) return false;
         built.litFrame = frame;
         org.joml.Vector3d at = middleAt(level, placing, built);
-        if (at != null && (built.litAt == null || built.litAt.distance(at) > RELIGHT_DISTANCE)) return true;
         BlockPos middle = middle(level, placing, built);
-        return middle != null && LevelRenderer.getLightColor(level, middle) != built.light;
+        // Without a Minecraft light source near where it was and is, moving changes nothing to relight.
+        if (built.light == 0 && (middle == null || blockLight(level, middle) == 0)) return false;
+        if (at != null && (built.litAt == null || built.litAt.distance(at) > RELIGHT_DISTANCE)) return true;
+        return middle != null && blockLight(level, middle) != built.light;
     }
 
     private static final double RELIGHT_DISTANCE = 2;
+
+    /** Block light alone: sky light no longer lights the map, so only a light source relights it. */
+    private static int blockLight(ClientLevel level, BlockPos at) {
+        return level.getBrightness(net.minecraft.world.level.LightLayer.BLOCK, at);
+    }
 
     /** Where the middle of the posed prop is in the world now, or null when its mover is not known here. */
     private static org.joml.Vector3d middleAt(ClientLevel level, Placing placing, Built built) {
@@ -733,7 +757,7 @@ public final class AnimatedPropRenderer {
             lightVertices(level, LevelRenderer.getLightColor(level, BlockPos.ZERO), toWorld, identity, 0, part.vertices, part.count, cache, occlusion, smooth);
         }
         BlockPos middle = middle(level, placing, built);
-        built.light = middle == null ? 0 : LevelRenderer.getLightColor(level, middle);
+        built.light = middle == null ? 0 : blockLight(level, middle);
         built.litFrame = frame;
         built.litAt = middleAt(level, placing, built);
         built.unlit = false;
@@ -762,7 +786,7 @@ public final class AnimatedPropRenderer {
             (int) Math.floor(maxX) + 2, (int) Math.floor(maxY) + 2, (int) Math.floor(maxZ) + 2);
         int fallback = LevelRenderer.getLightColor(level, BlockPos.ZERO);
         BlockPos middle = middle(level, placing, built);
-        built.light = middle == null ? 0 : LevelRenderer.getLightColor(level, middle);
+        built.light = middle == null ? 0 : blockLight(level, middle);
         built.litFrame = frame;
         built.litAt = middleAt(level, placing, built);
         float[] skin = built.skin.clone();
@@ -852,7 +876,7 @@ public final class AnimatedPropRenderer {
     }
 
     private static void draw(RenderLevelStageEvent event, boolean translucent) {
-        if (!enabled || BUILT.isEmpty()) return;
+        if (!enabled || BUILT.isEmpty() || !BakedLighting.ready()) return;
         ClientLevel level = Minecraft.getInstance().level;
         if (level == null) return;
         boolean shadowPass = IrisCompat.renderingShadowPass();
@@ -890,6 +914,11 @@ public final class AnimatedPropRenderer {
             base.rotate(own).scale((float) placing.scale);
             turn.mul(own);
             if (!shadowPass && MapSurfaceRenderer.frustumCulling() && !visible(event, base, built)) continue;
+            // The ambient cube where the prop's middle is now, in its map.
+            org.joml.Vector3d middle = middleAt(level, placing, built);
+            BlockPos t = placing.placement.translation();
+            float[] cube = middle == null ? BakedLighting.cube(built.lightTable, placing.translation[0], placing.translation[1], placing.translation[2])
+                : BakedLighting.cube(built.lightTable, middle.x - t.getX(), middle.y - t.getY(), middle.z - t.getZ());
             for (Map.Entry<Part, VertexBuffer> buffer : built.buffers.entrySet()) {
                 Part part = buffer.getKey();
                 if ((part.renderClass() == BundleMaterial.RenderClass.TRANSLUCENT) != translucent) continue;
@@ -912,9 +941,7 @@ public final class AnimatedPropRenderer {
                 if (suppressDepthWrite) RenderSystem.depthMask(false);
                 buffer.getValue().bind();
                 buffer.getValue().drawWithShader(modelView, event.getProjectionMatrix(),
-                    translucent ? GameRenderer.getRendertypeEntityTranslucentShader()
-                        : part.renderClass() == BundleMaterial.RenderClass.SOLID
-                            ? GameRenderer.getRendertypeEntitySolidShader() : GameRenderer.getRendertypeEntityCutoutShader());
+                    BakedLighting.prepare(built.lightTable, part.renderClass(), cube, new Matrix3f().set(rotation)));
                 type.clearRenderState();
                 if (suppressDepthWrite) RenderSystem.depthMask(true);
                 drawn++;

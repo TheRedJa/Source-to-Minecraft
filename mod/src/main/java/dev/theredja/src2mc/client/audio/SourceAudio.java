@@ -144,6 +144,25 @@ public final class SourceAudio {
         }
     }
 
+    /**
+     * Plays the bullet impact sound ({@code bulletimpact}) of a surface property of a placed map at
+     * a world point, as {@code PlayImpactSound} does. Nothing when the map has no sound or the
+     * property none.
+     */
+    public static void playBulletImpact(dev.theredja.src2mc.world.MapPlacement placement, String surfaceProp, Vec3 at) {
+        for (MapSound map : maps) {
+            if (!map.placement().equals(placement) || map.audio() == null) continue;
+            AudioTable.Surface surface = map.audio().surface(surfaceProp);
+            if (surface != null && surface.bulletImpact() >= 0) SURFACES.playIndex(map, surface.bulletImpact(), at);
+            return;
+        }
+    }
+
+    /** The material covering most of a map cell's faces; -1 for none. */
+    public static int surfaceMaterialAt(dev.theredja.src2mc.bundle.SurfaceTable surfaces, int x, int y, int z) {
+        return SurfaceProbe.block(surfaces, x, y, z);
+    }
+
     /** Rebuilds what plays from the placements and bundles whenever either changes. */
     private static void refresh(ClientLevel current) {
         BundleGeneration generation = Src2mc.bundles().active();

@@ -80,8 +80,9 @@ The payload begins with this fixed little-endian header:
 | Field | Type | Value |
 | --- | --- | --- |
 | magic | 8 bytes | `S2FACE\0\0` |
-| version | `u32` | 2 |
+| version | `u32` | 3 |
 | UV-region count | `u32` | number of following UV records |
+| light-region count | `u32` | number of following light-region records |
 | section count | `u32` | number of following section buckets |
 | fragment count | `u32` | total fragment records in all buckets |
 
@@ -90,6 +91,14 @@ patterns. Each consists of eight finite `f64` values: the four coefficients of
 `s = ux*x + uy*y + uz*z + uoffset`, then the corresponding four coefficients
 for `t`. Coordinates are map-local Minecraft block coordinates. Signed zero is
 canonicalized to positive zero before deduplication and writing.
+
+Light regions follow the UV regions, sorted by page, then by the canonical
+bit patterns of their values, and unique. Each is a `u32` page index into the
+map's light file (section 22) and eight finite `f64`: the same affine form,
+giving the fragment's lightmap coordinates `s` and `t` as fractions of that
+page's width and height. A coordinate lands on the centre of the luxel vrad
+computed for that point of the face. A version 2 table, which has no light
+regions and no light-region ID, is rejected.
 
 Each non-empty 16x16x16 map-local section then contains its signed `i32` X, Y,
 and Z section coordinates, a `u32` fragment count, and that many
@@ -102,6 +111,7 @@ variable-length fragment records:
 | provenance kind | `u8` | 0 brush side, 1 displacement triangle, 2 BSP draw face |
 | material ID | `u32` | index into the map's material-reference table |
 | UV-region ID | `u32` | index into this file's UV table |
+| light-region ID | `u32` | index into this file's light-region table, or `0xFFFFFFFF` for none |
 | provenance primary | `u32` | brush, displacement or BSP face index |
 | provenance secondary | `u32` | side, triangle, or piece index within the face |
 | vertex count | `u8` | 3–64 |
@@ -138,7 +148,15 @@ Records within a section are ordered by local cell, provenance kind,
 provenance primary, then provenance secondary, and that key is unique. `u32`
 references and counts avoid a campaign-wide `u16` ceiling; loaders must
 additionally enforce the defensive allocation limits in section 10, where the
-face limit counts fragments.
+face limit counts fragments and the UV-region limit applies to the light
+regions as well.
+
+A fragment of a BSP draw face carries the region of its face's lightmap; so
+does a displacement triangle, whose region is fitted through its three
+corners' luxel coordinates. A face without a lightmap — vrad leaves none on
+`NOLIGHT` surfaces such as black tool brushes, self-lit light panels and
+fizzlers — and every brush-side fragment has none, and is drawn at full
+brightness, as Source draws an unlit surface.
 
 ## 6. Campaign and map metadata
 
@@ -171,6 +189,10 @@ fields in order:
 | `logic` | optional canonical `maps/<map-id>/logic.json` path (section 16) |
 | `movers` | optional canonical `maps/<map-id>/movers.json` path (section 17); absent when the map has no movers |
 | `logic_props` | optional canonical `maps/<map-id>/logic_props.json` path (section 18); absent when the logic changes no prop |
+| `sky` | optional canonical `maps/<map-id>/sky.s2sky` path (section 20); absent when the map has no sky face |
+| `skybox` | optional canonical `maps/<map-id>/skybox.s2box` path (section 21); absent without a 3D skybox room |
+| `light` | optional canonical `maps/<map-id>/light.s2light` path (section 22) |
+| `particles` | optional canonical `maps/<map-id>/particles.json` path (section 23) |
 | `diagnostics` | canonical `maps/<map-id>/diagnostics.json` path |
 
 Surface-table material IDs index `materials` directly. This array therefore
@@ -332,6 +354,13 @@ residency budgets:
 | skin families per logic prop | 1,024 |
 | `.s2anim` payload | 64 MiB |
 | bones / sequences / frames per sequence of an animation | 256 / 4,096 / 65,536 |
+| light file | 1 GiB |
+| light pages per map / page axis | 64 / 4,096 |
+| ambient nodes / samples per map | 4,000,000 / 4,000,000 |
+| prop light vertices per map | 100,000,000 |
+| particle systems / particle materials per map | 65,536 / 65,536 |
+| functions or children per particle system, decals per game material | 1,024 |
+| sheet sequences per material / frames per sequence | 4,096 / 65,536 |
 | uncompressed entry | 2 GiB |
 | uncompressed bundle payload | 64 GiB |
 | ZIP expansion ratio | 200:1 after a 1 MiB small-entry allowance |
@@ -406,6 +435,10 @@ violates this integrity invariant is invalid. A camera cluster of `-1`, a
 missing tree, or any other unresolved lookup renders without rejection.
 
 ## 13. Light-occlusion mask
+
+The mod no longer reads this mask: since DEV-0.36.0 the map is lit by its own
+baked light (section 22, D28) and the sky light it fed is gone. The converter
+still writes it.
 
 `maps/<map-id>/occlusion.s2occl` optionally records the map-local cells that
 stop daylight. Map metadata references it through the optional `occlusion`
@@ -508,7 +541,7 @@ starts an `ambient_generic` at spawn exactly when it neither starts silent
 (spawnflag 16) nor is flagged not-looping (32), and an `env_soundscape` unless
 it starts disabled. Everything else waits for the map's logic.
 
-The payload is canonical JSON with `format` `src2mc-audio`, `version` 2, and
+The payload is canonical JSON with `format` `src2mc-audio`, `version` 3, and
 these arrays in order: `sounds`, `soundscapes`, `emitters`, `ambients`,
 `scripts`, `surfaces`. Indices refer into these arrays. A *range* is an array
 of two finite numbers, Source's interval: a value is drawn uniformly between
@@ -532,13 +565,16 @@ Scripts also hold the sounds entity keyvalues name, keyed by the script's
 name or, for a sound file, by its lowercase path below `sound/` with `/`
 separators and without leading sound characters, at volume 1, pitch 100 and
 sound level 75, as Source plays a bare file.
-| surface | unique lowercase `name`; optional `step_left`, `step_right`, `impact_soft`, `impact_hard`, `break_sound` script indices |
+| surface | unique lowercase `name`; optional `step_left`, `step_right`, `impact_soft`, `impact_hard`, `break_sound`, `bullet_impact` script indices; optional `game_material`, the one uppercase letter of the property's `gamematerial` (`CHAR_TEX_*`) |
 
 Commands keep Source's meaning (`c_soundscape.cpp`): a loop or random sound
 without a position is heard everywhere; `position` indices are offset by the
 enclosing children's `position` and replaced by their overrides. Surfaces
 include `default`, which a `$surfaceprop` the table does not list falls back
-to. Material and model `surface_prop` values select surfaces.
+to. Material and model `surface_prop` values select surfaces. A bullet
+impact plays the surface's `bullet_impact` script, and its `game_material`
+picks the impact effect and decal (section 23); a surface without one counts
+as concrete, `C`. A version 2 table, without these, is rejected.
 
 Each sound's payload is `audio/<content-id>.ogg`: Ogg Vorbis, mono or stereo,
 whose decoded frame count is `frames`. The converter encodes at Vorbis quality
@@ -872,4 +908,194 @@ frame of cycle `c` is `c * (frames - 1)`. A sequence of several blended
 animations is flattened at the spawn pose parameters. A bone's transform
 composes its parents' (`BuildBoneChain`); a vertex is the weighted sum of its
 bones' `bone-to-model * bind` applied to it, as the studio renderer skins it.
+
+## 20. Sky
+
+`maps/<map-id>/sky.s2sky` holds the faces Source draws its skybox through and
+the six sides of the map's 2D skybox. Source never draws a sky face: the
+engine draws the skybox around the eye first and the world over it, so a sky
+face shows the skybox in the direction it is seen. The mod draws the faces
+instead, each pixel sampling the side its view direction points at, which is
+what a box of six textures at infinite distance shows.
+
+Little-endian, after the magic `S2SKY\0\0\0` and `u32` version 1:
+
+- **Sides**, six, in the order `rt`, `lf`, `bk`, `ft`, `up`, `dn` (Source's
+  material suffixes): a `u8` 1 and the 32 bytes of the SHA-256 content ID of
+  `sky/<content-id>.png`, or a `u8` 0 for a side the converter could not
+  read, drawn black. PNG entries are stored, not deflated.
+- **Faces**: `u32` count (at most 1,000,000), then per face a `u16` corner
+  count, 3 to 256, and that many corners, three canonical `f32` each,
+  map-local block coordinates. Each face is convex and wound
+  counter-clockwise seen from the side the sky is drawn on; it is drawn from
+  that side only.
+
+A side is the material `skybox/<skyname><suffix>`, `skyname` being
+worldspawn's keyvalue, as Source's LDR path draws it: `$basetexture` (the
+`Sky` shader's HDR textures are not used), each texel multiplied by `$color`
+(`{r g b}` in 0 to 255 or `[r g b]` in 0 to 1), and resampled through
+`$basetexturetransform` (`center + rotate(scale * (uv - center)) +
+translate`, clamped or wrapped per axis as the texture's `CLAMPS`/`CLAMPT`
+flags say) so the image is the side as its quad shows it. An image is at
+most 2048 texels along either axis. A material without `$basetexture` but
+with `$color` is that colour.
+
+Side `s` covers the directions whose largest Source component is its axis:
+`rt` +X, `lf` -X, `bk` +Y, `ft` -Y, `up` +Z, `dn` -Z, Source axes, Minecraft's
+`(x, y, z)` being Source's `(x, z, -y)`. With `d` the direction and `m` the
+absolute value of its largest component, a side's `(s, t)`, each -1 to 1, is
+`rt (-y, z)/m`, `lf (y, z)/m`, `bk (x, z)/m`, `ft (-x, z)/m`, `up (-y, -x)/m`,
+`dn (-y, x)/m`, and its image is sampled at `u = (s + 1) / 2`, `v = (1 - t) /
+2`, `v` 0 at the image's top row, filtered linearly and clamped to the edge.
+
+The faces are the world model's faces with `SURF_SKY` set (`toolsskybox2d`
+sets it with `SURF_SKY2D`), displacements excluded, less those wholly inside
+the 3D skybox room when that is left out.
+
+## 21. 3D skybox
+
+`maps/<map-id>/skybox.s2box` holds the room the map's `sky_camera` stands in,
+which Source renders behind the world from `sky_camera.origin + eye / scale`
+with the player's view (`CSkyboxView::DrawInternal`), so it shows `scale`
+times larger. It is written only when the room is left out of the
+conversion. Little-endian, after the magic `S2BOX\0\0\0` and `u32` version 1:
+
+- `f32` scale, positive; three `f64` the map-local block coordinates of the
+  `sky_camera`; three `f64` those of Source's world origin.
+- Fog: `u8` 0, or 1 followed by the colour as three `u8` (0 to 255, as
+  written) and `f32` start, end and maximum density, in world units.
+- `u32` cluster count and `(count + 7) / 8` bytes, bit `c` (LSB first) set
+  when a leaf of PVS cluster `c` has `LEAF_FLAGS_SKY`: the room is drawn only
+  for an eye in such a cluster, or in none, or when the count is 0.
+- The lightmap page: `u32` width and height, then three `u16` per luxel,
+  row by row, linear light times 4096.
+- `u32` batch count; per batch a `u32` material ID (into the map's material
+  table), `u8` lighting (0 lightmap, 1 vertex light), three `u8` tint (0 to
+  255), `u32` vertex count, a multiple of 3, and that many vertices of ten
+  canonical `f32`: position in blocks relative to the `sky_camera`, Minecraft
+  axes; texture coordinates in repeats of the material's texture; lightmap
+  page coordinates, 0 to 1; linear vertex light. Triangles are wound
+  counter-clockwise from the side they are seen from.
+
+The room's brush faces (world and brush entities wholly inside it, none
+`NODRAW`, `SKIP`, `HINT`, `TRIGGER` or sky) and displacements are lit by their
+lightmaps: the static style's first lightmap of the face record (`LUMP_FACES_HDR`
+and `LUMP_LIGHTING_HDR` when the map has HDR light), luxel `ColorRGBExp32`
+`value * 2^exponent / 255`. A face vertex's luxel coordinate is its lightmap
+projection plus 0.5 minus the face's luxel minimum; a displacement's is its
+grid fraction times the face's luxel size plus 0.5. Faces without a lightmap
+use a white luxel. Static props (`sprp` entries inside the room) carry the
+light vrad baked into `sp_hdr_<index>.vhv` (`sp_<index>.vhv` without HDR):
+colour per LOD 0 hardware vertex, BGRA, linear `(colour * 2)^2.2`. A pixel is
+`albedo^2.2 * tint^2.2 * light * exposure`, fogged as
+`lerp(colour, fog^2.2, f^2)` with `f = min(max density, saturate((view depth
+- start) / (end - start)))`, distances divided by the scale, and written
+back to gamma.
+
+## 22. Baked light
+
+`maps/<map-id>/light.s2light` holds the light vrad baked into the map: the
+lightmaps of its faces, the ambient light samples of its leaves, and the vertex
+light of its static props. Map metadata references it through the optional
+`light` field. Little-endian, after the magic `S2LITE\0\0` and `u32` version 1:
+
+- `u32` page count, then per page `u32` width and height and that many luxels
+  row by row, four bytes each, `ColorRGBExp32`: linear light
+  `rgb * 2^exponent / 255`, the exponent a signed byte. Each face's static
+  lightmap (the first style's first lightmap, `LUMP_FACES_HDR` and
+  `LUMP_LIGHTING_HDR` when the map has HDR light) is copied in with a
+  one-luxel border repeating its edge, so filtering never reads a neighbour.
+  Pages are a power of two wide and at most 4,096 by 4,096.
+- `u32` node count and `i32` root, then per node four `f32`, the map-local
+  plane `normal · point = distance`, and two `i32` children: a node index, or
+  `-1 - leaf`. This is the world model's tree; a point on or in front of a
+  plane takes child 0.
+- `u32` leaf count, then per leaf in BSP order `u32` first sample and `u32`
+  sample count.
+- `u32` sample count, then per sample 21 `f32`: the map-local position, then
+  the light arriving from +X, -X, +Y, -Y, +Z, -Z in Minecraft axes, linear RGB
+  each, `rgb * 2^exponent` as `CompressedLightCube` stores it. The samples are
+  `LUMP_LEAF_AMBIENT_LIGHTING(_HDR)` with their index lump; a map storing one
+  cube per leaf, in that lump alone or inside version 0 leaves, has it at the
+  leaf's centre.
+- `u32` prop count, equal to the placement table's, then per prop in its order
+  `u32` vertex count and that many `(r, g, b, 0)` bytes: the colour vrad baked
+  for each vertex of the prop's mesh, from `sp_hdr_<index>.vhv`
+  (`sp_<index>.vhv` without HDR) by the mesh vertex's hardware vertex. Gamma
+  space and half range, so linear `(colour * 2 / 255)^2.2`. A count of 0 means
+  none; a count that differs from the mesh's vertex count is ignored.
+
+A brush-face pixel is lit by its lightmap, a static prop vertex by its vertex
+light. Anything else — a prop without vertex light, a logic or animated prop,
+a prop riding a mover, an entity — is lit by the ambient cube at its centre:
+the samples of the leaf the point is in, each weighted `1 / (d² + 1)` with
+`d` in Source units, as noclip.website's `computeAmbientCubeFromLeaf` does; a leaf
+without samples takes the nearest sample in the map. A normal `n` takes
+`n.x² * cube[±X] + n.y² * cube[±Y] + n.z² * cube[±Z]`, the sides it faces. The
+light is multiplied by the exposure, and Minecraft block light, linear, is
+added on top; a pixel is `(albedo^2.2 * (light * exposure + block))^(1/2.2)`.
+
+## 23. Particles, impacts and decals
+
+`maps/<map-id>/particles.json` optionally records the map's particle effects,
+how the game draws a bullet impact, and its bullet hole decals. Map metadata
+references it through the optional `particles` field, after `light`. It is
+canonical JSON with `format` `src2mc-particles`, `version` 1, and `systems`,
+`materials`, `impacts`, `decals` in that order.
+
+`systems` holds every `DmeParticleSystemDefinition` the map can start, from
+the `.pcf` files `particles/particles_manifest.txt` and the map's own
+`maps/<map>_particles.txt` list (binary DMX, encodings 2 to 5): the systems
+`info_particle_system` entities name, their children, and the game's impact
+systems. Positions and directions inside them stay in Source units and axes;
+the mod converts at the map's `source_origin` (section 16).
+
+| Record | Fields, in order |
+| --- | --- |
+| system | `name`; optional `material` index; `attributes`, every definition attribute by its `.pcf` name; `renderers`, `operators`, `initializers`, `emitters`, `forces`, `constraints`, arrays of functions; `children` |
+| function | `function`, the `functionName`; `parameters`, every parameter by its `.pcf` name |
+| child | `system` index; `delay` seconds |
+| material | `name`, lowercase below `materials/` without `.vmt`; `material`, its index in the map's material table, whose texture it draws; lowercase `shader`; `additive`; `parameters`, every numeric `$` parameter by lowercase name; `sheet` |
+| sequence | `clamp`; `frames`, each `[seconds, [[u0, v0, u1, v1], ...]]`, one rectangle per texture layer, as fractions of the texture |
+
+A `.pcf` stores only values that differ from their defaults. The converter
+fills in the rest from the defaults of Source SDK 2013's particle library
+(`src/source/pcf_defaults.json`, read from `particles.a`), for the system,
+for each function it knows and for the operator fade parameters every
+operator has. A function the table does not know keeps only its stored
+parameters, and the export reports `PARTICLE_FUNCTION_DEFAULTS_UNKNOWN`.
+Values are JSON numbers, booleans, strings, or arrays of numbers for vectors,
+colours (0 to 255) and matrices. `sheet` is the texture's VTF 7.3+ sheet
+resource (tag `0x10 0 0`), indexed by sequence number, `null` for a number the
+sheet skips; empty for a texture without one.
+
+`impacts` holds `style`, `systems` and `materials`. Portal 2's BSP version (21)
+and later draw a bullet impact with the `impact_*` system of the surface's
+game material (`s_pImpactEffect`); their `style` is `systems` and `systems`
+maps each game material letter to a system index. Older maps (Portal,
+HL2-era, INFRA) draw the SDK's code effects (`FX_DebrisFlecks`,
+`FX_DustImpact`, `FX_MetalSpark` and friends, `cl_new_impact_effects 0`);
+their `style` is `code`. `materials` maps each material the SDK's code
+effects use by name to a material index: for the code impacts, and on any map
+with an `env_spark`, which every game draws with `FX_ElectricSpark`; it is
+empty otherwise. A particle or decal texture is scaled down, keeping its
+aspect ratio, to fit one atlas region (4,064 texels per axis), so it is never
+split across pages.
+
+`decals` maps a game material letter to the decals a bullet leaves on it,
+from `scripts/decals_subrect.txt` (or `decals.txt`): the letter's
+`TranslationData` entry names an `Impact.*` group, whose entries list
+materials with weights. Each decal is `material` (index into `materials`),
+`rect` `[u0, v0, u1, v1]` (the subrect material's `$Pos` and `$Size` over its
+`$Material`'s texture, or the whole texture), `size` `[width, height]` in
+Source units (texels times `$decalscale`) and `weight`. A map whose game has
+no decal script, or a letter without one, has none.
+
+A decal is a square centred on the hit, laid out in the surface's texture
+space as the engine's `R_DecalComputeBasis` does without an S axis: on a wall
+T points straight down and S = N x T; on a floor or ceiling (|N.z| > sin 45°)
+S points along +X. It is clipped to each map fragment in the hit surface's
+plane that it covers. A `decalmodulate` decal multiplies the colour behind it
+by twice its own; any other draws alpha-blended and lit by the surface's
+lightmap. The 2,048 newest decals stay (`r_decals`).
 

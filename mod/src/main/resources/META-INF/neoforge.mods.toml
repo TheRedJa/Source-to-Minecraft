@@ -15,6 +15,10 @@ Companion mod for loading and rendering maps exported by src2mc.
 [[accessTransformers]]
 file="META-INF/accesstransformer.cfg"
 
+# Entities in a placed map are lit by Source's ambient light.
+[[mixins]]
+config="src2mc.mixins.json"
+
 [[dependencies.${mod_id}]]
 modId="neoforge"
 type="required"

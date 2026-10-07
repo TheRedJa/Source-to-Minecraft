@@ -326,6 +326,10 @@ pub struct SurfaceSounds {
     pub impact_soft: Option<String>,
     pub impact_hard: Option<String>,
     pub break_sound: Option<String>,
+    /// `bulletimpact`: what a bullet striking it sounds like.
+    pub bullet_impact: Option<String>,
+    /// `gamematerial`: the `CHAR_TEX_*` letter impacts and decals are chosen by.
+    pub game_material: Option<char>,
 }
 
 /// Surface properties by lowercase name, each already merged with its `base`.
@@ -362,12 +366,17 @@ impl SurfaceProperties {
                 .unwrap_or_default();
             for (k, v) in block {
                 let Value::Text(v) = v else { continue };
+                if k.eq_ignore_ascii_case("gamematerial") {
+                    sounds.game_material = v.trim().chars().next().map(|c| c.to_ascii_uppercase());
+                    continue;
+                }
                 let slot = match k.to_ascii_lowercase().as_str() {
                     "stepleft" => &mut sounds.step_left,
                     "stepright" => &mut sounds.step_right,
                     "impactsoft" => &mut sounds.impact_soft,
                     "impacthard" => &mut sounds.impact_hard,
                     "break" => &mut sounds.break_sound,
+                    "bulletimpact" => &mut sounds.bullet_impact,
                     _ => continue,
                 };
                 *slot = Some(v.clone());

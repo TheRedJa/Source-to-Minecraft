@@ -19,6 +19,13 @@ use crate::voxel::mesh::Triangle;
 pub struct Surface {
     pub index: usize,
     pub triangles: Vec<Triangle>,
+    /// Each triangle's corners' places on the displacement's grid, `[s, t]`
+    /// from 0 to 1: `s` across from the corner 0 to 1 edge towards the 3 to 2
+    /// edge, `t` along corner 0 to 1. The base face's lightmap spreads evenly
+    /// over the grid, so this is where each corner's light is.
+    pub grid: Vec<[[f64; 2]; 3]>,
+    /// The base face, whose lightmap the displacement wears.
+    pub face: usize,
     /// The side the displacement is seen from, which is the side the player
     /// walks on; solid material lies behind it. It is the outward normal of the
     /// face it was built on, turned round for an inverted displacement, whose
@@ -44,19 +51,48 @@ impl super::Map {
         let disp = self.bsp.displacement(index)?;
 
         let mut triangles = Vec::new();
+        let mut grid = Vec::new();
         let mut bounds = Aabb::empty();
-        let mut corners = Vec::with_capacity(3);
-        for vertex in disp.triangulated_displaced_vertices() {
-            corners.push(Vec3::from(vertex));
-            if corners.len() == 3 {
-                let tri = Triangle::new(corners[0], corners[1], corners[2]);
-                if !tri.is_degenerate() {
-                    bounds.extend(tri.a);
-                    bounds.extend(tri.b);
-                    bounds.extend(tri.c);
-                    triangles.push(tri);
+        // `vbsp`'s grid: vertex `row * side + column`, rows along corner 0 to
+        // 1, columns from the 0 to 3 edge across. Triangulated as its
+        // `triangulated_displaced_vertices` does, keeping each corner's place.
+        let vertices: Vec<Vec3> = disp.displaced_vertices().map(Vec3::from).collect();
+        let steps = 1usize << disp.power;
+        let side = steps + 1;
+        if vertices.len() != side * side {
+            return None;
+        }
+        let place = |row: usize, column: usize| {
+            (
+                vertices[row * side + column],
+                [column as f64 / steps as f64, row as f64 / steps as f64],
+            )
+        };
+        for column in 0..steps {
+            for row in 0..steps {
+                // The same corner order as vbsp's index(x, y) = y * side + x,
+                // with x = column and y = row.
+                for corners in [
+                    [
+                        place(row, column),
+                        place(row, column + 1),
+                        place(row + 1, column),
+                    ],
+                    [
+                        place(row, column + 1),
+                        place(row + 1, column + 1),
+                        place(row + 1, column),
+                    ],
+                ] {
+                    let tri = Triangle::new(corners[0].0, corners[1].0, corners[2].0);
+                    if !tri.is_degenerate() {
+                        bounds.extend(tri.a);
+                        bounds.extend(tri.b);
+                        bounds.extend(tri.c);
+                        triangles.push(tri);
+                        grid.push(corners.map(|(_, at)| at));
+                    }
                 }
-                corners.clear();
             }
         }
         if triangles.is_empty() {
@@ -87,6 +123,8 @@ impl super::Map {
         Some(Surface {
             index,
             triangles,
+            grid,
+            face: disp.map_face as usize,
             normal: normal.normalized(),
             material: self.material_index(face.texture_info as usize),
             texcoord: self

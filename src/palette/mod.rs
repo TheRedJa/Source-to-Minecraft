@@ -180,7 +180,8 @@ impl Resolver {
             rule: matched,
         };
 
-        if self.is_tool_material(&material.name) {
+        let drawn_tool = self.drawn_tool(material);
+        if self.is_tool_material(&material.name) && !drawn_tool {
             return finish(None, Source::Tool);
         }
 
@@ -188,6 +189,8 @@ impl Resolver {
         if let Some((index, rule)) = self.rules.matches(&material.name) {
             match &rule.action {
                 Action::Block(block) => return finish(Some(block.clone()), Source::Rule(index)),
+                // `tools/*` is skipped as never drawn; one the compiler drew is a wall.
+                Action::Skip if drawn_tool => {}
                 Action::Skip => return finish(None, Source::Rule(index)),
                 // `auto` hands over to the colour matcher, narrowed to the
                 // rule's own block set if it named one. The reported source is
@@ -249,6 +252,13 @@ impl Resolver {
         lower.starts_with("tools/")
     }
 
+    /// A tool texture Source draws as a wall: `toolsblack`, `toolswhite`.
+    /// Sky materials stay sky; they are drawn through, not as walls.
+    fn drawn_tool(&self, material: &Material) -> bool {
+        let lower = material.name.to_ascii_lowercase();
+        material.drawn && lower.starts_with("tools/") && !lower.contains("skybox")
+    }
+
     /// The block for a material index, or `None` if its faces are dropped.
     pub fn block_for_material(&self, material: usize) -> Option<&str> {
         self.assignments.get(material)?.block.as_deref()
@@ -287,6 +297,7 @@ mod tests {
             name: name.into(),
             raw_name: name.into(),
             reflectivity,
+            drawn: true,
         }
     }
 
@@ -386,6 +397,20 @@ mod tests {
     }
 
     #[test]
+    fn a_tool_texture_source_draws_is_a_wall() {
+        let mut black = material("tools/toolsblack", [0.0; 3]);
+        let mut nodraw = material("tools/toolsnodraw", [0.0; 3]);
+        nodraw.drawn = false;
+        let mut sky = material("tools/toolsskybox", [0.5; 3]);
+        sky.drawn = true;
+        black.drawn = true;
+        let r = resolver_with(&Config::default(), &[black, nodraw, sky]);
+        assert!(r.block_for_material(0).is_some());
+        assert!(r.block_for_material(1).is_none());
+        assert!(r.block_for_material(2).is_none());
+    }
+
+    #[test]
     fn tool_skipping_can_be_turned_off() {
         let mut config = Config::default();
         config.contents.skip_tool_brushes = false;
@@ -413,10 +438,9 @@ mod tests {
 
     #[test]
     fn tool_materials_produce_no_block() {
-        let materials = [
-            material("tools/toolsnodraw", [0.0, 0.0, 0.0]),
-            material("metal/metalwall001a", [0.2, 0.2, 0.2]),
-        ];
+        let mut nodraw = material("tools/toolsnodraw", [0.0, 0.0, 0.0]);
+        nodraw.drawn = false;
+        let materials = [nodraw, material("metal/metalwall001a", [0.2, 0.2, 0.2])];
         let r = resolver_with(&Config::default(), &materials);
         assert_eq!(r.block_for_material(0), None);
         assert_eq!(r.assignments()[0].source, Source::Tool);

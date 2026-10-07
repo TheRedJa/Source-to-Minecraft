@@ -1,0 +1,19 @@
+{
+    "vertex": "src2mc:skybox",
+    "fragment": "src2mc:skybox",
+    "samplers": [
+        { "name": "Sampler0" },
+        { "name": "Sampler1" }
+    ],
+    "uniforms": [
+        { "name": "ModelViewMat", "type": "matrix4x4", "count": 16, "values": [ 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0 ] },
+        { "name": "ProjMat", "type": "matrix4x4", "count": 16, "values": [ 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0 ] },
+        { "name": "Offset", "type": "float", "count": 3, "values": [ 0.0, 0.0, 0.0 ] },
+        { "name": "Tint", "type": "float", "count": 3, "values": [ 1.0, 1.0, 1.0 ] },
+        { "name": "VertexLit", "type": "float", "count": 1, "values": [ 0.0 ] },
+        { "name": "Cutout", "type": "float", "count": 1, "values": [ 0.0 ] },
+        { "name": "Exposure", "type": "float", "count": 1, "values": [ 1.0 ] },
+        { "name": "SkyFogColor", "type": "float", "count": 3, "values": [ 1.0, 1.0, 1.0 ] },
+        { "name": "SkyFogRange", "type": "float", "count": 3, "values": [ 0.0, 0.0, 0.0 ] }
+    ]
+}

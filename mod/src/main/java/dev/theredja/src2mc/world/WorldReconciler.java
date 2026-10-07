@@ -19,13 +19,7 @@ public final class WorldReconciler {
 
     public static void onChunkLoad(ChunkEvent.Load event) {
         if (!(event.getLevel() instanceof ServerLevel level) || !(event.getChunk() instanceof LevelChunk chunk)) return;
-        level.getServer().execute(() -> {
-            reconcileChunk(level, chunk, false);
-            // Light is stored with the chunk, so one loaded from disk arrives
-            // lit as it was written -- before the bake existed, or from a
-            // bundle that has since changed.
-            LightOcclusion.applyChunk(level, chunk.getPos().x, chunk.getPos().z);
-        });
+        level.getServer().execute(() -> reconcileChunk(level, chunk, false));
     }
 
     public static Counts reconcileChunk(ServerLevel level, LevelChunk chunk) {
@@ -56,9 +50,6 @@ public final class WorldReconciler {
                 anchors++;
                 if (result == PlacementIndex.Registration.ADDED) {
                     dev.theredja.src2mc.network.PlacementNetwork.broadcast(level);
-                    // A new placement brings its own sky light, and chunks
-                    // already loaded were lit without it.
-                    LightOcclusion.rebuild(level);
                 }
                 if (block == Src2mcWorldContent.PLACEHOLDER.get()) { replace(level, entity.getBlockPos(), Src2mcWorldContent.MAP_ANCHOR.get(), payload); healed++; }
             } else if (block == Src2mcWorldContent.PROP_ROOT.get()

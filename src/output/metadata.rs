@@ -103,6 +103,19 @@ pub struct MapMetadata {
     /// none.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub logic_props: Option<String>,
+    /// Optional sky table (section 20). Absent when the map has no sky face.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sky: Option<String>,
+    /// Optional 3D skybox (section 21). Absent without a `sky_camera` room.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skybox: Option<String>,
+    /// Optional baked light (section 22): lightmap pages, ambient samples and
+    /// static props' vertex light.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub light: Option<String>,
+    /// Optional particle systems (section 23).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub particles: Option<String>,
     pub diagnostics: String,
 }
 
@@ -596,6 +609,10 @@ mod tests {
             logic: None,
             movers: None,
             logic_props: None,
+            sky: None,
+            skybox: None,
+            light: None,
+            particles: None,
             diagnostics: "maps/d1_01/diagnostics.json".into(),
         };
         let value: serde_json::Value =

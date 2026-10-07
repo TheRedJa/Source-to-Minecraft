@@ -34,7 +34,8 @@ final class BundleValidatorTest {
             if (map.logic() == null) continue;
             System.out.println("validated " + map.mapId() + ": " + map.logic().entities().size() + " entities, "
                 + map.logic().volumes().size() + " volumes, " + map.logic().scenes().size() + " scenes, "
-                + map.logic().captions().size() + " captions, " + (map.audio() == null ? 0 : map.audio().scripts().size()) + " scripts");
+                + map.logic().captions().size() + " captions, " + (map.audio() == null ? 0 : map.audio().scripts().size()) + " scripts, "
+                + (map.sky() == null ? "no sky" : map.sky().faces().size() + " sky faces"));
         }
     }
 
@@ -224,8 +225,53 @@ final class BundleValidatorTest {
         assertSurfacesRejected(BundleErrorCode.UNSUPPORTED_VERSION, "version 1", version1);
 
         byte[] overCounted = surfaces(fragment(0, UNOWNED, 0, 0, 0, 0, 0, triangle));
-        overCounted[20] = 2; // header fragment count 2, one record written
+        overCounted[24] = 2; // header fragment count 2, one record written
         assertSurfacesRejected(BundleErrorCode.INVALID_SCHEMA, "fragment count", overCounted);
+    }
+
+    @Test
+    void readsASkyTableAndItsSides() throws Exception {
+        byte[] png = {(byte) 137, 80, 78, 71, 13, 10, 26, 10, 0};
+        String id = sha256(png);
+        Path bundle = directory.resolve("sky.src2mc");
+        writeBundle(bundle, 1, "hl2", skyPayloads(sky(HexFormat.of().parseHex(id), 3), png));
+        BundleMap map = new BundleValidator().validate(bundle).maps().getFirst();
+        assertEquals(1, map.sky().faces().size());
+        assertEquals(id, map.sky().sides().getFirst());
+        assertEquals(null, map.sky().sides().get(1));
+        assertEquals("sky/" + id + ".png", map.sky().sidePath(0));
+
+        Path tooFew = directory.resolve("sky-two-corners.src2mc");
+        writeBundle(tooFew, 1, "hl2", skyPayloads(sky(HexFormat.of().parseHex(id), 2), png));
+        assertCode(BundleErrorCode.INVALID_SCHEMA, tooFew);
+
+        Path wrongId = directory.resolve("sky-wrong-id.src2mc");
+        byte[] other = HexFormat.of().parseHex(id);
+        other[0] ^= 1;
+        Map<String, byte[]> payloads = skyPayloads(sky(other, 3), png);
+        payloads.put("sky/" + HexFormat.of().formatHex(other) + ".png", png);
+        writeBundle(wrongId, 1, "hl2", payloads);
+        assertCode(BundleErrorCode.HASH_MISMATCH, wrongId);
+    }
+
+    private static Map<String, byte[]> skyPayloads(byte[] sky, byte[] png) throws Exception {
+        Map<String, byte[]> payloads = emptyMapPayloads();
+        payloads.put("maps/d1_01.json", new String(payloads.get("maps/d1_01.json"), StandardCharsets.UTF_8)
+            .replace("\"diagnostics\":", "\"sky\":\"maps/d1_01/sky.s2sky\",\"diagnostics\":").getBytes(StandardCharsets.UTF_8));
+        payloads.put("maps/d1_01/sky.s2sky", sky);
+        payloads.put("sky/" + sha256(png) + ".png", png);
+        return payloads;
+    }
+
+    /** A sky table with its first side {@code side} and the rest missing, and one face of {@code corners} corners. */
+    private static byte[] sky(byte[] side, int corners) {
+        ByteBuffer output = ByteBuffer.allocate(8 + 4 + 33 + 5 + 4 + 2 + corners * 12).order(ByteOrder.LITTLE_ENDIAN);
+        output.put("S2SKY\0\0\0".getBytes(StandardCharsets.ISO_8859_1)).putInt(1);
+        output.put((byte) 1).put(side);
+        for (int i = 0; i < 5; i++) output.put((byte) 0);
+        output.putInt(1).putShort((short) corners);
+        for (int i = 0; i < corners * 3; i++) output.putFloat(i + 1);
+        return output.array();
     }
 
     private void assertFragmentsRejected(BundleErrorCode code, String label, byte[]... fragments) throws Exception {
@@ -249,13 +295,13 @@ final class BundleValidatorTest {
         return payloads;
     }
 
-    /** A v2 surface table: one UV region and every fragment in section (0, 0, 0). */
+    /** A v3 surface table: one UV region, no light region, and every fragment in section (0, 0, 0). */
     private static byte[] surfaces(byte[]... fragments) {
-        int size = 8 + 16 + 64 + 16;
+        int size = 8 + 20 + 64 + 16;
         for (byte[] fragment : fragments) size += fragment.length;
         ByteBuffer output = ByteBuffer.allocate(size).order(ByteOrder.LITTLE_ENDIAN);
         output.put("S2FACE\0\0".getBytes(StandardCharsets.ISO_8859_1));
-        output.putInt(2).putInt(1).putInt(1).putInt(fragments.length);
+        output.putInt(3).putInt(1).putInt(0).putInt(1).putInt(fragments.length);
         for (double value : new double[]{1, 0, 0, 0, 0, 1, 0, 0}) output.putDouble(value);
         output.putInt(0).putInt(0).putInt(0).putInt(fragments.length);
         for (byte[] fragment : fragments) output.put(fragment);
@@ -263,9 +309,9 @@ final class BundleValidatorTest {
     }
 
     private static byte[] fragment(int cell, int flags, int kind, int material, int uv, int primary, int secondary, int... coords) {
-        ByteBuffer output = ByteBuffer.allocate(21 + coords.length * 2).order(ByteOrder.LITTLE_ENDIAN);
+        ByteBuffer output = ByteBuffer.allocate(25 + coords.length * 2).order(ByteOrder.LITTLE_ENDIAN);
         output.putShort((short) cell).put((byte) flags).put((byte) kind)
-            .putInt(material).putInt(uv).putInt(primary).putInt(secondary).put((byte) (coords.length / 3));
+            .putInt(material).putInt(uv).putInt(-1).putInt(primary).putInt(secondary).put((byte) (coords.length / 3));
         for (int coord : coords) output.putShort((short) coord);
         return output.array();
     }
@@ -334,7 +380,7 @@ final class BundleValidatorTest {
             + "\"props\":\"maps/d1_01/props.s2props\",\"diagnostics\":\"maps/d1_01/diagnostics.json\"}\n").getBytes(StandardCharsets.UTF_8));
         payloads.put("maps/d1_01/diagnostics.json", "{\"format\":\"src2mc-diagnostics\",\"version\":1,\"messages\":[]}\n".getBytes(StandardCharsets.UTF_8));
         payloads.put("maps/d1_01/props.s2props", binaryHeader("S2PROP\0\0", 1, 0));
-        payloads.put("maps/d1_01/surfaces.s2faces", binaryHeader("S2FACE\0\0", 2, 0, 0, 0));
+        payloads.put("maps/d1_01/surfaces.s2faces", binaryHeader("S2FACE\0\0", 3, 0, 0, 0, 0));
         return payloads;
     }
 

@@ -108,7 +108,14 @@ impl Vfs {
     /// everything else is packed.
     pub fn add_dir(&mut self, root: &Path) {
         let mut files = HashMap::new();
-        for tree in ["materials", "sound", "scripts", "scenes", "resource"] {
+        for tree in [
+            "materials",
+            "sound",
+            "scripts",
+            "scenes",
+            "resource",
+            "particles",
+        ] {
             let dir = root.join(tree);
             if dir.is_dir() {
                 index_dir(&dir, root, &mut files);

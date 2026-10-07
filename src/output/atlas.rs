@@ -71,11 +71,27 @@ pub fn analyze_resolution(
     })
 }
 
+/// `output` scaled down, keeping its aspect ratio, so it fits one atlas region
+/// ([`USABLE_AXIS`]) and is never split across pages.
+pub fn fit_one_region(output: [u32; 2]) -> [u32; 2] {
+    let largest = output[0].max(output[1]);
+    if largest <= USABLE_AXIS {
+        return output;
+    }
+    let scale = f64::from(USABLE_AXIS) / f64::from(largest);
+    std::array::from_fn(|axis| {
+        ((f64::from(output[axis]) * scale).round() as u32).clamp(1, USABLE_AXIS)
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LogicalTexture {
     pub content_id: String,
     pub width: u32,
     pub height: u32,
+    /// Packed after every texture without it: the 3D skybox room's own
+    /// textures, which must not spread the map's over more pages.
+    pub after_map: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,6 +138,9 @@ struct Piece {
 
 /// Deterministic shelf packing. Discovery order cannot change the result.
 /// Oversized images become source rectangles without changing pixel count.
+/// The map's textures come first, tallest first so each shelf is filled by
+/// pieces of about its height: in content ID order, furnace's 0.2 pages of
+/// texels took 2 pages.
 pub fn pack(textures: &[LogicalTexture]) -> Result<Layout> {
     let mut ordered = textures.to_vec();
     ordered.sort_by(|a, b| a.content_id.cmp(&b.content_id));
@@ -131,6 +150,13 @@ pub fn pack(textures: &[LogicalTexture]) -> Result<Layout> {
             .all(|p| p[0].content_id != p[1].content_id),
         "duplicate logical texture content ID"
     );
+    ordered.sort_by(|a, b| {
+        a.after_map
+            .cmp(&b.after_map)
+            .then(b.height.min(USABLE_AXIS).cmp(&a.height.min(USABLE_AXIS)))
+            .then(b.width.cmp(&a.width))
+            .then(a.content_id.cmp(&b.content_id))
+    });
     let mut pieces = Vec::new();
     for texture in ordered {
         ensure!(
@@ -345,6 +371,7 @@ mod tests {
             content_id: id.into(),
             width,
             height,
+            after_map: false,
         }
     }
 
@@ -362,6 +389,54 @@ mod tests {
             assert!(region.allocation.x + region.allocation.width + GUTTER <= PAGE_SIZE);
             assert!(region.allocation.y + region.allocation.height + GUTTER <= PAGE_SIZE);
         }
+    }
+
+    #[test]
+    fn textures_after_the_map_never_share_its_first_pages() {
+        let mut textures: Vec<LogicalTexture> = (0..40)
+            .map(|i| texture(&format!("map{i:02}"), 64 + i * 8, 64 + i * 8))
+            .collect();
+        for i in 0..4 {
+            let mut room = texture(&format!("room{i}"), 2048, 2048);
+            room.after_map = true;
+            textures.push(room);
+        }
+        let layout = pack(&textures).unwrap();
+        let last_map_page = layout
+            .regions
+            .iter()
+            .filter(|r| r.content_id.starts_with("map"))
+            .map(|r| r.page)
+            .max()
+            .unwrap();
+        assert_eq!(last_map_page, 0);
+        let first_room = layout
+            .regions
+            .iter()
+            .position(|r| r.content_id.starts_with("room"))
+            .unwrap();
+        assert!(
+            layout.regions[..first_room]
+                .iter()
+                .all(|r| r.content_id.starts_with("map"))
+        );
+    }
+
+    #[test]
+    fn tall_pieces_share_shelves_with_pieces_of_their_height() {
+        // In content ID order these alternate tall and short, and every shelf
+        // is as tall as its tallest piece; tallest first they fit one page.
+        let textures: Vec<LogicalTexture> = (0..112)
+            .map(|i| {
+                if i % 2 == 0 {
+                    texture(&format!("{i:03}"), 480, 480)
+                } else {
+                    texture(&format!("{i:03}"), 16, 16)
+                }
+            })
+            .collect();
+        let layout = pack(&textures).unwrap();
+        assert_eq!(layout.page_count, 1);
     }
 
     #[test]
@@ -436,6 +511,15 @@ mod tests {
                 .output,
             [2048, 2048]
         );
+    }
+
+    #[test]
+    fn effect_textures_fit_one_region() {
+        assert_eq!(fit_one_region([4096, 4096]), [USABLE_AXIS, USABLE_AXIS]);
+        assert_eq!(fit_one_region([8192, 2048]), [USABLE_AXIS, 1016]);
+        assert_eq!(fit_one_region([2048, 512]), [2048, 512]);
+        let layout = pack(&[texture("fire", USABLE_AXIS, USABLE_AXIS)]).unwrap();
+        assert_eq!(layout.regions.len(), 1);
     }
 
     #[test]

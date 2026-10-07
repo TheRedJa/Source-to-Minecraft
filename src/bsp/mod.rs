@@ -5,6 +5,7 @@
 
 pub mod displacement;
 pub mod entities;
+pub mod lighting;
 pub mod logic_props;
 pub mod lumps;
 pub mod props;
@@ -107,6 +108,12 @@ pub struct Material {
     /// so radiosity can bounce light off the surface, which makes it a free
     /// stand-in for decoding the `.vtf` ourselves.
     pub reflectivity: [f64; 3],
+    /// Some face wearing it is drawn: the compiler flagged it neither
+    /// `NODRAW`, `SKIP`, `HINT`, `TRIGGER` nor sky. A tool texture usually
+    /// is not, but `tools/toolsblack` and `tools/toolswhite` are plain unlit
+    /// walls Source draws; Portal 2 builds the dark void around its chambers
+    /// from them. Materials not from the BSP's faces count as drawn.
+    pub drawn: bool,
 }
 
 /// Undo the decorations the map compiler adds to material paths.
@@ -198,6 +205,11 @@ pub struct Map {
     pub repaired_bytes: usize,
     /// The 3D skybox room, found on first use.
     skybox: std::sync::OnceLock<Option<skybox::Skybox>>,
+    /// The baked light vrad wrote: lightmaps, HDR when the map has them.
+    pub light: lighting::BakedLight,
+    /// The ambient light cubes vrad sampled in each leaf, for what has no
+    /// lightmap or vertex light of its own.
+    pub ambient: lighting::Ambient,
 }
 
 impl Map {
@@ -234,6 +246,10 @@ impl Map {
             .with_context(|| format!("reading leaf lump of {}", path.display()))?;
         let static_props = rawprops::static_props(&data)
             .with_context(|| format!("reading static props of {}", path.display()))?;
+        let light = lighting::BakedLight::read(&data)
+            .with_context(|| format!("reading the light of {}", path.display()))?;
+        let ambient = lighting::Ambient::read(&data, &leaf_brushes, light.hdr)
+            .with_context(|| format!("reading the ambient light of {}", path.display()))?;
 
         // `vbsp` insists the entity lump is valid UTF-8; shipped maps are not
         // always. Repair in place before handing it over.
@@ -245,6 +261,22 @@ impl Map {
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| "map".into());
+        // vbsp's `textures.cpp` sets these for every face it never draws.
+        let hidden = vbsp::TextureFlags::NODRAW
+            | vbsp::TextureFlags::SKIP
+            | vbsp::TextureFlags::HINT
+            | vbsp::TextureFlags::TRIGGER
+            | vbsp::TextureFlags::SKY
+            | vbsp::TextureFlags::SKY2D;
+        let mut drawn = vec![false; bsp.textures_data.len()];
+        for info in &bsp.textures_info {
+            if let Ok(index) = usize::try_from(info.texture_data_index)
+                && index < drawn.len()
+                && !info.flags.intersects(hidden)
+            {
+                drawn[index] = true;
+            }
+        }
         let materials = (0..bsp.textures_data.len())
             .map(|index| {
                 let data = &bsp.textures_data[index];
@@ -252,6 +284,7 @@ impl Map {
                 Material {
                     name: normalize_material(&raw_name),
                     raw_name,
+                    drawn: drawn[index],
                     reflectivity: [
                         data.reflectivity.x as f64,
                         data.reflectivity.y as f64,
@@ -270,7 +303,14 @@ impl Map {
             materials,
             repaired_bytes,
             skybox: std::sync::OnceLock::new(),
+            light,
+            ambient,
         })
+    }
+
+    /// Every leaf in BSP file order, which node children index.
+    pub fn raw_leaves(&self) -> &[rawleaves::RawLeaf] {
+        &self.leaf_brushes
     }
 
     /// The 3D skybox room, if the map has one.

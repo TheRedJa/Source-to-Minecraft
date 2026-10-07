@@ -1,0 +1,1175 @@
+{
+ "children": {
+  "delay": "0.0"
+ },
+ "functions": {
+  "Alpha Fade In Random": {
+   "class": "C_OP_FadeIn",
+   "kind": "operator",
+   "parameters": {
+    "fade in curve exponent": "0",
+    "fade in time exponent": "1",
+    "fade in time max": ".25",
+    "fade in time min": ".25",
+    "proportional 0/1": "1"
+   }
+  },
+  "Alpha Fade Out Random": {
+   "class": "C_OP_FadeOut",
+   "kind": "operator",
+   "parameters": {
+    "ease in and out": "1",
+    "fade bias": "0.5",
+    "fade out time exponent": "1",
+    "fade out time max": ".25",
+    "fade out time min": ".25",
+    "proportional 0/1": "1"
+   }
+  },
+  "Alpha Fade and Decay": {
+   "class": "C_OP_FadeAndKill",
+   "kind": "operator",
+   "parameters": {
+    "end_alpha": "0",
+    "end_fade_in_time": "0.5",
+    "end_fade_out_time": "1",
+    "start_alpha": "1",
+    "start_fade_in_time": "0",
+    "start_fade_out_time": "0.5"
+   }
+  },
+  "Alpha Random": {
+   "class": "C_INIT_RandomAlpha",
+   "kind": "initializer",
+   "parameters": {
+    "alpha_max": "255",
+    "alpha_min": "255",
+    "alpha_random_exponent": "1"
+   }
+  },
+  "Assign target CP": {
+   "class": "C_INIT_AssignTargetCP",
+   "kind": "initializer",
+   "parameters": {
+    "maximum end control point": "10",
+    "starting control point": "0"
+   }
+  },
+  "Collision via traces": {
+   "class": "C_OP_WorldTraceConstraint",
+   "kind": "constraint",
+   "parameters": {
+    "amount of bounce": "0",
+    "amount of slide": "0",
+    "brush only": "0",
+    "collision group": "NONE",
+    "collision mode": "0",
+    "control point movement distance tolerance": "5",
+    "control point offset for fast collisions": "0 0 0",
+    "kill particle on collision": "0",
+    "radius scale": "1",
+    "trace accuracy tolerance": "24"
+   }
+  },
+  "Color Fade": {
+   "class": "C_OP_ColorInterpolate",
+   "kind": "operator",
+   "parameters": {
+    "color_fade": "255 255 255 255",
+    "ease_in_and_out": "1",
+    "fade_end_time": "1",
+    "fade_start_time": "0"
+   }
+  },
+  "Color Light from Control Point": {
+   "class": "C_OP_ControlpointLight",
+   "kind": "operator",
+   "parameters": {
+    "Clamp Maximum Light Value to Initial Color": "0",
+    "Clamp Minimum Light Value to Initial Color": "0",
+    "Compute Normals From Control Points": "0",
+    "Half-Lambert Normals": "1",
+    "Initial Color Bias": "0.0",
+    "Light 1 0% Distance": "200",
+    "Light 1 50% Distance": "100",
+    "Light 1 Color": "0 0 0 255",
+    "Light 1 Control Point": "0",
+    "Light 1 Control Point Offset": "0 0 0",
+    "Light 1 Direction": "0 0 0",
+    "Light 1 Dynamic Light": "0",
+    "Light 1 Spot Inner Cone": "30.0",
+    "Light 1 Spot Outer Cone": "45.0",
+    "Light 1 Type 0=Point 1=Spot": "0",
+    "Light 2 0% Distance": "200",
+    "Light 2 50% Distance": "100",
+    "Light 2 Color": "0 0 0 255",
+    "Light 2 Control Point": "0",
+    "Light 2 Control Point Offset": "0 0 0",
+    "Light 2 Direction": "0 0 0",
+    "Light 2 Dynamic Light": "0",
+    "Light 2 Spot Inner Cone": "30.0",
+    "Light 2 Spot Outer Cone": "45.0",
+    "Light 2 Type 0=Point 1=Spot": "0",
+    "Light 3 0% Distance": "200",
+    "Light 3 50% Distance": "100",
+    "Light 3 Color": "0 0 0 255",
+    "Light 3 Control Point": "0",
+    "Light 3 Control Point Offset": "0 0 0",
+    "Light 3 Direction": "0 0 0",
+    "Light 3 Dynamic Light": "0",
+    "Light 3 Spot Inner Cone": "30.0",
+    "Light 3 Spot Outer Cone": "45.0",
+    "Light 3 Type 0=Point 1=Spot": "0",
+    "Light 4 0% Distance": "200",
+    "Light 4 50% Distance": "100",
+    "Light 4 Color": "0 0 0 255",
+    "Light 4 Control Point": "0",
+    "Light 4 Control Point Offset": "0 0 0",
+    "Light 4 Direction": "0 0 0",
+    "Light 4 Dynamic Light": "0",
+    "Light 4 Spot Inner Cone": "30.0",
+    "Light 4 Spot Outer Cone": "45.0",
+    "Light 4 Type 0=Point 1=Spot": "0"
+   }
+  },
+  "Color Random": {
+   "class": "C_INIT_RandomColor",
+   "kind": "initializer",
+   "parameters": {
+    "color1": "255 255 255 255",
+    "color2": "255 255 255 255",
+    "tint clamp max": "255 255 255 255",
+    "tint clamp min": "0 0 0 0",
+    "tint control point": "0",
+    "tint update movement threshold": "32",
+    "tint_perc": "0.0"
+   }
+  },
+  "Constrain distance to control point": {
+   "class": "C_OP_ConstrainDistance",
+   "kind": "constraint",
+   "parameters": {
+    "control point number": "0",
+    "global center point": "0",
+    "maximum distance": "100",
+    "minimum distance": "0",
+    "offset of center": "0 0 0"
+   }
+  },
+  "Constrain distance to path between two control points": {
+   "class": "C_OP_ConstrainDistanceToPath",
+   "kind": "constraint",
+   "parameters": {
+    "bulge control 0=random 1=orientation of start pnt 2=orientation of end point": "0",
+    "end control point number": "0",
+    "maximum distance": "100",
+    "maximum distance end": "-1",
+    "maximum distance middle": "-1",
+    "mid point position": "0.5",
+    "minimum distance": "0",
+    "random bulge": "0",
+    "start control point number": "0",
+    "travel time": "10"
+   }
+  },
+  "Cull Random": {
+   "class": "C_OP_Cull",
+   "kind": "operator",
+   "parameters": {
+    "Cull End Time": "1",
+    "Cull Percentage": "0.5",
+    "Cull Start Time": "0",
+    "Cull Time Exponent": "1"
+   }
+  },
+  "Cull relative to model": {
+   "class": "C_OP_ModelCull",
+   "kind": "operator",
+   "parameters": {
+    "control_point_number": "0",
+    "cull outside instead of inside": "0",
+    "use only bounding box": "0"
+   }
+  },
+  "Cull when crossing plane": {
+   "class": "C_OP_PlaneCull",
+   "kind": "operator",
+   "parameters": {
+    "Control Point for point on plane": "0",
+    "Cull plane offset": "0",
+    "Plane Normal": "0 0 1"
+   }
+  },
+  "Lifespan Decay": {
+   "class": "C_OP_Decay",
+   "kind": "operator",
+   "parameters": {}
+  },
+  "Lifespan Minimum Velocity Decay": {
+   "class": "C_OP_VelocityDecay",
+   "kind": "operator",
+   "parameters": {
+    "minimum velocity": "1"
+   }
+  },
+  "Lifetime From Control Point Life Time": {
+   "class": "C_INIT_ControlPointLifeTime",
+   "kind": "initializer",
+   "parameters": {
+    "maximum end control point": "10",
+    "starting control point": "0"
+   }
+  },
+  "Lifetime From Sequence": {
+   "class": "C_INIT_SequenceLifeTime",
+   "kind": "initializer",
+   "parameters": {
+    "Frames Per Second": "30"
+   }
+  },
+  "Lifetime Pre-Age Noise": {
+   "class": "C_INIT_AgeNoise",
+   "kind": "initializer",
+   "parameters": {
+    "absolute value": "0",
+    "invert absolute value": "0",
+    "spatial coordinate offset": "0 0 0",
+    "spatial noise coordinate scale": "1.0",
+    "start age maximum": "1",
+    "start age minimum": "0",
+    "time coordinate offset": "0",
+    "time noise coordinate scale": "1.0"
+   }
+  },
+  "Lifetime Random": {
+   "class": "C_INIT_RandomLifeTime",
+   "kind": "initializer",
+   "parameters": {
+    "lifetime_max": "0",
+    "lifetime_min": "0",
+    "lifetime_random_exponent": "1"
+   }
+  },
+  "Lifetime from Time to Impact": {
+   "class": "C_INIT_LifespanFromVelocity",
+   "kind": "initializer",
+   "parameters": {
+    "bias distance": "1 1 1",
+    "maximum points to cache": "16",
+    "maximum trace length": "1024",
+    "trace collision group": "NONE",
+    "trace offset": "0",
+    "trace recycle tolerance": "64"
+   }
+  },
+  "Move Particles Between 2 Control Points": {
+   "class": "C_INIT_MoveBetweenPoints",
+   "kind": "initializer",
+   "parameters": {
+    "end control point": "1",
+    "end spread": "0",
+    "maximum speed": "1",
+    "minimum speed": "1",
+    "start offset": "0"
+   }
+  },
+  "Movement Basic": {
+   "class": "C_OP_BasicMovement",
+   "kind": "operator",
+   "parameters": {
+    "drag": "0",
+    "gravity": "0 0 0",
+    "max constraint passes": "3"
+   }
+  },
+  "Movement Dampen Relative to Control Point": {
+   "class": "C_OP_DampenToCP",
+   "kind": "operator",
+   "parameters": {
+    "control_point_number": "0",
+    "dampen scale": "1",
+    "falloff range": "100"
+   }
+  },
+  "Movement Follow CP": {
+   "class": "C_OP_MovementFollowCP",
+   "kind": "operator",
+   "parameters": {
+    "catch up speed": "0",
+    "lerp to CP radius speed": "0",
+    "maximum end control point": "10",
+    "starting control point": "0",
+    "update particle life time": "0"
+   }
+  },
+  "Movement Lock to Bone": {
+   "class": "C_OP_LockToBone",
+   "kind": "operator",
+   "parameters": {
+    "control_point_number": "0",
+    "lifetime fade end": "0",
+    "lifetime fade start": "0"
+   }
+  },
+  "Movement Lock to Control Point": {
+   "class": "C_OP_PositionLock",
+   "kind": "operator",
+   "parameters": {
+    "control_point_number": "0",
+    "distance fade range": "0",
+    "end_fadeout_exponent": "1",
+    "end_fadeout_max": "1",
+    "end_fadeout_min": "1",
+    "lock rotation": "0",
+    "start_fadeout_exponent": "1",
+    "start_fadeout_max": "1",
+    "start_fadeout_min": "1"
+   }
+  },
+  "Movement Lock to Saved Position Along Path": {
+   "class": "C_OP_LockToSavedSequentialPath",
+   "kind": "operator",
+   "parameters": {
+    "Use sequential CP pairs between start and end point": "0",
+    "bulge": "0",
+    "bulge control 0=random 1=orientation of start pnt 2=orientation of end point": "0",
+    "end control point number": "1",
+    "mid point position": "0.5",
+    "start control point number": "0"
+   }
+  },
+  "Movement Maintain Position Along Path": {
+   "class": "C_OP_MaintainSequentialPath",
+   "kind": "operator",
+   "parameters": {
+    "bulge": "0",
+    "bulge control 0=random 1=orientation of start pnt 2=orientation of end point": "0",
+    "cohesion strength": "1",
+    "control point movement tolerance": "0",
+    "end control point number": "0",
+    "maximum distance": "0",
+    "mid point position": "0.5",
+    "particles to map from start to end": "100",
+    "restart behavior (0 = bounce, 1 = loop )": "1",
+    "start control point number": "0",
+    "use existing particle count": "0"
+   }
+  },
+  "Movement Match Particle Velocities": {
+   "class": "C_OP_VelocityMatchingForce",
+   "kind": "operator",
+   "parameters": {
+    "Control Point to Broadcast Speed and Direction To": "-1",
+    "Direction Matching Strength": "0.25",
+    "Speed Matching Strength": "0.25"
+   }
+  },
+  "Movement Max Velocity": {
+   "class": "C_OP_MaxVelocity",
+   "kind": "operator",
+   "parameters": {
+    "Maximum Velocity": "0"
+   }
+  },
+  "Movement Rotate Particle Around Axis": {
+   "class": "C_OP_MovementRotateParticleAroundAxis",
+   "kind": "operator",
+   "parameters": {
+    "Control Point": "0",
+    "Rotation Axis": "0 0 1",
+    "Rotation Rate": "180",
+    "Use Local Space": "0"
+   }
+  },
+  "Noise Scalar": {
+   "class": "C_OP_Noise",
+   "kind": "operator",
+   "parameters": {
+    "noise coordinate scale": "0.1",
+    "output field": "3",
+    "output maximum": "1",
+    "output minimum": "0"
+   }
+  },
+  "Noise Vector": {
+   "class": "C_OP_VectorNoise",
+   "kind": "operator",
+   "parameters": {
+    "noise coordinate scale": "0.1",
+    "output field": "6",
+    "output maximum": "1 1 1",
+    "output minimum": "0 0 0"
+   }
+  },
+  "Oscillate Scalar": {
+   "class": "C_OP_OscillateScalar",
+   "kind": "operator",
+   "parameters": {
+    "end time max": "1",
+    "end time min": "1",
+    "oscillation field": "7",
+    "oscillation frequency max": "1",
+    "oscillation frequency min": "1",
+    "oscillation multiplier": "2",
+    "oscillation rate max": "0",
+    "oscillation rate min": "0",
+    "oscillation start phase": ".5",
+    "proportional 0/1": "1",
+    "start time max": "0",
+    "start time min": "0",
+    "start/end proportional": "1"
+   }
+  },
+  "Oscillate Vector": {
+   "class": "C_OP_OscillateVector",
+   "kind": "operator",
+   "parameters": {
+    "end time max": "1",
+    "end time min": "1",
+    "oscillation field": "0",
+    "oscillation frequency max": "1 1 1",
+    "oscillation frequency min": "1 1 1",
+    "oscillation multiplier": "2",
+    "oscillation rate max": "0 0 0",
+    "oscillation rate min": "0 0 0",
+    "oscillation start phase": ".5",
+    "proportional 0/1": "1",
+    "start time max": "0",
+    "start time min": "0",
+    "start/end proportional": "1"
+   }
+  },
+  "Position Along Path Random": {
+   "class": "C_INIT_CreateAlongPath",
+   "kind": "initializer",
+   "parameters": {
+    "bulge": "0",
+    "bulge control 0=random 1=orientation of start pnt 2=orientation of end point": "0",
+    "end control point number": "0",
+    "maximum distance": "0",
+    "mid point position": "0.5",
+    "start control point number": "0"
+   }
+  },
+  "Position Along Path Sequential": {
+   "class": "C_INIT_CreateSequentialPath",
+   "kind": "initializer",
+   "parameters": {
+    "Save Offset": "0",
+    "Use sequential CP pairs between start and end point": "0",
+    "bulge": "0",
+    "bulge control 0=random 1=orientation of start pnt 2=orientation of end point": "0",
+    "end control point number": "0",
+    "maximum distance": "0",
+    "mid point position": "0.5",
+    "particles to map from start to end": "100",
+    "restart behavior (0 = bounce, 1 = loop )": "1",
+    "start control point number": "0"
+   }
+  },
+  "Position From Parent Particles": {
+   "class": "C_INIT_CreateFromParentParticles",
+   "kind": "initializer",
+   "parameters": {
+    "Inherited Velocity Scale": "0",
+    "Random Parent Particle Distribution": "0"
+   }
+  },
+  "Position In CP Hierarchy": {
+   "class": "C_INIT_CreateInHierarchy",
+   "kind": "initializer",
+   "parameters": {
+    "bulge": "0",
+    "bulge control 0=random 1=orientation of start pnt 2=orientation of end point": "0",
+    "distance_bias": "1 1 1",
+    "distance_bias_absolute_value": "0 0 0",
+    "end control point number": "1",
+    "growth time": "0.0",
+    "maximum distance": "0",
+    "mid point position": "0.5",
+    "start control point number": "0",
+    "use highest supplied end point": "0"
+   }
+  },
+  "Position Modify Offset Random": {
+   "class": "C_INIT_PositionOffset",
+   "kind": "initializer",
+   "parameters": {
+    "control_point_number": "0",
+    "offset in local space 0/1": "0",
+    "offset max": "0 0 0",
+    "offset min": "0 0 0",
+    "offset proportional to radius 0/1": "0"
+   }
+  },
+  "Position Modify Warp Random": {
+   "class": "C_INIT_PositionWarp",
+   "kind": "initializer",
+   "parameters": {
+    "control point number": "0",
+    "reverse warp (0/1)": "0",
+    "warp max": "1 1 1",
+    "warp min": "1 1 1",
+    "warp transition start time": "0",
+    "warp transition time (treats min/max as start/end sizes)": "0"
+   }
+  },
+  "Position Within Box Random": {
+   "class": "C_INIT_CreateWithinBox",
+   "kind": "initializer",
+   "parameters": {
+    "control point number": "0",
+    "max": "0 0 0",
+    "min": "0 0 0"
+   }
+  },
+  "Position Within Sphere Random": {
+   "class": "C_INIT_CreateWithinSphere",
+   "kind": "initializer",
+   "parameters": {
+    "bias in local system": "0",
+    "control_point_number": "0",
+    "create in model": "0",
+    "distance_bias": "1 1 1",
+    "distance_bias_absolute_value": "0 0 0",
+    "distance_max": "0",
+    "distance_min": "0",
+    "randomly distribute to highest supplied Control Point": "0",
+    "randomly distribution growth time": "0",
+    "speed_in_local_coordinate_system_max": "0 0 0",
+    "speed_in_local_coordinate_system_min": "0 0 0",
+    "speed_max": "0",
+    "speed_min": "0",
+    "speed_random_exponent": "1"
+   }
+  },
+  "Position from Parent Cache": {
+   "class": "C_INIT_CreateFromPlaneCache",
+   "kind": "initializer",
+   "parameters": {}
+  },
+  "Position on Model Random": {
+   "class": "C_INIT_CreateOnModel",
+   "kind": "initializer",
+   "parameters": {
+    "control_point_number": "0",
+    "direction bias": "0 0 0",
+    "force to be inside model": "0",
+    "hitbox scale": "1.0"
+   }
+  },
+  "Prevent passing through a plane": {
+   "class": "C_OP_PlanarConstraint",
+   "kind": "constraint",
+   "parameters": {
+    "control point number": "0",
+    "global normal": "0",
+    "global origin": "0",
+    "plane normal": "0 0 1",
+    "plane point": "0 0 0"
+   }
+  },
+  "Prevent passing through static part of world": {
+   "class": "C_OP_WorldCollideConstraint",
+   "kind": "constraint",
+   "parameters": {}
+  },
+  "Pull towards control point": {
+   "class": "C_OP_AttractToControlPoint",
+   "kind": "force",
+   "parameters": {
+    "amount of force": "0",
+    "control point number": "0",
+    "falloff power": "2"
+   }
+  },
+  "Radius Random": {
+   "class": "C_INIT_RandomRadius",
+   "kind": "initializer",
+   "parameters": {
+    "radius_max": "1",
+    "radius_min": "1",
+    "radius_random_exponent": "1"
+   }
+  },
+  "Radius Scale": {
+   "class": "C_OP_InterpolateRadius",
+   "kind": "operator",
+   "parameters": {
+    "ease_in_and_out": "0",
+    "end_time": "1",
+    "radius_end_scale": "1",
+    "radius_start_scale": "1",
+    "scale_bias": "0.5",
+    "start_time": "0"
+   }
+  },
+  "Random position within a curved cylinder": {
+   "class": "C_INIT_GeneralCylinder",
+   "kind": "initializer",
+   "parameters": {
+    "max scale factor for mapping cp velocity to particle velocity": "0",
+    "max scale factor for particle velocity along path": "0",
+    "maximum end control point for cylinder": "10",
+    "min scale factor for mapping cp velocity to particle velocity": "0",
+    "min scale factor for particle velocity along path": "0",
+    "starting control point for cylinder": "0"
+   }
+  },
+  "Remap CP Speed to CP": {
+   "class": "C_OP_RemapSpeedtoCP",
+   "kind": "operator",
+   "parameters": {
+    "Output field 0-2 X/Y/Z": "0",
+    "input control point": "0",
+    "input maximum": "1",
+    "input minimum": "0",
+    "output control point": "-1",
+    "output maximum": "1",
+    "output minimum": "0"
+   }
+  },
+  "Remap Control Point to Scalar": {
+   "class": "C_OP_RemapCPtoScalar",
+   "kind": "operator",
+   "parameters": {
+    "emitter lifetime end time (seconds)": "-1",
+    "emitter lifetime start time (seconds)": "-1",
+    "input control point number": "0",
+    "input field 0-2 X/Y/Z": "0",
+    "input maximum": "1",
+    "input minimum": "0",
+    "output field": "3",
+    "output is scalar of initial random range": "0",
+    "output maximum": "1",
+    "output minimum": "0"
+   }
+  },
+  "Remap Control Point to Vector": {
+   "class": "C_INIT_RemapCPtoVector",
+   "kind": "initializer",
+   "parameters": {
+    "accelerate position": "0",
+    "emitter lifetime end time (seconds)": "-1",
+    "emitter lifetime start time (seconds)": "-1",
+    "input control point number": "0",
+    "input maximum": "0 0 0",
+    "input minimum": "0 0 0",
+    "local space CP": "-1",
+    "offset position": "0",
+    "output field": "0",
+    "output is scalar of initial random range": "0",
+    "output maximum": "0 0 0",
+    "output minimum": "0 0 0"
+   }
+  },
+  "Remap Distance Between Two Control Points to Scalar": {
+   "class": "C_OP_DistanceBetweenCPs",
+   "kind": "operator",
+   "parameters": {
+    "LOS Failure Scalar": "0",
+    "LOS collision group": "NONE",
+    "Maximum Trace Length": "-1",
+    "distance maximum": "128",
+    "distance minimum": "0",
+    "ending control point": "1",
+    "ensure line of sight": "0",
+    "output field": "3",
+    "output is scalar of initial random range": "0",
+    "output maximum": "1",
+    "output minimum": "0",
+    "starting control point": "0"
+   }
+  },
+  "Remap Distance to Control Point to Scalar": {
+   "class": "C_OP_DistanceToCP",
+   "kind": "operator",
+   "parameters": {
+    "LOS Failure Scalar": "0",
+    "LOS collision group": "NONE",
+    "Maximum Trace Length": "-1",
+    "control point": "0",
+    "distance maximum": "128",
+    "distance minimum": "0",
+    "ensure line of sight": "0",
+    "only active within specified distance": "0",
+    "output field": "3",
+    "output is scalar of initial random range": "0",
+    "output maximum": "1",
+    "output minimum": "0"
+   }
+  },
+  "Remap Distance to Control Point to Vector": {
+   "class": "C_OP_DistanceToCPToVector",
+   "kind": "operator",
+   "parameters": {
+    "control point": "0",
+    "distance maximum": "128",
+    "distance minimum": "0",
+    "local space CP": "-1",
+    "only active within specified distance": "0",
+    "output field": "3",
+    "output maximum": "0 0 0",
+    "output minimum": "0 0 0"
+   }
+  },
+  "Remap Dot Product to Scalar": {
+   "class": "C_OP_RemapDotProductToScalar",
+   "kind": "operator",
+   "parameters": {
+    "first input control point": "0",
+    "input maximum (-1 to 1)": "1",
+    "input minimum (-1 to 1)": "0",
+    "only active within specified input range": "0",
+    "output field": "3",
+    "output is scalar of initial random range": "0",
+    "output maximum": "1",
+    "output minimum": "0",
+    "second input control point": "0",
+    "use particle velocity for first input": "0"
+   }
+  },
+  "Remap Initial Distance to Control Point to Scalar": {
+   "class": "C_INIT_DistanceToCPInit",
+   "kind": "initializer",
+   "parameters": {
+    "LOS Failure Scalar": "0",
+    "LOS collision group": "NONE",
+    "Maximum Trace Length": "-1",
+    "control point": "0",
+    "distance maximum": "128",
+    "distance minimum": "0",
+    "ensure line of sight": "0",
+    "only active within specified distance": "0",
+    "output field": "3",
+    "output is scalar of initial random range": "0",
+    "output maximum": "1",
+    "output minimum": "0"
+   }
+  },
+  "Remap Initial Scalar": {
+   "class": "C_INIT_RemapScalar",
+   "kind": "initializer",
+   "parameters": {
+    "emitter lifetime end time (seconds)": "-1",
+    "emitter lifetime start time (seconds)": "-1",
+    "input field": "8",
+    "input maximum": "1",
+    "input minimum": "0",
+    "only active within specified input range": "0",
+    "output field": "3",
+    "output is scalar of initial random range": "0",
+    "output maximum": "1",
+    "output minimum": "0"
+   }
+  },
+  "Remap Noise to Scalar": {
+   "class": "C_INIT_CreationNoise",
+   "kind": "initializer",
+   "parameters": {
+    "absolute value": "0",
+    "invert absolute value": "0",
+    "output field": "3",
+    "output maximum": "1",
+    "output minimum": "0",
+    "spatial coordinate offset": "0 0 0",
+    "spatial noise coordinate scale": "0.001",
+    "time coordinate offset": "0",
+    "time noise coordinate scale": "0.1",
+    "world time noise coordinate scale": "0"
+   }
+  },
+  "Remap Scalar": {
+   "class": "C_OP_RemapScalar",
+   "kind": "operator",
+   "parameters": {
+    "input field": "7",
+    "input maximum": "1",
+    "input minimum": "0",
+    "output field": "3",
+    "output maximum": "1",
+    "output minimum": "0"
+   }
+  },
+  "Remap Scalar to Vector": {
+   "class": "C_INIT_RemapScalarToVector",
+   "kind": "initializer",
+   "parameters": {
+    "control_point_number": "0",
+    "emitter lifetime end time (seconds)": "-1",
+    "emitter lifetime start time (seconds)": "-1",
+    "input field": "8",
+    "input maximum": "1",
+    "input minimum": "0",
+    "output field": "0",
+    "output is scalar of initial random range": "0",
+    "output maximum": "1 1 1",
+    "output minimum": "0 0 0",
+    "use local system": "1"
+   }
+  },
+  "Rotation Basic": {
+   "class": "C_OP_SpinUpdate",
+   "kind": "operator",
+   "parameters": {}
+  },
+  "Rotation Orient Relative to CP": {
+   "class": "C_OP_Orient2DRelToCP",
+   "kind": "operator",
+   "parameters": {
+    "Control Point": "0",
+    "Rotation Offset": "0",
+    "Spin Strength": "1"
+   }
+  },
+  "Rotation Orient to 2D Direction": {
+   "class": "C_OP_OrientTo2dDirection",
+   "kind": "operator",
+   "parameters": {
+    "Rotation Offset": "0",
+    "Spin Strength": "1"
+   }
+  },
+  "Rotation Random": {
+   "class": "C_INIT_RandomRotation",
+   "kind": "initializer",
+   "parameters": {
+    "rotation_initial": "0",
+    "rotation_offset_max": "360",
+    "rotation_offset_min": "0",
+    "rotation_random_exponent": "1"
+   }
+  },
+  "Rotation Speed Random": {
+   "class": "C_INIT_RandomRotationSpeed",
+   "kind": "initializer",
+   "parameters": {
+    "randomly_flip_direction": "1",
+    "rotation_speed_constant": "0",
+    "rotation_speed_random_exponent": "1",
+    "rotation_speed_random_max": "360",
+    "rotation_speed_random_min": "0"
+   }
+  },
+  "Rotation Spin Roll": {
+   "class": "C_OP_Spin",
+   "kind": "operator",
+   "parameters": {
+    "spin_rate_degrees": "0",
+    "spin_rate_min": "0",
+    "spin_stop_time": "0"
+   }
+  },
+  "Rotation Spin Yaw": {
+   "class": "C_OP_SpinYaw",
+   "kind": "operator",
+   "parameters": {
+    "yaw_rate_degrees": "0",
+    "yaw_rate_min": "0",
+    "yaw_stop_time": "0"
+   }
+  },
+  "Rotation Yaw Flip Random": {
+   "class": "C_INIT_RandomYawFlip",
+   "kind": "initializer",
+   "parameters": {
+    "Flip Percentage": ".5"
+   }
+  },
+  "Rotation Yaw Random": {
+   "class": "C_INIT_RandomYaw",
+   "kind": "initializer",
+   "parameters": {
+    "yaw_initial": "0",
+    "yaw_offset_max": "360",
+    "yaw_offset_min": "0",
+    "yaw_random_exponent": "1"
+   }
+  },
+  "Sequence Random": {
+   "class": "C_INIT_RandomSequence",
+   "kind": "initializer",
+   "parameters": {
+    "sequence_max": "0",
+    "sequence_min": "0"
+   }
+  },
+  "Sequence Two Random": {
+   "class": "C_INIT_RandomSecondSequence",
+   "kind": "initializer",
+   "parameters": {
+    "sequence_max": "0",
+    "sequence_min": "0"
+   }
+  },
+  "Set Control Point Positions": {
+   "class": "C_OP_SetControlPointPositions",
+   "kind": "operator",
+   "parameters": {
+    "Control Point to offset positions from": "0",
+    "First Control Point Location": "128 0 0",
+    "First Control Point Number": "1",
+    "First Control Point Parent": "0",
+    "Fourth Control Point Location": "0 -128 0",
+    "Fourth Control Point Number": "4",
+    "Fourth Control Point Parent": "0",
+    "Second Control Point Location": "0 128 0",
+    "Second Control Point Number": "2",
+    "Second Control Point Parent": "0",
+    "Set positions in world space": "0",
+    "Third Control Point Location": "-128 0 0",
+    "Third Control Point Number": "3",
+    "Third Control Point Parent": "0"
+   }
+  },
+  "Set Control Point To Particles' Center": {
+   "class": "C_OP_SetControlPointToCenter",
+   "kind": "operator",
+   "parameters": {
+    "Center Offset": "0 0 0",
+    "Control Point Number to Set": "1"
+   }
+  },
+  "Set Control Point To Player": {
+   "class": "C_OP_SetControlPointToPlayer",
+   "kind": "operator",
+   "parameters": {
+    "Control Point Number": "1",
+    "Control Point Offset": "0 0 0"
+   }
+  },
+  "Set child control points from particle positions": {
+   "class": "C_OP_SetChildControlPoints",
+   "kind": "operator",
+   "parameters": {
+    "# of control points to set": "1",
+    "First control point to set": "0",
+    "Group ID to affect": "0",
+    "Set cp density for particles": "0",
+    "Set cp orientation for particles": "0",
+    "Set cp radius for particles": "0",
+    "Set cp velocity for particles": "0",
+    "first particle to copy": "0"
+   }
+  },
+  "Trail Length Random": {
+   "class": "C_INIT_RandomTrailLength",
+   "kind": "initializer",
+   "parameters": {
+    "length_max": "0.1",
+    "length_min": "0.1",
+    "length_random_exponent": "1"
+   }
+  },
+  "Velocity Inherit from Control Point": {
+   "class": "C_INIT_InheritVelocity",
+   "kind": "initializer",
+   "parameters": {
+    "control point number": "0",
+    "velocity scale": "1"
+   }
+  },
+  "Velocity Noise": {
+   "class": "C_INIT_InitialVelocityNoise",
+   "kind": "initializer",
+   "parameters": {
+    "Absolute Value": "0 0 0",
+    "Apply Velocity in Local Space (0/1)": "0",
+    "Control Point Number": "0",
+    "Invert Abs Value": "0 0 0",
+    "Spatial Coordinate Offset": "0 0 0",
+    "Spatial Noise Coordinate Scale": "0.01",
+    "Time Coordinate Offset": "0",
+    "Time Noise Coordinate Scale": "1",
+    "output maximum": "1 1 1",
+    "output minimum": "0 0 0"
+   }
+  },
+  "Velocity Random": {
+   "class": "C_INIT_VelocityRandom",
+   "kind": "initializer",
+   "parameters": {
+    "control_point_number": "0",
+    "random_speed_max": "0",
+    "random_speed_min": "0",
+    "speed_in_local_coordinate_system_max": "0 0 0",
+    "speed_in_local_coordinate_system_min": "0 0 0"
+   }
+  },
+  "Velocity Repulse from World": {
+   "class": "C_INIT_InitialRepulsionVelocity",
+   "kind": "initializer",
+   "parameters": {
+    "Child Group ID to affect": "0",
+    "Inherit from Parent": "0",
+    "Offset instead of accelerate": "0",
+    "Offset proportional to radius 0/1": "0",
+    "Per Particle World Collision Tests": "0",
+    "Trace Length": "64.0",
+    "Use radius for Per Particle Trace Length": "0",
+    "collision group": "NONE",
+    "control points to broadcast to children (n + 1)": "-1",
+    "control_point_number": "0",
+    "maximum velocity": "1 1 1",
+    "minimum velocity": "0 0 0"
+   }
+  },
+  "emit noise": {
+   "class": "C_OP_NoiseEmitter",
+   "kind": "emitter",
+   "parameters": {
+    "absolute value": "0",
+    "emission maximum": "100",
+    "emission minimum": "0",
+    "emission_duration": "0",
+    "emission_start_time": "0",
+    "invert absolute value": "0",
+    "scale emission to used control points": "0.0",
+    "time coordinate offset": "0",
+    "time noise coordinate scale": "0.1",
+    "world time noise coordinate scale": "0"
+   }
+  },
+  "emit_continuously": {
+   "class": "C_OP_ContinuousEmitter",
+   "kind": "emitter",
+   "parameters": {
+    "emission_duration": "0",
+    "emission_rate": "100",
+    "emission_start_time": "0",
+    "scale emission to used control points": "0.0",
+    "use parent particles for emission scaling": "0"
+   }
+  },
+  "emit_instantaneously": {
+   "class": "C_OP_InstantaneousEmitter",
+   "kind": "emitter",
+   "parameters": {
+    "emission count scale control point": "-1",
+    "emission count scale control point field": "0",
+    "emission_start_time": "0",
+    "maximum emission per frame": "-1",
+    "num_to_emit": "100",
+    "num_to_emit_minimum": "-1"
+   }
+  },
+  "random force": {
+   "class": "C_OP_RandomForce",
+   "kind": "force",
+   "parameters": {
+    "max force": "0 0 0",
+    "min force": "0 0 0"
+   }
+  },
+  "render_animated_sprites": {
+   "class": "C_OP_RenderSprites",
+   "kind": "renderer",
+   "parameters": {
+    "Visibility Alpha Scale maximum": "1",
+    "Visibility Alpha Scale minimum": "0",
+    "Visibility Camera Depth Bias": "0",
+    "Visibility Proxy Input Control Point Number": "-1",
+    "Visibility Proxy Radius": "1.0",
+    "Visibility Radius Scale maximum": "1",
+    "Visibility Radius Scale minimum": "1",
+    "Visibility input maximum": "1",
+    "Visibility input minimum": "0",
+    "animation rate": ".1",
+    "animation_fit_lifetime": "0",
+    "orientation control point": "-1",
+    "orientation_type": "0",
+    "second sequence animation rate": "0",
+    "use animation rate as FPS": "0"
+   }
+  },
+  "render_rope": {
+   "class": "C_OP_RenderRope",
+   "kind": "renderer",
+   "parameters": {
+    "subdivision_count": "3",
+    "texel_size": "4.0f",
+    "texture_scroll_rate": "0.0f"
+   }
+  },
+  "render_screen_velocity_rotate": {
+   "class": "C_OP_RenderScreenVelocityRotate",
+   "kind": "renderer",
+   "parameters": {
+    "Visibility Alpha Scale maximum": "1",
+    "Visibility Alpha Scale minimum": "0",
+    "Visibility Camera Depth Bias": "0",
+    "Visibility Proxy Input Control Point Number": "-1",
+    "Visibility Proxy Radius": "1.0",
+    "Visibility Radius Scale maximum": "1",
+    "Visibility Radius Scale minimum": "1",
+    "Visibility input maximum": "1",
+    "Visibility input minimum": "0",
+    "forward_angle": "-90.0f",
+    "rotate_rate(dps)": "0.0f"
+   }
+  },
+  "render_sprite_trail": {
+   "class": "C_OP_RenderSpritesTrail",
+   "kind": "renderer",
+   "parameters": {
+    "Visibility Alpha Scale maximum": "1",
+    "Visibility Alpha Scale minimum": "0",
+    "Visibility Camera Depth Bias": "0",
+    "Visibility Proxy Input Control Point Number": "-1",
+    "Visibility Proxy Radius": "1.0",
+    "Visibility Radius Scale maximum": "1",
+    "Visibility Radius Scale minimum": "1",
+    "Visibility input maximum": "1",
+    "Visibility input minimum": "0",
+    "animation rate": ".1",
+    "length fade in time": "0",
+    "max length": "2000",
+    "min length": "0"
+   }
+  },
+  "twist around axis": {
+   "class": "C_OP_TwistAroundAxis",
+   "kind": "force",
+   "parameters": {
+    "amount of force": "0",
+    "object local space axis 0/1": "0",
+    "twist axis": "0 0 1"
+   }
+  }
+ },
+ "operator": {
+  "operator end fadein": "0",
+  "operator end fadeout": "0",
+  "operator fade oscillate": "0",
+  "operator start fadein": "0",
+  "operator start fadeout": "0"
+ },
+ "system": {
+  "Sort particles": "1",
+  "batch particle systems": "0",
+  "bounding_box_max": "10 10 10",
+  "bounding_box_min": "-10 -10 -10",
+  "color": "255 255 255 255",
+  "control point to disable rendering if it is the camera": "-1",
+  "cull_control_point": "0",
+  "cull_cost": "1",
+  "cull_radius": "0",
+  "cull_replacement_definition": "",
+  "group id": "0",
+  "initial_particles": "0",
+  "material": "vgui/white",
+  "max_particles": "1000",
+  "maximum draw distance": "100000.0",
+  "maximum sim tick rate": "0.0",
+  "maximum time step": "0.1",
+  "minimum rendered frames": "0",
+  "minimum sim tick rate": "0.0",
+  "radius": "5",
+  "rotation": "0",
+  "rotation_speed": "0",
+  "sequence_number": "0",
+  "sequence_number 1": "0",
+  "time to sleep when not drawn": "8",
+  "view model effect": "0"
+ }
+}

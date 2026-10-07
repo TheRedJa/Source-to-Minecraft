@@ -146,13 +146,12 @@ final class LightSampler {
                     double weight = (dx == 0 ? 1 - fx : fx) * (dy == 0 ? 1 - fy : fy) * (dz == 0 ? 1 - fz : fz);
                     int packed = LevelRenderer.getLightColor(level, state, cursor);
                     out.append(String.format(java.util.Locale.ROOT,
-                        "    corner (%d,%d,%d) w=%.3f %s solid=%s seen=%s engine sky=%d block=%d raw sky=%d block=%d baked sky=%d%s%n",
+                        "    corner (%d,%d,%d) w=%.3f %s solid=%s seen=%s engine sky=%d block=%d raw sky=%d block=%d%s%n",
                         cursor.getX(), cursor.getY(), cursor.getZ(), weight,
                         net.minecraft.core.registries.BuiltInRegistries.BLOCK.getKey(state.getBlock()),
                         solid, seen, LightTexture.sky(packed), LightTexture.block(packed),
                         level.getBrightness(net.minecraft.world.level.LightLayer.SKY, cursor),
                         level.getBrightness(net.minecraft.world.level.LightLayer.BLOCK, cursor),
-                        dev.theredja.src2mc.world.LightOcclusion.skyAt(level, cursor.getX(), cursor.getY(), cursor.getZ()),
                         solid || !seen ? "  (dropped)" : ""));
                 }
             }

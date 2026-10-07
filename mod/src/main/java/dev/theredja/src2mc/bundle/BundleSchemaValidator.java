@@ -30,7 +30,7 @@ final class BundleSchemaValidator {
     private static final byte[] PVS_MAGIC = {'S','2','P','V','I','S',0,0};
     private static final byte[] OCCLUSION_MAGIC = {'S','2','O','C','C','L',0,0};
     /** Fragment record bytes before the vertex array: cell, flags, kind, four u32s, vertex count. */
-    private static final int FRAGMENT_FIXED_BYTES = 21;
+    private static final int FRAGMENT_FIXED_BYTES = 25;
     /** The only flag byte an unowned fragment may carry: not owned, zero offset on every axis. */
     private static final int UNOWNED_FLAGS = 0x2A;
     private static final byte[] PNG_SIGNATURE = {(byte)137,80,78,71,13,10,26,10};
@@ -97,6 +97,10 @@ final class BundleSchemaValidator {
         if (map.has("logic")) expected.add("logic");
         if (map.has("movers")) expected.add("movers");
         if (map.has("logic_props")) expected.add("logic_props");
+        if (map.has("sky")) expected.add("sky");
+        if (map.has("skybox")) expected.add("skybox");
+        if (map.has("light")) expected.add("light");
+        if (map.has("particles")) expected.add("particles");
         expected.add("diagnostics");
         keys(map, expected.toArray(String[]::new));
         format(map, "src2mc-map", path);
@@ -204,6 +208,30 @@ final class BundleSchemaValidator {
             logicProps = validateLogicProps(zip, entries, json(zip, required(entries, logicPropsPath), logicPropsPath), prefix,
                 modelRefs.size(), logic, movers, propRecords, referenced);
         }
+        SkyTable sky = null;
+        if (map.has("sky")) {
+            String skyPath = exactPath(map, "sky", prefix + "sky.s2sky");
+            referenced.add(skyPath);
+            sky = validateSky(zip, entries, hashes, required(entries, skyPath), referenced);
+        }
+        SkyboxTable skybox = null;
+        if (map.has("skybox")) {
+            String skyboxPath = exactPath(map, "skybox", prefix + "skybox.s2box");
+            referenced.add(skyboxPath);
+            skybox = validateSkybox(zip, required(entries, skyboxPath), materials.size());
+        }
+        LightTable light = null;
+        if (map.has("light")) {
+            String lightPath = exactPath(map, "light", prefix + "light.s2light");
+            referenced.add(lightPath);
+            light = validateLight(zip, required(entries, lightPath), propRecords.size());
+        }
+        ParticleTable particles = null;
+        if (map.has("particles")) {
+            String particlesPath = exactPath(map, "particles", prefix + "particles.json");
+            referenced.add(particlesPath);
+            particles = validateParticles(json(zip, required(entries, particlesPath), particlesPath), materials.size());
+        }
         validateDiagnostics(json(zip, required(entries, diagnostics), diagnostics));
 
         // A map's meshes are the bulk of its validation and each is walked on
@@ -260,7 +288,336 @@ final class BundleSchemaValidator {
         long mapHeight = (long) max[1] - min[1] + 1;
         return new BundleMap(mapId, sourceName, min, max, anchor, loadedMaterials, modelRefs, propRecords, mapHeight > 384,
             surfaceTable, modelRefs.stream().map(BundleModel::contentId).collect(java.util.stream.Collectors.toUnmodifiableSet()), atlas, pvs, occlusion, collision, audio, logic, movers,
-            logicProps);
+            logicProps, sky, skybox, light, particles);
+    }
+
+    /** Format section 23. */
+    static ParticleTable validateParticles(JsonObject root, int materialCount) throws BundleValidationException {
+        keys(root, "format", "version", "systems", "materials", "impacts", "decals");
+        format(root, "src2mc-particles", "particles.json");
+        JsonArray materialArray = array(root, "materials");
+        limit(materialArray.size(), BundleLimits.MAX_PARTICLE_MATERIALS, "particle materials");
+        List<ParticleTable.Material> materials = new ArrayList<>();
+        for (JsonElement element : materialArray) {
+            JsonObject m = object(element, "particle material");
+            keys(m, "name", "material", "shader", "additive", "parameters", "sheet");
+            int id = uintIndex(m.get("material"), "particle material ID");
+            if (id >= materialCount) fail(BundleErrorCode.INVALID_REFERENCE, "particle material out of range");
+            Map<String, Double> parameters = new java.util.LinkedHashMap<>();
+            for (Map.Entry<String, JsonElement> entry : object(m.get("parameters"), "material parameters").entrySet()) {
+                parameters.put(entry.getKey(), finiteNumber(entry.getValue(), "material parameter"));
+            }
+            List<ParticleTable.Sequence> sheet = new ArrayList<>();
+            JsonArray sequences = array(m, "sheet");
+            limit(sequences.size(), BundleLimits.MAX_SHEET_SEQUENCES, "sheet sequences");
+            for (JsonElement sequence : sequences) {
+                if (sequence.isJsonNull()) { sheet.add(null); continue; }
+                JsonObject s = object(sequence, "sheet sequence");
+                keys(s, "clamp", "frames");
+                JsonArray frames = array(s, "frames");
+                limit(frames.size(), BundleLimits.MAX_SHEET_FRAMES, "sheet frames");
+                float[] durations = new float[frames.size()];
+                float[][] rects = new float[frames.size()][];
+                for (int f = 0; f < frames.size(); f++) {
+                    JsonElement frame = frames.get(f);
+                    if (!frame.isJsonArray() || frame.getAsJsonArray().size() != 2 || !frame.getAsJsonArray().get(1).isJsonArray())
+                        fail(BundleErrorCode.INVALID_SCHEMA, "sheet frame must be [seconds, rectangles]");
+                    durations[f] = (float) finiteNumber(frame.getAsJsonArray().get(0), "sheet frame time");
+                    JsonArray list = frame.getAsJsonArray().get(1).getAsJsonArray();
+                    if (list.isEmpty() || list.size() > 4) fail(BundleErrorCode.INVALID_SCHEMA, "sheet frame needs one to four rectangles");
+                    rects[f] = new float[list.size() * 4];
+                    for (int r = 0; r < list.size(); r++) {
+                        if (!list.get(r).isJsonArray() || list.get(r).getAsJsonArray().size() != 4) fail(BundleErrorCode.INVALID_SCHEMA, "sheet rectangle needs four values");
+                        for (int c = 0; c < 4; c++) rects[f][r * 4 + c] = (float) finiteNumber(list.get(r).getAsJsonArray().get(c), "sheet rectangle");
+                    }
+                }
+                JsonElement clamp = s.get("clamp");
+                if (clamp == null || !clamp.isJsonPrimitive() || !clamp.getAsJsonPrimitive().isBoolean()) fail(BundleErrorCode.INVALID_SCHEMA, "sheet clamp must be a boolean");
+                sheet.add(new ParticleTable.Sequence(clamp.getAsBoolean(), durations, rects));
+            }
+            JsonElement additive = m.get("additive");
+            if (additive == null || !additive.isJsonPrimitive() || !additive.getAsJsonPrimitive().isBoolean()) fail(BundleErrorCode.INVALID_SCHEMA, "additive must be a boolean");
+            materials.add(new ParticleTable.Material(string(m, "name"), id, string(m, "shader"), additive.getAsBoolean(), parameters,
+                java.util.Collections.unmodifiableList(sheet)));
+        }
+        JsonArray systemArray = array(root, "systems");
+        limit(systemArray.size(), BundleLimits.MAX_PARTICLE_SYSTEMS, "particle systems");
+        List<ParticleTable.System> systems = new ArrayList<>();
+        for (JsonElement element : systemArray) {
+            JsonObject sys = object(element, "particle system");
+            boolean hasMaterial = sys.has("material");
+            if (hasMaterial) keys(sys, "name", "material", "attributes", "renderers", "operators", "initializers", "emitters", "forces", "constraints", "children");
+            else keys(sys, "name", "attributes", "renderers", "operators", "initializers", "emitters", "forces", "constraints", "children");
+            int material = -1;
+            if (hasMaterial) {
+                material = uintIndex(sys.get("material"), "system material");
+                if (material >= materials.size()) fail(BundleErrorCode.INVALID_REFERENCE, "system material out of range");
+            }
+            List<ParticleTable.Child> children = new ArrayList<>();
+            JsonArray childArray = array(sys, "children");
+            limit(childArray.size(), BundleLimits.MAX_PARTICLE_FUNCTIONS, "particle children");
+            for (JsonElement child : childArray) {
+                JsonObject c = object(child, "particle child");
+                keys(c, "system", "delay");
+                int index = uintIndex(c.get("system"), "child system");
+                if (index >= systemArray.size()) fail(BundleErrorCode.INVALID_REFERENCE, "child system out of range");
+                children.add(new ParticleTable.Child(index, (float) finiteNumber(c.get("delay"), "child delay")));
+            }
+            systems.add(new ParticleTable.System(string(sys, "name"), material, params(object(sys.get("attributes"), "system attributes")),
+                functions(sys, "renderers"), functions(sys, "operators"), functions(sys, "initializers"), functions(sys, "emitters"),
+                functions(sys, "forces"), functions(sys, "constraints"), List.copyOf(children)));
+        }
+        JsonObject impacts = object(root.get("impacts"), "impacts");
+        keys(impacts, "style", "systems", "materials");
+        String style = string(impacts, "style");
+        if (!style.equals("systems") && !style.equals("code")) fail(BundleErrorCode.INVALID_SCHEMA, "unknown impact style");
+        Map<Character, Integer> impactSystems = new java.util.HashMap<>();
+        for (Map.Entry<String, JsonElement> entry : object(impacts.get("systems"), "impact systems").entrySet()) {
+            if (entry.getKey().length() != 1) fail(BundleErrorCode.INVALID_SCHEMA, "impact game material must be one letter");
+            int index = uintIndex(entry.getValue(), "impact system");
+            if (index >= systems.size()) fail(BundleErrorCode.INVALID_REFERENCE, "impact system out of range");
+            impactSystems.put(entry.getKey().charAt(0), index);
+        }
+        Map<String, Integer> impactMaterials = new java.util.HashMap<>();
+        for (Map.Entry<String, JsonElement> entry : object(impacts.get("materials"), "impact materials").entrySet()) {
+            int index = uintIndex(entry.getValue(), "impact material");
+            if (index >= materials.size()) fail(BundleErrorCode.INVALID_REFERENCE, "impact material out of range");
+            impactMaterials.put(entry.getKey(), index);
+        }
+        Map<Character, List<ParticleTable.Decal>> decals = new java.util.HashMap<>();
+        for (Map.Entry<String, JsonElement> entry : object(root.get("decals"), "decals").entrySet()) {
+            if (entry.getKey().length() != 1) fail(BundleErrorCode.INVALID_SCHEMA, "decal game material must be one letter");
+            JsonArray options = array(root.getAsJsonObject("decals"), entry.getKey());
+            limit(options.size(), BundleLimits.MAX_PARTICLE_FUNCTIONS, "decals of a game material");
+            List<ParticleTable.Decal> list = new ArrayList<>();
+            for (JsonElement element : options) {
+                JsonObject d = object(element, "decal");
+                keys(d, "material", "rect", "size", "weight");
+                int material = uintIndex(d.get("material"), "decal material");
+                if (material >= materials.size()) fail(BundleErrorCode.INVALID_REFERENCE, "decal material out of range");
+                float[] rect = floats(d, "rect", 4);
+                float[] size = floats(d, "size", 2);
+                float weight = (float) finiteNumber(d.get("weight"), "decal weight");
+                if (size[0] <= 0 || size[1] <= 0 || weight < 0) fail(BundleErrorCode.INVALID_SCHEMA, "decal size or weight out of range");
+                list.add(new ParticleTable.Decal(material, rect[0], rect[1], rect[2], rect[3], size[0], size[1], weight));
+            }
+            decals.put(entry.getKey().charAt(0), List.copyOf(list));
+        }
+        return new ParticleTable(systems, materials, new ParticleTable.Impacts(style, Map.copyOf(impactSystems), Map.copyOf(impactMaterials)), decals);
+    }
+
+    private static List<ParticleTable.Function> functions(JsonObject system, String key) throws BundleValidationException {
+        JsonArray array = array(system, key);
+        limit(array.size(), BundleLimits.MAX_PARTICLE_FUNCTIONS, "particle " + key);
+        List<ParticleTable.Function> out = new ArrayList<>(array.size());
+        for (JsonElement element : array) {
+            JsonObject function = object(element, "particle function");
+            keys(function, "function", "parameters");
+            out.add(new ParticleTable.Function(string(function, "function"), params(object(function.get("parameters"), "function parameters"))));
+        }
+        return List.copyOf(out);
+    }
+
+    /** Numbers, number arrays and booleans become doubles; strings stay; anything else is left out. */
+    private static ParticleTable.Params params(JsonObject object) throws BundleValidationException {
+        Map<String, Object> values = new java.util.HashMap<>();
+        for (Map.Entry<String, JsonElement> entry : object.entrySet()) {
+            JsonElement value = entry.getValue();
+            if (value.isJsonPrimitive()) {
+                var primitive = value.getAsJsonPrimitive();
+                if (primitive.isBoolean()) values.put(entry.getKey(), new double[]{primitive.getAsBoolean() ? 1 : 0});
+                else if (primitive.isNumber()) values.put(entry.getKey(), new double[]{finiteNumberOrZero(primitive)});
+                else values.put(entry.getKey(), primitive.getAsString());
+            } else if (value.isJsonArray()) {
+                JsonArray array = value.getAsJsonArray();
+                if (array.size() > 64) continue;
+                double[] numbers = new double[array.size()];
+                boolean numeric = true;
+                for (int i = 0; i < array.size() && numeric; i++) {
+                    JsonElement item = array.get(i);
+                    if (item.isJsonPrimitive() && item.getAsJsonPrimitive().isNumber()) numbers[i] = finiteNumberOrZero(item.getAsJsonPrimitive());
+                    else numeric = false;
+                }
+                if (numeric) values.put(entry.getKey(), numbers);
+            }
+        }
+        return new ParticleTable.Params(values);
+    }
+
+    private static double finiteNumberOrZero(com.google.gson.JsonPrimitive primitive) {
+        double value = primitive.getAsDouble();
+        return Double.isFinite(value) ? value : 0;
+    }
+
+    private static final byte[] LIGHT_MAGIC = {'S','2','L','I','T','E',0,0};
+
+    /** Format section 22. */
+    private static LightTable validateLight(ZipFile zip, ZipEntry entry, int propCount) throws IOException {
+        limit(entry.getSize(), BundleLimits.MAX_LIGHT_BYTES, "light size");
+        try (Binary in = new Binary(zip.getInputStream(entry), entry.getSize())) {
+            in.magic(LIGHT_MAGIC);
+            in.version();
+            long pageCount = in.count(BundleLimits.MAX_LIGHT_PAGES, "light page");
+            List<LightTable.Page> pages = new ArrayList<>((int) pageCount);
+            for (long p = 0; p < pageCount; p++) {
+                long width = in.count(BundleLimits.MAX_LIGHT_PAGE, "light page width");
+                long height = in.count(BundleLimits.MAX_LIGHT_PAGE, "light page height");
+                if (width == 0 || height == 0) fail(BundleErrorCode.INVALID_SCHEMA, "empty light page");
+                in.requireRemaining(width * height * 4, "light page");
+                pages.add(new LightTable.Page((int) width, (int) height, in.bytes((int) (width * height * 4))));
+            }
+            long nodeCount = in.count(BundleLimits.MAX_AMBIENT_NODES, "ambient node");
+            int root = in.i32();
+            in.requireRemaining(nodeCount * 24, "ambient nodes");
+            float[] planes = new float[(int) nodeCount * 4];
+            int[] children = new int[(int) nodeCount * 2];
+            for (int n = 0; n < nodeCount; n++) {
+                for (int i = 0; i < 4; i++) planes[n * 4 + i] = in.canonicalF32("ambient plane");
+                children[n * 2] = in.i32();
+                children[n * 2 + 1] = in.i32();
+            }
+            long leafCount = in.count(BundleLimits.MAX_AMBIENT_NODES, "ambient leaf");
+            in.requireRemaining(leafCount * 8, "ambient leaves");
+            int[] leafFirst = new int[(int) leafCount], leafSamples = new int[(int) leafCount];
+            for (int l = 0; l < leafCount; l++) {
+                leafFirst[l] = (int) in.u32();
+                leafSamples[l] = (int) in.u32();
+            }
+            if (nodeCount > 0 && (root < 0 || root >= nodeCount)) fail(BundleErrorCode.INVALID_REFERENCE, "ambient root out of range");
+            for (int child : children) {
+                if (child >= nodeCount || (child < 0 && -1L - child >= leafCount)) fail(BundleErrorCode.INVALID_REFERENCE, "ambient child out of range");
+            }
+            long sampleCount = in.count(BundleLimits.MAX_AMBIENT_SAMPLES, "ambient sample");
+            for (int l = 0; l < leafCount; l++) {
+                if (Integer.toUnsignedLong(leafFirst[l]) + Integer.toUnsignedLong(leafSamples[l]) > sampleCount) {
+                    fail(BundleErrorCode.INVALID_REFERENCE, "ambient leaf samples out of range");
+                }
+            }
+            in.requireRemaining(sampleCount * 84, "ambient samples");
+            float[] positions = new float[(int) sampleCount * 3], cubes = new float[(int) sampleCount * 18];
+            for (int i = 0; i < sampleCount; i++) {
+                for (int a = 0; a < 3; a++) positions[i * 3 + a] = in.canonicalF32("ambient position");
+                for (int c = 0; c < 18; c++) {
+                    cubes[i * 18 + c] = in.canonicalF32("ambient light");
+                    if (cubes[i * 18 + c] < 0) fail(BundleErrorCode.INVALID_SCHEMA, "negative ambient light");
+                }
+            }
+            long props = in.u32();
+            if (props != propCount) fail(BundleErrorCode.INVALID_REFERENCE, "light prop count differs from the placement table");
+            byte[][] propLight = new byte[(int) props][];
+            long total = 0;
+            for (int p = 0; p < props; p++) {
+                long vertices = in.u32();
+                total += vertices;
+                limit(total, BundleLimits.MAX_PROP_LIGHT_VERTICES, "prop light vertices");
+                if (vertices == 0) continue;
+                in.requireRemaining(vertices * 4, "prop light");
+                byte[] raw = in.bytes((int) (vertices * 4));
+                byte[] rgb = new byte[(int) vertices * 3];
+                for (int v = 0; v < vertices; v++) {
+                    rgb[v * 3] = raw[v * 4];
+                    rgb[v * 3 + 1] = raw[v * 4 + 1];
+                    rgb[v * 3 + 2] = raw[v * 4 + 2];
+                }
+                propLight[p] = rgb;
+            }
+            in.end();
+            return new LightTable(pages, root, planes, children, leafFirst, leafSamples, positions, cubes, propLight);
+        }
+    }
+
+    private static final byte[] SKYBOX_MAGIC = {'S','2','B','O','X',0,0,0};
+
+    /** Parses and validates the optional 3D skybox (format.md section 21). */
+    private static SkyboxTable validateSkybox(ZipFile zip, ZipEntry entry, int materialCount) throws IOException {
+        limit(entry.getSize(), BundleLimits.MAX_SKYBOX_BYTES, "3D skybox size");
+        try (Binary in = new Binary(zip.getInputStream(entry), entry.getSize())) {
+            in.magic(SKYBOX_MAGIC);
+            in.version();
+            float scale = in.canonicalF32("skybox scale");
+            if (scale <= 0) fail(BundleErrorCode.INVALID_SCHEMA, "skybox scale is not positive");
+            double[] camera = new double[3], origin = new double[3];
+            for (int i = 0; i < 3; i++) camera[i] = Double.longBitsToDouble(in.canonicalF64Bits("skybox camera"));
+            for (int i = 0; i < 3; i++) origin[i] = Double.longBitsToDouble(in.canonicalF64Bits("skybox world origin"));
+            SkyboxTable.Fog fog = null;
+            int fogged = in.bytes(1)[0];
+            if (fogged == 1) {
+                byte[] color = in.bytes(3);
+                fog = new SkyboxTable.Fog(color[0] & 255, color[1] & 255, color[2] & 255, in.canonicalF32("fog start"),
+                    in.canonicalF32("fog end"), in.canonicalF32("fog density"));
+            } else if (fogged != 0) {
+                fail(BundleErrorCode.INVALID_SCHEMA, "skybox fog presence is neither 0 nor 1");
+            }
+            long clusters = in.count(BundleLimits.MAX_PVS_CLUSTERS, "skybox cluster");
+            java.util.BitSet bits = java.util.BitSet.valueOf(in.bytes((int) ((clusters + 7) / 8)));
+            if (bits.length() > clusters) fail(BundleErrorCode.INVALID_SCHEMA, "skybox cluster bits past the cluster count");
+            long width = in.count(BundleLimits.MAX_SKYBOX_PAGE, "skybox lightmap width");
+            long height = in.count(BundleLimits.MAX_SKYBOX_PAGE, "skybox lightmap height");
+            long luxels = width * height;
+            in.requireRemaining(luxels * 6, "skybox lightmap");
+            byte[] raw = in.bytes((int) (luxels * 6));
+            short[] page = new short[(int) (luxels * 3)];
+            ByteBuffer.wrap(raw).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer().get(page);
+            long count = in.count(BundleLimits.MAX_SKYBOX_BATCHES, "skybox batch");
+            List<SkyboxTable.Batch> batches = new ArrayList<>((int) count);
+            long totalVertices = 0;
+            for (long b = 0; b < count; b++) {
+                long material = in.u32();
+                if (material >= materialCount) fail(BundleErrorCode.INVALID_REFERENCE, "skybox material out of range");
+                int lighting = in.bytes(1)[0];
+                if (lighting != SkyboxTable.LIGHTMAP && lighting != SkyboxTable.VERTEX_LIGHT) fail(BundleErrorCode.INVALID_SCHEMA, "unknown skybox lighting");
+                byte[] tint = in.bytes(3);
+                long vertices = in.count(BundleLimits.MAX_SKYBOX_VERTICES, "skybox vertex");
+                if (vertices % 3 != 0) fail(BundleErrorCode.INVALID_SCHEMA, "skybox batch is not whole triangles");
+                totalVertices += vertices;
+                limit(totalVertices, BundleLimits.MAX_SKYBOX_VERTICES, "skybox vertex total");
+                in.requireRemaining(vertices * SkyboxTable.VERTEX_FLOATS * 4, "skybox vertices");
+                float[] values = new float[(int) (vertices * SkyboxTable.VERTEX_FLOATS)];
+                for (int i = 0; i < values.length; i++) values[i] = in.canonicalF32("skybox vertex");
+                batches.add(new SkyboxTable.Batch((int) material, lighting, tint[0] & 255, tint[1] & 255, tint[2] & 255, values));
+            }
+            in.end();
+            return new SkyboxTable(scale, camera, origin, fog, (int) clusters, bits, (int) width, (int) height, page, batches);
+        }
+    }
+
+    private static final byte[] SKY_MAGIC = {'S','2','S','K','Y',0,0,0};
+
+    /** Parses and validates the optional sky table (format.md section 20). */
+    private static SkyTable validateSky(ZipFile zip, Map<String, ZipEntry> entries, Map<String, String> hashes, ZipEntry entry,
+                                        Set<String> referenced) throws IOException {
+        try (Binary in = new Binary(zip.getInputStream(entry), entry.getSize())) {
+            in.magic(SKY_MAGIC);
+            in.version();
+            List<String> sides = new ArrayList<>(SkyTable.SUFFIXES.size());
+            for (int side = 0; side < SkyTable.SUFFIXES.size(); side++) {
+                int present = in.bytes(1)[0];
+                if (present == 0) { sides.add(null); continue; }
+                if (present != 1) fail(BundleErrorCode.INVALID_SCHEMA, "sky side presence is neither 0 nor 1");
+                String id = java.util.HexFormat.of().formatHex(in.bytes(32));
+                String path = "sky/" + id + ".png";
+                referenced.add(path);
+                contentHash(hashes, path, id);
+                ZipEntry image = required(entries, path);
+                limit(image.getSize(), BundleLimits.MAX_SKY_SIDE_BYTES, "sky side size");
+                try (InputStream png = zip.getInputStream(image)) {
+                    if (!Arrays.equals(png.readNBytes(PNG_SIGNATURE.length), PNG_SIGNATURE)) fail(BundleErrorCode.INVALID_SCHEMA, "sky side is not a PNG");
+                }
+                sides.add(id);
+            }
+            long count = in.count(BundleLimits.MAX_SKY_FACES, "sky face");
+            List<float[]> faces = new ArrayList<>((int) count);
+            for (long i = 0; i < count; i++) {
+                int points = in.i16() & 0xFFFF;
+                if (points < 3 || points > SkyTable.MAX_FACE_POINTS) fail(BundleErrorCode.INVALID_SCHEMA, "sky face corner count out of range");
+                in.requireRemaining(points * 12L, "sky face");
+                float[] face = new float[points * 3];
+                for (int p = 0; p < face.length; p++) face[p] = in.canonicalF32("sky face corner");
+                faces.add(face);
+            }
+            in.end();
+            return new SkyTable(sides, faces);
+        }
     }
 
     /** Parses and validates the optional logic prop table (format.md section 18). */
@@ -527,7 +884,8 @@ final class BundleSchemaValidator {
         }
         JsonArray reflectivity = array(material, "reflectivity");
         if (reflectivity.size() != 3) fail(BundleErrorCode.INVALID_SCHEMA, "reflectivity must have three values");
-        for (JsonElement value : reflectivity) finiteNumber(value, "reflectivity");
+        float[] averageColor = new float[3];
+        for (int i = 0; i < 3; i++) averageColor[i] = (float) finiteNumber(reflectivity.get(i), "reflectivity");
         BundleMaterial.TextureReference loadedTexture = null;
         if (material.has("texture")) {
             JsonObject texture = object(material.get("texture"), "texture reference");
@@ -546,7 +904,8 @@ final class BundleSchemaValidator {
             case "cutout" -> BundleMaterial.RenderClass.CUTOUT;
             case "translucent" -> BundleMaterial.RenderClass.TRANSLUCENT;
             default -> BundleMaterial.RenderClass.FALLBACK;
-        }, loadedTexture, material.has("double_sided"), material.has("surface_prop") ? string(material, "surface_prop") : null);
+        }, loadedTexture, material.has("double_sided"), material.has("surface_prop") ? string(material, "surface_prop") : null,
+            averageColor[0], averageColor[1], averageColor[2]);
     }
 
     private static final byte[] OGG_MAGIC = {'O','g','g','S'};
@@ -555,7 +914,7 @@ final class BundleSchemaValidator {
     private static AudioTable validateAudio(ZipFile zip, Map<String, ZipEntry> entries, Map<String, String> hashes,
                                             JsonObject root, Set<String> referenced) throws IOException {
         keys(root, "format", "version", "sounds", "soundscapes", "emitters", "ambients", "scripts", "surfaces");
-        format(root, "src2mc-audio", "audio.json", 2);
+        format(root, "src2mc-audio", "audio.json", 3);
         JsonArray soundArray = array(root, "sounds");
         limit(soundArray.size(), BundleLimits.MAX_AUDIO_RECORDS, "sound count");
         List<AudioTable.Sound> sounds = new ArrayList<>(soundArray.size());
@@ -668,17 +1027,24 @@ final class BundleSchemaValidator {
         JsonArray surfaceArray = array(root, "surfaces");
         limit(surfaceArray.size(), BundleLimits.MAX_AUDIO_RECORDS, "surface count");
         Map<String, AudioTable.Surface> surfaces = new HashMap<>();
-        String[] slots = {"step_left", "step_right", "impact_soft", "impact_hard", "break_sound"};
+        String[] slots = {"step_left", "step_right", "impact_soft", "impact_hard", "break_sound", "bullet_impact"};
         for (JsonElement element : surfaceArray) {
             JsonObject surface = object(element, "surface");
             List<String> surfaceKeys = new ArrayList<>(List.of("name"));
             for (String slot : slots) if (surface.has(slot)) surfaceKeys.add(slot);
+            if (surface.has("game_material")) surfaceKeys.add("game_material");
             keys(surface, surfaceKeys.toArray(String[]::new));
+            char gameMaterial = 0;
+            if (surface.has("game_material")) {
+                String letter = string(surface, "game_material");
+                if (letter.length() != 1) fail(BundleErrorCode.INVALID_SCHEMA, "game material must be one letter");
+                gameMaterial = letter.charAt(0);
+            }
             int[] scriptIds = new int[slots.length];
             for (int i = 0; i < slots.length; i++) scriptIds[i] = surface.has(slots[i]) ? index(surface.get(slots[i]), scripts.size(), "surface script") : -1;
             String name = string(surface, "name");
             if (!name.equals(name.toLowerCase(java.util.Locale.ROOT))) fail(BundleErrorCode.INVALID_SCHEMA, "surface names are lowercase");
-            if (surfaces.put(name, new AudioTable.Surface(name, scriptIds[0], scriptIds[1], scriptIds[2], scriptIds[3], scriptIds[4])) != null)
+            if (surfaces.put(name, new AudioTable.Surface(name, scriptIds[0], scriptIds[1], scriptIds[2], scriptIds[3], scriptIds[4], scriptIds[5], gameMaterial)) != null)
                 fail(BundleErrorCode.DUPLICATE_IDENTITY, "duplicate surface " + name);
         }
         return new AudioTable(sounds, soundscapes, emitters, ambients, scripts, surfaces);
@@ -878,6 +1244,14 @@ final class BundleSchemaValidator {
         return out;
     }
 
+    private static float[] floats(JsonObject o, String key, int count) throws BundleValidationException {
+        JsonArray value = array(o, key);
+        if (value.size() != count) fail(BundleErrorCode.INVALID_SCHEMA, key + " must have " + count + " numbers");
+        float[] out = new float[count];
+        for (int i = 0; i < count; i++) out[i] = (float) finiteNumber(value.get(i), key);
+        return out;
+    }
+
     private static double[] vector3d(JsonElement e, String label) throws BundleValidationException {
         if (e == null || !e.isJsonArray() || e.getAsJsonArray().size() != 3) fail(BundleErrorCode.INVALID_SCHEMA, label + " must have three numbers");
         double[] out = new double[3];
@@ -908,12 +1282,13 @@ final class BundleSchemaValidator {
 
     private static SurfaceTable validateFaces(ZipFile zip, ZipEntry entry, int materialCount) throws IOException {
         try (Binary in = new Binary(zip.getInputStream(entry), entry.getSize())) {
-            in.magic(FACE_MAGIC); in.version(2);
+            in.magic(FACE_MAGIC); in.version(3);
             long uvCount = in.count(BundleLimits.MAX_UV_REGIONS_PER_MAP, "UV region");
+            long lightCount = in.count(BundleLimits.MAX_UV_REGIONS_PER_MAP, "light region");
             long sectionCount = in.count(BundleLimits.MAX_SECTIONS_PER_MAP, "section");
             long faceCount = in.count(BundleLimits.MAX_FACES_PER_MAP, "fragment");
-            in.requireRemaining(Math.addExact(Math.addExact(Math.multiplyExact(uvCount, 64), Math.multiplyExact(sectionCount, 16)),
-                Math.multiplyExact(faceCount, FRAGMENT_FIXED_BYTES + 3L * 6)), "surface header counts");
+            in.requireRemaining(Math.addExact(Math.addExact(Math.addExact(Math.multiplyExact(uvCount, 64), Math.multiplyExact(lightCount, 68)),
+                Math.multiplyExact(sectionCount, 16)), Math.multiplyExact(faceCount, FRAGMENT_FIXED_BYTES + 3L * 6)), "surface header counts");
             long[] priorUv = null;
             List<SurfaceTable.UvRegion> uvRegions = new ArrayList<>((int) uvCount);
             for (long i = 0; i < uvCount; i++) {
@@ -924,6 +1299,19 @@ final class BundleSchemaValidator {
                 double[] values = new double[8];
                 for (int n = 0; n < 8; n++) values[n] = Double.longBitsToDouble(uv[n]);
                 uvRegions.add(new SurfaceTable.UvRegion(values));
+            }
+            long[] priorLight = null;
+            List<SurfaceTable.LightRegion> lightRegions = new ArrayList<>((int) lightCount);
+            for (long i = 0; i < lightCount; i++) {
+                long[] key = new long[9];
+                key[0] = in.u32();
+                if (key[0] >= BundleLimits.MAX_LIGHT_PAGES) fail(BundleErrorCode.INVALID_REFERENCE, "light region page out of range");
+                for (int n = 1; n < 9; n++) key[n] = in.canonicalF64Bits("light region");
+                if (priorLight != null && compareUnsigned(priorLight, key) >= 0) fail(BundleErrorCode.INVALID_SCHEMA, "light regions are not uniquely sorted");
+                priorLight = key;
+                double[] values = new double[8];
+                for (int n = 0; n < 8; n++) values[n] = Double.longBitsToDouble(key[n + 1]);
+                lightRegions.add(new SurfaceTable.LightRegion((int) key[0], values));
             }
             int[] priorSection = null; long seenFaces = 0;
             Map<SurfaceTable.SectionPos, List<SurfaceTable.Face>> sections = new java.util.HashMap<>();
@@ -939,15 +1327,17 @@ final class BundleSchemaValidator {
                 FaceOrder prior = null;
                 for (long f = 0; f < count; f++) {
                     byte[] record = in.bytes(FRAGMENT_FIXED_BYTES);
-                    int local = u16(record, 0), flags = record[2] & 255, provenance = record[3] & 255, vertexCount = record[20] & 255;
+                    int local = u16(record, 0), flags = record[2] & 255, provenance = record[3] & 255, vertexCount = record[24] & 255;
                     // Flags: bit 0 owned; bits 1-2, 3-4, 5-6 owner offset X, Y, Z plus one; bit 7 zero.
                     int ownerDx = (flags >>> 1 & 3) - 1, ownerDy = (flags >>> 3 & 3) - 1, ownerDz = (flags >>> 5 & 3) - 1;
                     boolean owned = (flags & 1) != 0;
                     if ((local & 0xf000) != 0 || (flags & 0x80) != 0 || ownerDx > 1 || ownerDy > 1 || ownerDz > 1
                         || (!owned && flags != UNOWNED_FLAGS) || provenance > 2) fail(BundleErrorCode.INVALID_SCHEMA, "invalid fragment record bits");
                     if (vertexCount < 3 || vertexCount > SurfaceTable.MAX_FRAGMENT_VERTICES) fail(BundleErrorCode.INVALID_SCHEMA, "invalid fragment vertex count");
-                    if (u32(record, 4) >= Integer.toUnsignedLong(materialCount) || u32(record, 8) >= uvCount) fail(BundleErrorCode.INVALID_REFERENCE, "surface reference out of range");
-                    FaceOrder order = new FaceOrder(local, provenance, u32(record,12), u32(record,16));
+                    long light = u32(record, 12);
+                    if (u32(record, 4) >= Integer.toUnsignedLong(materialCount) || u32(record, 8) >= uvCount
+                        || (light != 0xFFFFFFFFL && light >= lightCount)) fail(BundleErrorCode.INVALID_REFERENCE, "surface reference out of range");
+                    FaceOrder order = new FaceOrder(local, provenance, u32(record,16), u32(record,20));
                     if (prior != null && prior.compareTo(order) >= 0) fail(BundleErrorCode.INVALID_SCHEMA, "fragments are not uniquely sorted");
                     prior = order;
                     byte[] coords = in.bytes(vertexCount * 6);
@@ -957,13 +1347,14 @@ final class BundleSchemaValidator {
                         if (value > SurfaceTable.CELL_UNITS) fail(BundleErrorCode.INVALID_SCHEMA, "fragment vertex outside its cell");
                         vertices[n] = (short) value;
                     }
-                    faces.add(new SurfaceTable.Face(local, owned, ownerDx, ownerDy, ownerDz, provenance, (int)u32(record,4), (int)u32(record,8), u32(record,12), u32(record,16), vertices));
+                    faces.add(new SurfaceTable.Face(local, owned, ownerDx, ownerDy, ownerDz, provenance, (int)u32(record,4), (int)u32(record,8), u32(record,16), u32(record,20), vertices,
+                        light == 0xFFFFFFFFL ? SurfaceTable.NO_LIGHT : (int) light));
                 }
                 sections.put(new SurfaceTable.SectionPos(section[0], section[1], section[2]), faces);
             }
             if (seenFaces != faceCount) fail(BundleErrorCode.INVALID_SCHEMA, "surface fragment count differs");
             in.end();
-            return new SurfaceTable(uvRegions, sections);
+            return new SurfaceTable(uvRegions, sections, lightRegions);
         }
     }
 

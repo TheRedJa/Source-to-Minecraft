@@ -10,7 +10,7 @@ import java.lang.invoke.MethodType;
  * this build, so there is no compile-time dependency and no mixin; every method fails soft to
  * {@code false} when Iris is absent or the API shape changes.
  */
-final class IrisCompat {
+public final class IrisCompat {
     private static final MethodHandle GET_INSTANCE;
     private static final MethodHandle IS_SHADER_PACK_IN_USE;
     private static final MethodHandle IS_RENDERING_SHADOW_PASS;
@@ -148,6 +148,9 @@ final class IrisCompat {
             return null;
         }
     }
+
+    /** For the particle renderer, outside this package. */
+    public static boolean shadowPass() { return renderingShadowPass(); }
 
     static boolean renderingShadowPass() {
         if (GET_INSTANCE == null) return false;

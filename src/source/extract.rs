@@ -874,6 +874,7 @@ fn prop_material(materials: &Materials, textures: &mut Textures, name: &str) -> 
         name: name.to_string(),
         raw_name: name.to_string(),
         reflectivity,
+        drawn: true,
     }
 }
 

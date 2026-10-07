@@ -91,7 +91,9 @@ public record AudioTable(List<Sound> sounds, List<Soundscape> soundscapes, List<
     }
 
     /** Scripts a surface property plays, by index into {@link #scripts()}, -1 where it plays none. */
-    public record Surface(String name, int stepLeft, int stepRight, int impactSoft, int impactHard, int breakSound) {}
+    /** The scripts a surface property plays, -1 for none, and its game material letter, 0 for none. */
+    public record Surface(String name, int stepLeft, int stepRight, int impactSoft, int impactHard, int breakSound, int bulletImpact,
+                          char gameMaterial) {}
 
     /** The script named {@code name}, lowercase, or null. */
     public Script script(String name) {

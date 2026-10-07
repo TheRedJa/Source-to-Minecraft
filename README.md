@@ -159,6 +159,10 @@ movers get Sable sub-levels of their own, reused once a copy is gone;
 `SetParent` and `ClearParent` re-parent an entity where it stands, and moving
 trains, doors and brushes touch triggers that let everything through.
 
+The map's sky faces show its 2D skybox, as Source draws it behind the world,
+instead of Minecraft's sky and terrain. `/src2mc_sky on|off|status` switches
+it for comparison.
+
 The map's `game_text` messages, screen fades and screen shakes appear as in
 Source, and INFRA's chapter titles show where the game shows them.
 `/src2mc_screen status|clear` lists what is on screen and takes it off.

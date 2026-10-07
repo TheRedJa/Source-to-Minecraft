@@ -26,6 +26,23 @@ final class BundleLimits {
     static final int MAX_PROPS_PER_MAP = 10_000_000;
     static final int MAX_UV_REGIONS_PER_MAP = 10_000_000;
     static final int MAX_SECTIONS_PER_MAP = 4_000_000;
+    static final int MAX_SKY_FACES = 1_000_000;
+    static final long MAX_SKY_SIDE_BYTES = 64L * 1024 * 1024;
+    static final long MAX_SKYBOX_BYTES = 512L * 1024 * 1024;
+    static final int MAX_SKYBOX_PAGE = 4096;
+    static final long MAX_LIGHT_BYTES = 1024L * 1024 * 1024;
+    public static final int MAX_LIGHT_PAGES = 64;
+    static final int MAX_LIGHT_PAGE = 4096;
+    static final int MAX_AMBIENT_NODES = 4_000_000;
+    static final int MAX_AMBIENT_SAMPLES = 4_000_000;
+    static final long MAX_PROP_LIGHT_VERTICES = 100_000_000L;
+    static final int MAX_PARTICLE_SYSTEMS = 65_536;
+    static final int MAX_PARTICLE_MATERIALS = 65_536;
+    static final int MAX_PARTICLE_FUNCTIONS = 1_024;
+    static final int MAX_SHEET_SEQUENCES = 4_096;
+    static final int MAX_SHEET_FRAMES = 65_536;
+    static final int MAX_SKYBOX_BATCHES = 1_000_000;
+    static final int MAX_SKYBOX_VERTICES = 16_000_000;
     static final int MAX_FACES_PER_MAP = 100_000_000;
     // A corruption guard, not a budget: every distinct shape in a real map is
     // far below this, and exceeding it fails the bundle loudly.

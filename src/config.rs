@@ -580,6 +580,10 @@ pub struct Entities {
     pub brush_entities: BrushEntityMode,
     /// Per-classname overrides of `brush_entities`.
     pub classname_modes: BTreeMap<String, BrushEntityMode>,
+    /// Take out every brush entity a `func_areaportalwindow` fades, whatever
+    /// its class: the mod draws it faded by distance, which the world cannot.
+    #[serde(skip)]
+    pub separate_fade_brushes: bool,
 }
 
 impl Default for Entities {
@@ -598,6 +602,7 @@ impl Default for Entities {
             manifest: true,
             brush_entities: BrushEntityMode::Include,
             classname_modes,
+            separate_fade_brushes: false,
         }
     }
 }
@@ -631,6 +636,7 @@ impl Entities {
             self.classname_modes
                 .insert(class.to_string(), BrushEntityMode::Separate);
         }
+        self.separate_fade_brushes = true;
     }
 }
 

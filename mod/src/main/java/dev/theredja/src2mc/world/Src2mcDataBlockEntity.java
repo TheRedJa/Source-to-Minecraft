@@ -43,6 +43,16 @@ public final class Src2mcDataBlockEntity extends BlockEntity {
         return payload.copy();
     }
 
+    /** One integer of the payload, without copying it: {@link #payload} copies the whole tag. */
+    public int payloadInt(String key) {
+        return payload.getInt(key);
+    }
+
+    /** One string of the payload, without copying it. */
+    public String payloadString(String key) {
+        return payload.getString(key);
+    }
+
     public void replacePayload(CompoundTag payload) {
         this.payload = payload.copy();
         setChanged();

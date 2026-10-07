@@ -25,7 +25,8 @@ public final class PlacementNetwork {
         // "8": shakes carry the map's clock; screen clear payload.
         // "9": prop states carry an animated prop's sequence and the map's clock.
         // "10": movers name the bundle mover they carry apart from their entity; prop mounts.
-        var registrar = event.registrar("10");
+        // "11": bullet and projectile impacts.
+        var registrar = event.registrar("11");
         registrar.playToClient(PlacementSyncPayload.TYPE, PlacementSyncPayload.STREAM_CODEC,
             (payload, context) -> {
                 PlacementIndex index = new PlacementIndex();
@@ -33,11 +34,6 @@ public final class PlacementNetwork {
                 CLIENT.put(payload.dimension(), index);
                 // Registration already moved the epoch, but before the index was published.
                 PlacementIndex.touch();
-                // The client draws from its own light engine, so it bakes the
-                // map's sky light itself from the same bundle the server used.
-                if (context.player().level() instanceof net.minecraft.world.level.Level level) {
-                    dev.theredja.src2mc.world.LightOcclusion.publishClient(level, payload.dimension(), index);
-                }
             });
         // Handlers run on the client main thread, after the block updates the server sent first.
         registrar.playToClient(SurfaceChangePayload.TYPE, SurfaceChangePayload.STREAM_CODEC,
@@ -46,6 +42,7 @@ public final class PlacementNetwork {
         dev.theredja.src2mc.logic.MoverNetwork.register(registrar);
         dev.theredja.src2mc.logic.PropSync.register(registrar);
         dev.theredja.src2mc.logic.ScreenEffects.register(registrar);
+        dev.theredja.src2mc.world.ImpactNetwork.register(registrar);
     }
 
     public static PlacementIndex clientIndex(ResourceLocation dimension) { return CLIENT.getOrDefault(dimension, new PlacementIndex()); }

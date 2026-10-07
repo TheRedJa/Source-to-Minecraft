@@ -81,6 +81,7 @@ tasks.named('test', Test) {
     if (System.getProperty('src2mc.testBundle') != null) {
         systemProperty 'src2mc.testBundle', System.getProperty('src2mc.testBundle')
         if (System.getProperty('src2mc.churn') != null) systemProperty 'src2mc.churn', 'true'
+        if (System.getProperty('src2mc.particleDetail') != null) systemProperty 'src2mc.particleDetail', 'true'
     }
 }
 

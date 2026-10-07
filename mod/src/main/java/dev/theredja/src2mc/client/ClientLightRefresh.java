@@ -3,7 +3,6 @@ package dev.theredja.src2mc.client;
 import dev.theredja.src2mc.Src2mc;
 import dev.theredja.src2mc.client.render.MapSurfaceRenderer;
 import dev.theredja.src2mc.network.PlacementNetwork;
-import dev.theredja.src2mc.world.LightOcclusion;
 import dev.theredja.src2mc.world.MapPlacement;
 import net.minecraft.client.Minecraft;
 import net.minecraft.core.BlockPos;
@@ -14,30 +13,17 @@ import net.neoforged.fml.common.EventBusSubscriber;
 import net.neoforged.neoforge.event.level.ChunkEvent;
 
 /**
- * Redraws the chunk whose sky light we just replaced.
- *
- * Vanilla rebuilds a section's mesh when its light changes because it is told
- * so by a light update; light handed straight to the engine arrives without
- * one, so the blocks in a placed map would keep the shading they were built
- * with until something else disturbed them. The mod's own surface and prop
- * renderers sample light per frame and need no help.
- *
- * It is also where the surface renderer hears about {@code src2mc:surface}
- * blocks it did not see when it built: server-reported changes, and chunks
- * that arrived after the region covering them was built.
+ * Where the surface renderer hears about {@code src2mc:surface} blocks it did not see when it
+ * built: server-reported changes, and chunks that arrived after the region covering them was
+ * built.
  */
 @EventBusSubscriber(modid = Src2mc.MOD_ID, value = Dist.CLIENT)
 public final class ClientLightRefresh {
     private ClientLightRefresh() {}
 
-    /**
-     * A chunk arriving from the server carries the light the server had when it
-     * was sent, which for a chunk loaded before the bake finished is vanilla's.
-     */
     @SubscribeEvent
     static void onChunkLoad(ChunkEvent.Load event) {
         if (!event.getLevel().isClientSide() || !(event.getLevel() instanceof net.minecraft.world.level.Level level)) return;
-        LightOcclusion.applyChunk(level, event.getChunk().getPos().x, event.getChunk().getPos().z);
         // A region built before this chunk arrived took its owned cells as present.
         if (level instanceof net.minecraft.client.multiplayer.ClientLevel client
             && event.getChunk() instanceof net.minecraft.world.level.chunk.LevelChunk chunk) {

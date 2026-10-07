@@ -131,13 +131,11 @@ final class LightWatcher {
         }
     }
 
-    /** Day/night needs no invalidation here: sky light values are static per block, and
-     * {@link net.minecraft.client.renderer.LightTexture} handles time of day when the shader
-     * samples the lightmap. This only reacts to actual block/sky data-layer edits. */
+    /** Block light only: the map is lit by Source's baked light, and Minecraft adds its light
+     * sources on top but never its sky. So placing or breaking a block -- which moves sky light --
+     * relights nothing; only a light source arriving, leaving, or being walled off does. */
     private static int hashSection(SectionPos section) {
-        var lightEngine = level.getLightEngine();
-        return hashLayer(lightEngine.getLayerListener(LightLayer.BLOCK).getDataLayerData(section)) * 31
-            + hashLayer(lightEngine.getLayerListener(LightLayer.SKY).getDataLayerData(section));
+        return hashLayer(level.getLightEngine().getLayerListener(LightLayer.BLOCK).getDataLayerData(section));
     }
 
     /** Homogenous layers are hashed from their fill value: {@link DataLayer#getData()} would

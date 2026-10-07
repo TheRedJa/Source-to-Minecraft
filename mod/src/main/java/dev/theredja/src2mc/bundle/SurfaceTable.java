@@ -4,13 +4,21 @@ import java.util.List;
 import java.util.Map;
 
 /** Immutable sparse map-local surface lookup retained by a validated generation. */
-public record SurfaceTable(List<UvRegion> uvRegions, Map<SectionPos, List<Face>> sections) {
+public record SurfaceTable(List<UvRegion> uvRegions, Map<SectionPos, List<Face>> sections, List<LightRegion> lightRegions) {
     /** Fragment vertex coordinates are in 1/4096 block within the owner cell. */
     public static final int CELL_UNITS = 4096;
     public static final int MAX_FRAGMENT_VERTICES = 64;
 
+    /** A fragment's light-region ID when it has no lightmap. */
+    public static final int NO_LIGHT = -1;
+
+    public SurfaceTable(List<UvRegion> uvRegions, Map<SectionPos, List<Face>> sections) {
+        this(uvRegions, sections, List.of());
+    }
+
     public SurfaceTable {
         uvRegions = List.copyOf(uvRegions);
+        lightRegions = List.copyOf(lightRegions);
         sections = sections.entrySet().stream().collect(java.util.stream.Collectors.toUnmodifiableMap(
             Map.Entry::getKey, entry -> List.copyOf(entry.getValue())));
     }
@@ -32,7 +40,14 @@ public record SurfaceTable(List<UvRegion> uvRegions, Map<SectionPos, List<Face>>
      * unowned fragment always has a zero offset.
      */
     public record Face(int localCell, boolean owned, int ownerDx, int ownerDy, int ownerDz, int provenance,
-                       int materialId, int uvRegionId, long sourcePrimary, long sourceSecondary, short[] vertices) {
+                       int materialId, int uvRegionId, long sourcePrimary, long sourceSecondary, short[] vertices,
+                       int lightRegionId) {
+        public Face(int localCell, boolean owned, int ownerDx, int ownerDy, int ownerDz, int provenance,
+                    int materialId, int uvRegionId, long sourcePrimary, long sourceSecondary, short[] vertices) {
+            this(localCell, owned, ownerDx, ownerDy, ownerDz, provenance, materialId, uvRegionId, sourcePrimary, sourceSecondary,
+                vertices, NO_LIGHT);
+        }
+
         public Face {
             if (Math.abs(ownerDx) > 1 || Math.abs(ownerDy) > 1 || Math.abs(ownerDz) > 1
                 || (!owned && (ownerDx | ownerDy | ownerDz) != 0)) {
@@ -67,13 +82,27 @@ public record SurfaceTable(List<UvRegion> uvRegions, Map<SectionPos, List<Face>>
             return other instanceof Face f && localCell == f.localCell && owned == f.owned && ownerDx == f.ownerDx
                 && ownerDy == f.ownerDy && ownerDz == f.ownerDz && provenance == f.provenance
                 && materialId == f.materialId && uvRegionId == f.uvRegionId && sourcePrimary == f.sourcePrimary
-                && sourceSecondary == f.sourceSecondary && java.util.Arrays.equals(vertices, f.vertices);
+                && sourceSecondary == f.sourceSecondary && lightRegionId == f.lightRegionId && java.util.Arrays.equals(vertices, f.vertices);
         }
         @Override public int hashCode() {
             return java.util.Objects.hash(localCell, owned, ownerDx, ownerDy, ownerDz, provenance, materialId, uvRegionId, sourcePrimary, sourceSecondary,
-                java.util.Arrays.hashCode(vertices));
+                lightRegionId, java.util.Arrays.hashCode(vertices));
         }
     }
+    /**
+     * Where a fragment's lightmap is (format.md section 5): light page {@code page}, and the affine
+     * map from a map-local block position to page coordinates, 0 to 1 across: {@code s} from the
+     * first four values as UV regions are, {@code t} from the last four.
+     */
+    public record LightRegion(int page, double[] values) {
+        public LightRegion { values = values.clone(); }
+        @Override public double[] values() { return values.clone(); }
+        public double s(double x, double y, double z) { return values[0] * x + values[1] * y + values[2] * z + values[3]; }
+        public double t(double x, double y, double z) { return values[4] * x + values[5] * y + values[6] * z + values[7]; }
+        @Override public boolean equals(Object other) { return other instanceof LightRegion r && page == r.page && java.util.Arrays.equals(values, r.values); }
+        @Override public int hashCode() { return 31 * page + java.util.Arrays.hashCode(values); }
+    }
+
     public record UvRegion(double[] values) {
         public UvRegion { values = values.clone(); }
         @Override public double[] values() { return values.clone(); }

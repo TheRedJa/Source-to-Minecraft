@@ -80,6 +80,17 @@ pub struct FaceSource {
     pub provenance: SourceProvenance,
     pub material: usize,
     pub uv: BlockTexCoord,
+    /// The baked light the face wears; `None` when it has no lightmap.
+    pub light: Option<FaceLight>,
+}
+
+/// A face's place in vrad's lightmaps: the BSP face whose lightmap it wears,
+/// and the affine map from a block-space position to a luxel coordinate in
+/// it, where 0.5 is the centre of the first luxel.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FaceLight {
+    pub face: usize,
+    pub luxel: BlockTexCoord,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -296,6 +307,7 @@ mod tests {
                 u: [material as f64, 0.0, 0.0, side as f64],
                 v: [0.0, material as f64, 0.0, brush as f64],
             },
+            light: None,
         }
     }
     #[test]

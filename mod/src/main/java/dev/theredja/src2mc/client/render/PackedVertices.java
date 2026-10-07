@@ -21,6 +21,9 @@ final class PackedVertices {
     private int[] light = new int[96];
     /** Each vertex's tint, {@code 0xRRGGBB}; white leaves the texture as it is. */
     private int[] color = new int[96];
+    /** Each vertex's baked light, four floats: see {@link BakedLighting}. */
+    private float[] baked = new float[4 * 96];
+    private static final float[] FULL_BRIGHT = {1, 1, 1, BakedLighting.VERTEX};
     private int vertices;
     /** From {@link #index}: each vertex's slot among the distinct ones, and each distinct one's
      * first vertex. Null until indexed. */
@@ -35,11 +38,18 @@ final class PackedVertices {
     }
 
     void add(float x, float y, float z, float u, float v, float nx, float ny, float nz, int packedLight, int tint) {
+        add(x, y, z, u, v, nx, ny, nz, packedLight, tint, FULL_BRIGHT);
+    }
+
+    /** As above, with the vertex's baked light: four floats, see {@link BakedLighting}. */
+    void add(float x, float y, float z, float u, float v, float nx, float ny, float nz, int packedLight, int tint, float[] light4) {
         if (vertices == light.length) {
             light = Arrays.copyOf(light, vertices * 2);
             color = Arrays.copyOf(color, vertices * 2);
             data = Arrays.copyOf(data, vertices * 2 * FLOATS);
+            baked = Arrays.copyOf(baked, vertices * 2 * 4);
         }
+        System.arraycopy(light4, 0, baked, vertices * 4, 4);
         color[vertices] = tint;
         int at = vertices * FLOATS;
         data[at] = x; data[at + 1] = y; data[at + 2] = z; data[at + 3] = u; data[at + 4] = v;
@@ -57,6 +67,7 @@ final class PackedVertices {
         copy.data = Arrays.copyOf(data, vertices * FLOATS);
         copy.light = Arrays.copyOf(light, vertices);
         copy.color = Arrays.copyOf(color, vertices);
+        copy.baked = Arrays.copyOf(baked, vertices * 4);
         copy.vertices = vertices;
         copy.minX = minX; copy.minY = minY; copy.minZ = minZ;
         copy.maxX = maxX; copy.maxY = maxY; copy.maxZ = maxZ;
@@ -187,6 +198,7 @@ final class PackedVertices {
     private int hash(int vertex) {
         int at = vertex * FLOATS, result = light[vertex] * 31 + color[vertex];
         for (int i = 0; i < FLOATS; i++) result = result * 31 + Float.floatToIntBits(data[at + i]);
+        for (int i = 0; i < 4; i++) result = result * 31 + Float.floatToIntBits(baked[vertex * 4 + i]);
         return result ^ (result >>> 16);
     }
 
@@ -194,6 +206,7 @@ final class PackedVertices {
         if (light[left] != light[right] || color[left] != color[right]) return false;
         int a = left * FLOATS, b = right * FLOATS;
         for (int i = 0; i < FLOATS; i++) if (Float.floatToIntBits(data[a + i]) != Float.floatToIntBits(data[b + i])) return false;
+        for (int i = 0; i < 4; i++) if (Float.floatToIntBits(baked[left * 4 + i]) != Float.floatToIntBits(baked[right * 4 + i])) return false;
         return true;
     }
 
@@ -213,54 +226,69 @@ final class PackedVertices {
 
     /** As {@link #upload(boolean, boolean)}; with {@code keep}, its bytes are kept to be lit again. */
     Uploaded upload(boolean neutralIds, boolean indexed, boolean keep) {
-        int capacity = (int) Math.min(Integer.MAX_VALUE, Math.max(4096L, (long) vertices * 36));
-        try (var bytes = new ByteBufferBuilder(capacity)) {
-            int[] previousIds = neutralIds ? IrisCompat.setCapturedIds(0, 0, 0) : null;
-            try {
-                var builder = new BufferBuilder(bytes, VertexFormat.Mode.TRIANGLES, DefaultVertexFormat.NEW_ENTITY);
-                for (int i = 0; i < vertices; i++) {
-                    int at = i * FLOATS;
-                    builder.addVertex(data[at], data[at + 1], data[at + 2])
-                        .setColor(color[i] >> 16 & 0xFF, color[i] >> 8 & 0xFF, color[i] & 0xFF, 255).setUv(data[at + 3], data[at + 4]).setOverlay(OverlayTexture.NO_OVERLAY)
-                        .setLight(light[i]).setNormal(data[at + 5], data[at + 6], data[at + 7]);
-                }
-                try (var mesh = builder.buildOrThrow()) {
-                    var format = mesh.drawState().format();
-                    int stride = format.getVertexSize();
-                    soupVertices += vertices;
-                    var buffer = new VertexBuffer(VertexBuffer.Usage.STATIC);
-                    if (!indexed || firstOf == null) {
-                        LightPatch kept = keep ? keep(format, mesh.vertexBuffer(), null) : null;
-                        buffer.bind(); buffer.upload(mesh); VertexBuffer.unbind();
-                        uploadedVertices += vertices;
-                        return new Uploaded(buffer, stride, (long) vertices * stride, kept);
-                    }
-                    int distinct = firstOf.length;
-                    VertexFormat.IndexType indexType = VertexFormat.IndexType.least(distinct);
-                    LightPatch kept;
-                    try (var compact = new ByteBufferBuilder(distinct * stride); var indices = new ByteBufferBuilder(vertices * indexType.bytes)) {
-                        long source = MemoryUtil.memAddress(mesh.vertexBuffer());
-                        long target = compact.reserve(distinct * stride);
-                        for (int i = 0; i < distinct; i++) MemoryUtil.memCopy(source + (long) firstOf[i] * stride, target + (long) i * stride, stride);
-                        kept = keep ? keep(format, MemoryUtil.memByteBuffer(target, distinct * stride), firstOf) : null;
-                        long index = indices.reserve(vertices * indexType.bytes);
-                        for (int i = 0; i < vertices; i++) {
-                            if (indexType == VertexFormat.IndexType.SHORT) MemoryUtil.memPutShort(index + 2L * i, (short) remap[i]);
-                            else MemoryUtil.memPutInt(index + 4L * i, remap[i]);
-                        }
-                        // upload() binds a sequential index buffer for vertexCount indices; the real
-                        // one replaces it while this buffer's vertex array is still bound.
-                        buffer.bind();
-                        buffer.upload(new MeshData(compact.build(), new MeshData.DrawState(format, distinct, vertices, VertexFormat.Mode.TRIANGLES, indexType)));
-                        buffer.uploadIndexBuffer(indices.build());
-                        VertexBuffer.unbind();
-                    }
-                    uploadedVertices += distinct;
-                    return new Uploaded(buffer, stride, (long) distinct * stride + (long) vertices * indexType.bytes, kept);
-                }
-            } finally {
-                IrisCompat.restoreCapturedIds(previousIds);
+        VertexFormat format = BakedLighting.FORMAT;
+        int stride = format.getVertexSize();
+        int written = indexed && firstOf != null ? firstOf.length : vertices;
+        soupVertices += vertices;
+        try (var bytes = new ByteBufferBuilder(Math.max(stride, written * stride))) {
+            long target = bytes.reserve(written * stride);
+            int uvOffset = format.getOffset(com.mojang.blaze3d.vertex.VertexFormatElement.UV0);
+            int lightOffset = format.getOffset(com.mojang.blaze3d.vertex.VertexFormatElement.UV2);
+            int colorOffset = format.getOffset(com.mojang.blaze3d.vertex.VertexFormatElement.COLOR);
+            int normalOffset = format.getOffset(com.mojang.blaze3d.vertex.VertexFormatElement.NORMAL);
+            int bakedOffset = format.getOffset(BakedLighting.BAKED);
+            for (int out = 0; out < written; out++) {
+                int i = written == vertices ? out : firstOf[out];
+                long at = target + (long) out * stride;
+                int d = i * FLOATS;
+                MemoryUtil.memPutFloat(at, data[d]);
+                MemoryUtil.memPutFloat(at + 4, data[d + 1]);
+                MemoryUtil.memPutFloat(at + 8, data[d + 2]);
+                MemoryUtil.memPutByte(at + colorOffset, (byte) (color[i] >> 16));
+                MemoryUtil.memPutByte(at + colorOffset + 1, (byte) (color[i] >> 8));
+                MemoryUtil.memPutByte(at + colorOffset + 2, (byte) color[i]);
+                MemoryUtil.memPutByte(at + colorOffset + 3, (byte) 255);
+                MemoryUtil.memPutFloat(at + uvOffset, data[d + 3]);
+                MemoryUtil.memPutFloat(at + uvOffset + 4, data[d + 4]);
+                // BufferBuilder.setLight: block light, then sky light, a short each.
+                MemoryUtil.memPutShort(at + lightOffset, (short) (light[i] & 0xFFFF));
+                MemoryUtil.memPutShort(at + lightOffset + 2, (short) (light[i] >> 16 & 0xFFFF));
+                MemoryUtil.memPutByte(at + normalOffset, normalByte(data[d + 5]));
+                MemoryUtil.memPutByte(at + normalOffset + 1, normalByte(data[d + 6]));
+                MemoryUtil.memPutByte(at + normalOffset + 2, normalByte(data[d + 7]));
+                for (int k = 0; k < 4; k++) MemoryUtil.memPutFloat(at + bakedOffset + 4L * k, baked[i * 4 + k]);
             }
+            var buffer = new VertexBuffer(VertexBuffer.Usage.STATIC);
+            LightPatch kept = keep ? keep(format, MemoryUtil.memByteBuffer(target, written * stride),
+                written == vertices ? null : firstOf) : null;
+            if (written == vertices) {
+                VertexFormat.IndexType sequential = VertexFormat.IndexType.least(vertices);
+                buffer.bind();
+                buffer.upload(new MeshData(bytes.build(), new MeshData.DrawState(format, vertices, vertices, VertexFormat.Mode.TRIANGLES, sequential)));
+                VertexBuffer.unbind();
+                uploadedVertices += vertices;
+                return new Uploaded(buffer, stride, (long) vertices * stride, kept);
+            }
+            VertexFormat.IndexType indexType = VertexFormat.IndexType.least(written);
+            try (var indices = new ByteBufferBuilder(vertices * indexType.bytes)) {
+                long index = indices.reserve(vertices * indexType.bytes);
+                for (int i = 0; i < vertices; i++) {
+                    if (indexType == VertexFormat.IndexType.SHORT) MemoryUtil.memPutShort(index + 2L * i, (short) remap[i]);
+                    else MemoryUtil.memPutInt(index + 4L * i, remap[i]);
+                }
+                // upload() binds a sequential index buffer for vertexCount indices; the real one
+                // replaces it while this buffer's vertex array is still bound.
+                buffer.bind();
+                buffer.upload(new MeshData(bytes.build(), new MeshData.DrawState(format, written, vertices, VertexFormat.Mode.TRIANGLES, indexType)));
+                buffer.uploadIndexBuffer(indices.build());
+                VertexBuffer.unbind();
+            }
+            uploadedVertices += written;
+            return new Uploaded(buffer, stride, (long) written * stride + (long) vertices * indexType.bytes, kept);
         }
+    }
+
+    private static byte normalByte(float value) {
+        return (byte) ((int) (net.minecraft.util.Mth.clamp(value, -1.0f, 1.0f) * 127.0f) & 255);
     }
 }

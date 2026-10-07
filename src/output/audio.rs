@@ -200,6 +200,11 @@ pub struct Surface {
     pub impact_hard: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub break_sound: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bullet_impact: Option<u32>,
+    /// The `CHAR_TEX_*` letter of its `gamematerial`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub game_material: Option<String>,
 }
 
 impl AudioTable {
@@ -683,6 +688,8 @@ impl<'a> Builder<'a> {
                 impact_soft: self.script(sounds.impact_soft.as_deref())?,
                 impact_hard: self.script(sounds.impact_hard.as_deref())?,
                 break_sound: self.script(sounds.break_sound.as_deref())?,
+                bullet_impact: self.script(sounds.bullet_impact.as_deref())?,
+                game_material: sounds.game_material.map(|c| c.to_string()),
                 name,
             };
             self.surfaces.push(surface);
@@ -780,6 +787,11 @@ fn entity_sounds(entities: &[EntityRecord]) -> Vec<(String, &'static str)> {
             }
             continue;
         }
+        if class == "env_spark" {
+            // `CEnvSpark` plays this at every spark unless silent.
+            push("DoSpark", "env_spark");
+            continue;
+        }
         let Some(&class) = SOUND_ENTITY_CLASSES.iter().find(|c| **c == class) else {
             continue;
         };
@@ -848,13 +860,14 @@ fn finish(
             &mut surface.impact_soft,
             &mut surface.impact_hard,
             &mut surface.break_sound,
+            &mut surface.bullet_impact,
         ] {
             *slot = slot.and_then(|id| script_remap[id as usize]);
         }
     }
     AudioTable {
         format: FORMAT,
-        version: 2,
+        version: 3,
         sounds,
         soundscapes,
         emitters,

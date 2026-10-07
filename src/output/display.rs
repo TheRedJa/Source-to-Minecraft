@@ -373,6 +373,7 @@ mod tests {
             skin: 0,
             color: [255; 3],
             entity: None,
+            static_index: None,
         }
     }
 

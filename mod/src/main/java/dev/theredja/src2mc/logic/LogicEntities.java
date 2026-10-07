@@ -43,6 +43,8 @@ final class LogicEntities {
             case "game_text" -> new ScreenEffects.GameText(map, index, entity);
             case "env_fade" -> new ScreenEffects.Fade(map, index, entity);
             case "env_shake" -> new ScreenEffects.Shake(map, index, entity);
+            case "info_particle_system" -> new EffectEntities.ParticleSystem(map, index, entity);
+            case "env_spark" -> new EffectEntities.Spark(map, index, entity);
             case "ambient_generic" -> new SoundEntities.Ambient(map, index, entity);
             case "env_soundscape" -> new SoundEntities.Soundscape(map, index, entity);
             case "infra_music" -> new SoundEntities.Music(map, index, entity);

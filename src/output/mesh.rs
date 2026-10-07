@@ -28,6 +28,10 @@ pub struct Mesh {
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>,
     pub submeshes: Vec<Submesh>,
+    /// Each vertex's hardware vertex in the model's `.vtx`, where vrad's
+    /// `.vhv` vertex light is indexed; `u32::MAX` where unknown, and empty for
+    /// a mesh not built from a Source model. Not written to the file.
+    pub hardware: Vec<u32>,
 }
 
 /// Convert the already resolved model-space prop mesh without discarding its
@@ -108,6 +112,7 @@ pub fn from_prop_mesh(source: &crate::output::obj::PropMesh) -> Result<(Mesh, Ve
         vertices,
         indices,
         submeshes,
+        hardware: Vec::new(),
     };
     encode(&mesh)?;
     Ok((mesh, materials))
@@ -194,6 +199,7 @@ pub fn from_brush_mesh(source: &crate::convert::BrushMesh) -> Result<(Mesh, Vec<
         vertices,
         indices,
         submeshes,
+        hardware: Vec::new(),
     };
     encode(&mesh)?;
     Ok((mesh, materials))
@@ -214,6 +220,7 @@ pub fn from_source_model(
     type VertexKey = ([u32; 8], [(u8, u32); 3]);
     let mut interned: HashMap<VertexKey, u32> = HashMap::new();
     let mut bindings = Vec::new();
+    let mut hardware = Vec::new();
     for part in &source.parts {
         ensure!(
             part.triangles.len() == part.normals.len() && part.triangles.len() == part.uvs.len(),
@@ -278,6 +285,9 @@ pub fn from_source_model(
                             uv: values[6..8].try_into().unwrap(),
                         });
                         bindings.push(weights[c]);
+                        // The first corner's: corners that share every value
+                        // are one hardware vertex in the .vtx as well.
+                        hardware.push(part.hardware.get(t).map_or(u32::MAX, |h| h[c]));
                         interned.insert(key, i);
                         i
                     }
@@ -314,6 +324,7 @@ pub fn from_source_model(
         vertices,
         indices,
         submeshes,
+        hardware,
     };
     encode(&mesh)?;
     Ok((mesh, materials, bindings))
@@ -464,6 +475,7 @@ mod tests {
                 index_count: 3,
                 material_slot: 0,
             }],
+            hardware: Vec::new(),
         }
     }
 

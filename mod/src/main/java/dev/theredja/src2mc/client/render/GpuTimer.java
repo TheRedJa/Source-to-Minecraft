@@ -15,7 +15,8 @@ import org.lwjgl.opengl.GL33C;
  * TIME_ELAPSED queries cannot overlap, so a phase is skipped while another is open.
  */
 final class GpuTimer {
-    enum Phase { SURFACES_OPAQUE, PROPS_OPAQUE, SURFACES_TRANSLUCENT, PROPS_TRANSLUCENT, SURFACES_SHADOW, PROPS_SHADOW }
+    enum Phase { SURFACES_OPAQUE, PROPS_OPAQUE, SURFACES_TRANSLUCENT, PROPS_TRANSLUCENT, SURFACES_SHADOW, PROPS_SHADOW, SKY_SNAPSHOTS, SKY_ROOM, SKY_FACES,
+        LOGIC_PROPS, LOGIC_PROPS_SHADOW, ANIMATED_PROPS, ANIMATED_PROPS_SHADOW, MOVERS, MOVERS_SHADOW }
 
     private static final int RING = 6;
     private static final int WINDOW_FRAMES = 120;

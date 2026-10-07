@@ -12,7 +12,6 @@ import dev.theredja.src2mc.bundle.BundleMaterial;
 import dev.theredja.src2mc.bundle.BundleMap;
 import dev.theredja.src2mc.bundle.SurfaceTable;
 import dev.theredja.src2mc.network.PlacementNetwork;
-import dev.theredja.src2mc.world.LightOcclusion;
 import dev.theredja.src2mc.world.MapPlacement;
 import dev.theredja.src2mc.world.Src2mcWorldContent;
 import java.util.ArrayList;
@@ -235,7 +234,7 @@ public final class MapSurfaceRenderer {
     private MapSurfaceRenderer() {}
 
     /** Shared campaign atlas residency for every mod-owned static renderer. */
-    static AtlasPageResidency atlasPages() {
+    public static AtlasPageResidency atlasPages() {
         return PAGES;
     }
 
@@ -387,22 +386,11 @@ public final class MapSurfaceRenderer {
         return 1;
     }
 
-    /**
-     * What light the built meshes are holding and where it came from. A mesh freezes its light at
-     * build time, so a region built before the client's sky bake covered it keeps open daylight
-     * until something rebuilds it -- invisible in vanilla shading, and the whole picture under a
-     * shaderpack, which multiplies that sky value into its own sun term.
-     */
+    /** The sky light the built meshes' vertices hold; the baked-light shader does not use it. */
     private static String lightProvenance() {
-        long uncovered = MESHES.values().stream().filter(mesh -> !mesh.bakeCovered).count();
-        long epoch = LightOcclusion.clientEpoch();
-        long stale = MESHES.values().stream().filter(mesh -> mesh.bakeEpoch != epoch).count();
         int skyMin = MESHES.values().stream().mapToInt(mesh -> mesh.skyMin).min().orElse(-1);
         int skyMax = MESHES.values().stream().mapToInt(mesh -> mesh.skyMax).max().orElse(-1);
-        return "light: meshes without a bake=" + uncovered + "/" + MESHES.size()
-            + ", built against an older bake=" + stale
-            + ", sky range=" + skyMin + ".." + skyMax
-            + ", client bake epoch=" + epoch + " from generation " + LightOcclusion.clientGeneration();
+        return "light: " + MESHES.size() + " meshes, sky range " + skyMin + ".." + skyMax + " (unused: Source's baked light)";
     }
 
     /** Which vertex layouts the built meshes actually hold, and how many were built with a pack in
@@ -706,6 +694,9 @@ public final class MapSurfaceRenderer {
 
     static RenderLevelStageEvent.Stage opaqueStage() { return opaqueStage; }
 
+    /** The frame count atlas page residency is stamped with; other renderers sharing the pages use it too. */
+    public static long currentFrame() { return frame; }
+
     static boolean pvsCulling() { return pvsCulling; }
 
     static boolean smoothLighting() { return smoothLighting; }
@@ -862,10 +853,7 @@ public final class MapSurfaceRenderer {
             WorldSnapshot world = WorldSnapshot.capture(level, box[0], box[1], box[2], box[3], box[4], box[5]);
             MapPlacement placement = entry.key.placement();
             BuildInput input = new BuildInput(candidate.bundle, candidate.map, placement, entry.group, world,
-                (x, y, z) -> snapshotSurfacePresent(world, placement, x, y, z), smoothLighting, lightOcclusion,
-                LightOcclusion.clientEpoch(), LightOcclusion.baked(level).covers(
-                    SectionPos.blockToSectionCoord(placement.translation().getX() + entry.group.minX()),
-                    SectionPos.blockToSectionCoord(placement.translation().getZ() + entry.group.minZ())));
+                (x, y, z) -> snapshotSurfacePresent(world, placement, x, y, z), smoothLighting, lightOcclusion, 0L, true);
             int version = REGION_VERSIONS.getOrDefault(entry.key, 0);
             IN_FLIGHT.put(entry.key, new InFlight(input, version, MeshBuildPool.submit(() -> buildRegion(input)),
                 System.nanoTime(), timedOut, unloaded));
@@ -933,6 +921,7 @@ public final class MapSurfaceRenderer {
     }
 
     private static void draw(RenderLevelStageEvent event, BundleGeneration generation, boolean translucent, boolean shadowPass) {
+        if (!BakedLighting.ready()) return;
         long started = System.nanoTime();
         var camera = event.getCamera().getPosition();
         List<DrawItem> drawItems = new ArrayList<>();
@@ -999,10 +988,7 @@ public final class MapSurfaceRenderer {
                 (float) (mesh.origin.getY() - camera.y),
                 (float) (mesh.origin.getZ() - camera.z));
             mesh.buffer.bind();
-            mesh.buffer.drawWithShader(modelView, event.getProjectionMatrix(),
-                translucent ? GameRenderer.getRendertypeEntityTranslucentShader()
-                    : key.renderClass == BundleMaterial.RenderClass.SOLID
-                        ? GameRenderer.getRendertypeEntitySolidShader() : GameRenderer.getRendertypeEntityCutoutShader());
+            mesh.buffer.drawWithShader(modelView, event.getProjectionMatrix(), BakedLighting.prepare(mesh.light, key.renderClass, null, null));
             triangles += mesh.triangles;
         }
         if (activeType != null) {
@@ -1097,6 +1083,7 @@ public final class MapSurfaceRenderer {
                 result.drawnFragments++;
                 double[] normal = face.normal();
                 float nx = (float) normal[0], ny = (float) normal[1], nz = (float) normal[2];
+                float[] baked = new float[4];
                 for (var triangle : SurfaceTessellator.tessellate(x, y, z, face,
                     map.surfaces().uvRegions().get(face.uvRegionId()), material.texture(), texture, map.atlas().pageSize())) {
                     PackedVertices out = result.meshes.computeIfAbsent(new PageClass(triangle.page(), material.renderClass()), ignored -> new PackedVertices());
@@ -1109,8 +1096,9 @@ public final class MapSurfaceRenderer {
                     if (length > 0) { tx /= length; ty /= length; tz /= length; }
                     for (SurfaceTessellator.Vertex vertex : List.of(triangle.a(), triangle.b(), triangle.c())) {
                         int light = sampleVertexLight(in, result, vertex, nx, ny, nz, lightCache, occlusion);
+                        BakedLighting.surfaceLight(map.light(), map.surfaces(), face, vertex.x(), vertex.y(), vertex.z(), nx, ny, nz, baked);
                         out.add((float) (vertex.x() - baseX), (float) (vertex.y() - baseY), (float) (vertex.z() - baseZ),
-                            (float) vertex.u(), (float) vertex.v(), tx, ty, tz, light);
+                            (float) vertex.u(), (float) vertex.v(), tx, ty, tz, light, 0xFFFFFF, baked);
                     }
                     // $nocull: the back is its own triangle, wound the other way and lit from the
                     // side it faces, rather than a render state that would draw it with the
@@ -1118,8 +1106,10 @@ public final class MapSurfaceRenderer {
                     if (material.doubleSided()) {
                         for (SurfaceTessellator.Vertex vertex : List.of(triangle.a(), triangle.c(), triangle.b())) {
                             int light = sampleVertexLight(in, result, vertex, -nx, -ny, -nz, lightCache, occlusion);
+                            // One lightmap for both sides, as Source lights a $nocull face.
+                            BakedLighting.surfaceLight(map.light(), map.surfaces(), face, vertex.x(), vertex.y(), vertex.z(), -nx, -ny, -nz, baked);
                             out.add((float) (vertex.x() - baseX), (float) (vertex.y() - baseY), (float) (vertex.z() - baseZ),
-                                (float) vertex.u(), (float) vertex.v(), -tx, -ty, -tz, light);
+                                (float) vertex.u(), (float) vertex.v(), -tx, -ty, -tz, light, 0xFFFFFF, baked);
                         }
                     }
                 }
@@ -1196,6 +1186,7 @@ public final class MapSurfaceRenderer {
                 : new AABB(b[0], b[1], b[2], b[3], b[4], b[5]).move(origin.getX(), origin.getY(), origin.getZ()).inflate(0.01);
             Mesh mesh = new Mesh(input.bundle, input.map.atlas(), uploaded.buffer(), origin, meshBounds, vertices.triangles(), frame,
                 input.bakeEpoch, input.bakeCovered, build.skyMin, build.skyMax, uploaded.vertexSize(), IrisCompat.shaderPackInUse());
+            mesh.light = input.map.light();
             MESHES.put(new MeshKey(regionKey, pageClass.page, pageClass.renderClass), mesh);
             Mesh old = meshes.put(pageClass, mesh);
             if (old != null) old.close();
@@ -1446,6 +1437,7 @@ public final class MapSurfaceRenderer {
 
     private static void clear() {
         dropMeshes();
+        BakedLighting.clear();
         REGION_GROUPS.clear(); PLACEMENT_REGIONS.clear(); REGION_VERSIONS.clear(); BUILD_INFO.clear();
         WorldSnapshot.SHARED.clear();
         PAGES.reset(-1);
@@ -1477,6 +1469,8 @@ public final class MapSurfaceRenderer {
     private static final class Mesh implements AutoCloseable {
         final BundleManifest bundle; final AtlasIndex atlas; final VertexBuffer buffer; final BlockPos origin; final AABB bounds;
         final long triangles;
+        /** The map's baked light, whose lightmap the mesh's vertices point into; null for none. */
+        dev.theredja.src2mc.bundle.LightTable light;
         /** The light this mesh froze in, and where that light came from. */
         final long bakeEpoch; final boolean bakeCovered; final int skyMin; final int skyMax;
         /** The stride the buffer actually went to the GPU with, and whether a pack was in use

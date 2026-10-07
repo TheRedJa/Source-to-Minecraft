@@ -335,6 +335,114 @@ fn path_of(key: &str) -> String {
     format!("materials/{}.vtf", key.trim_end_matches(".vtf"))
 }
 
+/// One frame of a sprite sheet: how long it shows, in seconds, and where it
+/// is on the texture, `[u0, v0, u1, v1]` as fractions; a version 1 sheet
+/// gives four rectangles per frame, one per texture the frame blends.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SheetFrame {
+    pub duration: f32,
+    pub rects: Vec<[f32; 4]>,
+}
+
+/// One animation sequence of a sprite sheet.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SheetSequence {
+    /// Holds the last frame at the end instead of looping.
+    pub clamp: bool,
+    pub frames: Vec<SheetFrame>,
+}
+
+/// `VTF_RSRC_SHEET`, the resource a particle texture keeps its sprite sheet
+/// in: tag bytes `0x10 0 0`.
+const SHEET_TAG: [u8; 3] = [0x10, 0, 0];
+/// A resource entry whose four bytes are its value, not an offset.
+const RSRCF_HAS_NO_DATA_CHUNK: u8 = 0x02;
+
+/// The sprite sheet of a VTF, indexed by sequence number (a number the sheet
+/// skips is `None`); `None` when the texture has none. Only version 7.3 and
+/// later files carry resources. Read as noclip.website's `Sheet` reads it:
+/// `u32` version 0 or 1, `u32` sequence count, then per sequence `u32`
+/// number, `u32` clamp, `u32` frame count, `f32` total time, and per frame an
+/// `f32` time and one (version 0) or four (version 1) rectangles of four
+/// `f32`.
+pub fn sheet(data: &[u8]) -> Option<Vec<Option<SheetSequence>>> {
+    let u32_at = |at: usize| -> Option<u32> {
+        Some(u32::from_le_bytes(data.get(at..at + 4)?.try_into().ok()?))
+    };
+    let f32_at = |at: usize| -> Option<f32> { Some(f32::from_bits(u32_at(at)?)) };
+    if data.get(0..4)? != b"VTF\0" || u32_at(4)? != 7 || u32_at(8)? < 3 {
+        return None;
+    }
+    let count = u32_at(0x44)? as usize;
+    let entry = (0..count.min(32)).find_map(|i| {
+        let at = 0x50 + i * 8;
+        let tag = data.get(at..at + 3)?;
+        (tag == SHEET_TAG && data[at + 3] & RSRCF_HAS_NO_DATA_CHUNK == 0).then_some(at)
+    })?;
+    let start = u32_at(entry + 4)? as usize;
+    let size = u32_at(start)? as usize;
+    let end = start.checked_add(4)?.checked_add(size)?;
+    if end > data.len() {
+        return None;
+    }
+    let mut at = start + 4;
+    let version = u32_at(at)?;
+    if version > 1 {
+        return None;
+    }
+    let per_frame = if version == 1 { 4 } else { 1 };
+    let sequences = u32_at(at + 4)? as usize;
+    at += 8;
+    let mut out: Vec<Option<SheetSequence>> = Vec::new();
+    for _ in 0..sequences.min(4096) {
+        let number = u32_at(at)? as usize;
+        let clamp = u32_at(at + 4)? != 0;
+        let frames = u32_at(at + 8)? as usize;
+        at += 16;
+        if number >= 4096 || at + frames * (4 + per_frame * 16) > end {
+            return None;
+        }
+        let mut list = Vec::with_capacity(frames);
+        for _ in 0..frames {
+            let duration = f32_at(at)?;
+            at += 4;
+            let mut rects = Vec::with_capacity(per_frame);
+            for _ in 0..per_frame {
+                rects.push([
+                    f32_at(at)?,
+                    f32_at(at + 4)?,
+                    f32_at(at + 8)?,
+                    f32_at(at + 12)?,
+                ]);
+                at += 16;
+            }
+            list.push(SheetFrame { duration, rects });
+        }
+        if out.len() <= number {
+            out.resize(number + 1, None);
+        }
+        out[number] = Some(SheetSequence {
+            clamp,
+            frames: list,
+        });
+    }
+    Some(out)
+}
+
+impl Textures<'_> {
+    /// What a texture's header says, through a shared reference: not cached.
+    pub fn header_of(&self, base_texture: &str) -> Option<Header> {
+        let key = base_texture.to_ascii_lowercase().replace('\\', "/");
+        self.read_header(&key)
+    }
+
+    /// The sprite sheet of `$basetexture`, if it has one.
+    pub fn sheet(&self, base_texture: &str) -> Option<Vec<Option<SheetSequence>>> {
+        let key = base_texture.to_ascii_lowercase().replace('\\', "/");
+        sheet(&self.vfs.open(&path_of(&key))?)
+    }
+}
+
 /// Encode an image as PNG bytes.
 pub fn to_png(image: &RgbaImage) -> Result<Vec<u8>> {
     let mut out = Vec::new();

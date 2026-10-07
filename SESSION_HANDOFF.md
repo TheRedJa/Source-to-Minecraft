@@ -1,14 +1,290 @@
 # src2mc implementation handoff
 
-Updated: 2026-10-04 (Europe/Berlin), DEV-0.32.0 (point_template, awaiting the user's in-game test)
+Updated: 2026-10-07 (Europe/Berlin), DEV-0.38.0 installed, awaiting user in-game test (see top)
 
-## NEXT TASK: none chosen yet -- ask the user (point_template work is user-confirmed)
+## DONE: particles + impacts + env_spark (DEV-0.38.3) -- user-confirmed 2026-10-07 ("All perfect now"), uncommitted
 
-DEV-0.33.1 user-confirmed 2026-10-04: no glowing belt modules, no hitches over 30 ms. The
-whole point_template / conveyor chain (D25, DEV-0.32.0 to 0.33.1) is confirmed working on
-sp_a2_bts4. Nothing committed yet (commit only when asked). Open candidates: D25 "Not done"
-list, `.phy` prop collision (user wants it later, do NOT start unasked), env_sprite, lights,
-VScript (bts4 turret production line needs it plus NPC turrets).
+Still unchecked in game: escape_02 bullet-hole decals, Portal 2 maps' effects and impact systems
+(user skipped those checks). Next candidates: env_sprite (303 in furnace), env_steam, env_fire,
+env_smokestack, func_dustmotes. Commit only when asked.
+
+
+User test 0.38.2: speed now a tad (very slightly) too far; occasional particles fly way too far;
+steam/ash/room flames good; sparks/impacts still right. DEV-0.38.3: setVelocity/addVelocity encode
+over previousDt (particles.a initializers use m_flPreviousDt) -- old dt encoding x dt/prevDt scaling
+launched particles too fast after short-then-long frames. Test unevenFramesDoNotLaunchParticlesTooFast
+(fails on old code). Open: whether "a tad too far" remains; emitter/operator order in
+CParticleCollection::Simulate not verified (effect ~0.5 units at 200 fps, negligible).
+
+
+User test 0.38.1: flames/smoke/steam rise but not far/fast enough everywhere. DEV-0.38.2 (Java only):
+Movement Basic damped (1-drag) per step and damped gravity; particles.a damps (1-drag)^(30*dt)
+* dt/prevDt and adds acceleration undamped (constant .LC198 = 30). DampenToCP now
+pow(dist/range, scale) moving xyz as particles.a. Test dragIsPerThirtiethOfASecondNotPerFrame.
+
+
+User test 0.38.0: flames + smoke visible, sparks work everywhere, metal impacts fine; flames/smoke
+moved DOWN instead of up. DEV-0.38.1 (Java only, bundles unchanged): local speed y uses the CP's
+RIGHT (raw vectors), not the matrix's left column -- verified by disassembling SDK
+lib/linux/particles_486.a (ar x; objdump -d -r -C). Conventions: matrix (fwd,left,up) for
+PositionOffset/sphere bias/VelocityNoise/SetControlPointPositions; raw (fwd,right,up) for
+CreateWithinSphere + VelocityRandom local speed; TransformAxis (right,fwd,up) for TwistAroundAxis +
+ConstrainDistance offset. ParticleSystem.toWorldRight/transformAxis; test
+localSpeedYRunsAlongTheControlPointsRight. Java 146 pass.
+
+
+User test of 0.37.0 (furnace): dust, ash, PC smoke look right; impacts "look good"; NO flames, sparks,
+or dense pipe smoke; perf fine. Causes + fixes in DEV-0.38.0:
+- Flames/smoke: INFRA fire/smoke sheets are 4096^2; atlas usable axis 4064 -> split into 4 regions;
+  ParticleRenderer.placement() returns null for multi-region -> nothing drawn. Converter now scales
+  effect textures to fit one region (atlas::fit_one_region, mod_export standalone_material effect).
+- Sparks: furnace has 30 env_spark (not implemented). Added logic/EffectEntities.Spark (CEnvSpark:
+  think 0.1+rand(MaxDelay), SparkOnce sparks+stops, OnSpark, DoSpark sound unless 256, serial++ per
+  spark) and client SparkSource in ParticleEffects drawing CodeEffects.electricSpark (FX_ElectricSpark
+  from local SDK /mnt/games/sourcemods/Hl2testmod/src/game/client/fx_sparks.cpp; files are ISO-8859,
+  use grep -a). Converter exports DoSpark script for maps with env_spark and code materials too.
+- Metal impact sparks now match FX_MetalSpark flags (no collide, no fade) -- Burst collide/fade params.
+- Test: ParticleSimulationTest.electricSparksRun; -Dsrc2mc.particleDetail=1 prints per-system
+  count/alpha/radius/placement in realSystemsRun.
+Java 145 pass + 6 skipped, Rust 618, clippy 17, all 10 bundles validate + installed.
+INFRA lacks particle/particle_noisesphere, so the spark smoke puff is absent there.
+
+## (previous) .pcf particle runtime + impacts + decals (DEV-0.37.0)
+
+2026-10-07 15:05: all done and installed. VERSION DEV-0.37.0, jar src2mc-DEV-0.37.0.jar built (gradle
+build incl. tests ok, Java 144 pass + 5 skipped), all 10 maps re-exported to target/sky-test/
+(/tmp/export_all.sh recreated) and installed (bundles + src2mc/schematics), each validated with
+BundleValidatorTest + ParticleSimulationTest -Dsrc2mc.testBundle (0 failures). Rust 617 pass,
+clippy 17 (baseline). tests/zz_pcf_inventory.rs deleted. Docs: format.md section 15 (audio v3),
+section 23 (particles.json incl. decals), metadata `particles`, limits; decisions.md D29.
+Decals: client/render/DecalRenderer.java -- weighted pick by game material, R_DecalComputeBasis
+(wall T down, floor S +X), clipped (Sutherland-Hodgman) to coplanar SurfaceTable fragments in the
+3x3x3 cells around the hit (normal dot >= 0.999, plane within 1/64 block), drawn at the map's
+opaque stage with the baked shader (lit: face lightmap via surfaceLight; decalmodulate: Exposure
+1, blend DST_COLOR/SRC_COLOR), polygon offset -1/-10, max 2048 (r_decals), dropped when an owner
+cell turns air or on generation/placement change. Command: /src2mc_particles decals on|off|clear;
+status prints a decals line. Per map: Portal 1 maps 17 decal letters, Portal 2 maps 7 + style
+"systems" (9 impact systems), INFRA none + style "code". Atlas frame stamp now shared:
+MapSurfaceRenderer.currentFrame() (particles used their own counter before).
+NEXT: give/await user in-game checklist results; commit only when asked. Below: state before.
+
+State 2026-10-07 ~15:30 (paused for compact). VERSION still DEV-0.36.0 -> bump to DEV-0.37.0 (formats
+changed: new particles.json, audio.json v3, network "11"). Nothing committed since a83be58.
+
+Converter (Rust, builds, 617 tests ok before decal edit; decal edit compiled):
+- src/source/pcf.rs: binary DMX reader (enc 2-5), definitions(), manifest_files(); tests.
+- src/source/pcf_defaults.json: param defaults of 93 functions + system/children/operator fade,
+  from SDK 2013 linux64 particles.a unpack tables (provenance in particles.rs doc).
+- src/source/vtf.rs: sheet() (VTF 7.3 resource 0x10 SHEET), Textures::sheet, Textures::header_of.
+- src/source/vfs.rs: indexes loose particles/.
+- src/source/sound.rs SurfaceSounds + bullet_impact, game_material; src/output/audio.rs Surface
+  + bullet_impact (script), game_material (letter); audio version 3.
+- src/output/particles.rs (new): collect() (info_particle_system effect_name + children closure,
+  impact systems when BSP version >= 21 and impact_* exist, CODE_MATERIALS incl effects/blood,
+  decal base materials), finish() -> ParticleTable {systems (params merged with defaults),
+  materials (map material id, shader, additive, $params, sheet), impacts {style systems|code,
+  systems letter->idx, materials name->idx}, decals letter->[{material, rect, size units, weight}]}
+  from scripts/decals_subrect.txt (Subrect $Material/$Pos/$Size/$decalscale) or decals.txt.
+- mod_export.rs: effect_materials (full-res textures with alpha, Translucent, packed after map's
+  like room), particles.json written, metadata `particles`. metadata.rs field added.
+- JUST WRITTEN, NOT YET RUN: decal export; next step was export escape_02 to /tmp/s2p/escape and
+  inspect particles.json decals.
+
+Mod (Java, compiles; 142 tests ok, 5 skipped, before reflectivity/decal changes -> rerun):
+- bundle/ParticleTable.java (+Params), BundleSchemaValidator.validateParticles (keys: format,
+  version, systems, materials, impacts -- MUST ADD "decals" key + parse), BundleLimits particle
+  limits, BundleMap component `particles` (+22-arg overload). AudioTable.Surface + bulletImpact,
+  gameMaterial; validator audio v3. BundleMaterial + reflectR/G/B (validator fills).
+- client/particles/: ParticleSystem (CParticleCollection, attribute-indexed arrays, aux0/aux1),
+  Functions (~60 init/op/emit/force/constraint; noclip where it has them, else wiki), Renderers,
+  ParticleRenderer (CPU spritecard quads, sheets, trails, ropes; VertexBuffer DYNAMIC; shader
+  src2mc:particle with Frame element), Effect (CPs, traces via swappable Effect.world), Space,
+  Noise, Angles, CodeEffects (SDK FX_DebrisFlecks/FX_DustImpact/FX_MetalSpark), Impacts (client:
+  surface material -> game material, bulletimpact sound via SourceAudio.playBulletImpact, systems
+  or code effects), ParticleEffects (manager at AFTER_PARTICLES LOWEST; info_particle_system
+  sources from logic table; ClientLogic SoundState on/serial; catch-up 4 s; range 160;
+  /src2mc_particles [on|off|range N]).
+- logic/EffectEntities.ParticleSystem (server): Start/Stop/StopPlayEndCap/DestroyImmediately,
+  start_active, remove kills; registered in LogicEntities.
+- world/ImpactNetwork: ImpactPayload; ProjectileImpactEvent (server) + TacZ AmmoHitBlockEvent via
+  reflection (ServerAboutToStartEvent hook); network version "11" in PlacementNetwork.
+- shaders/core/particle.{json,vsh,fsh}. Made public: IrisCompat(+shadowPass()),
+  MapSurfaceRenderer.atlasPages(), BakedLighting.currentExposure().
+- test ParticleSimulationTest (synthetic + -Dsrc2mc.testBundle real run; furnace all 22 ran ok).
+
+Remaining:
+1. Run decal export check; Java: parse "decals" in validateParticles + ParticleTable.decals;
+   client decal renderer (AFTER_BLOCK_ENTITIES; clip quad to coplanar fragments in 3x3x3 cells;
+   DecalModulate = mod2x blend DST_COLOR,SRC_COLOR; max ~256 decals; orient right=cross(n, up)).
+2. VERSION DEV-0.37.0; rebuild jar; re-export all 10 maps (/tmp/export_all.sh), install bundles,
+   validate; java tests; cargo clippy.
+3. Docs: format.md section 23 particles.json + decals, section 15 audio v3 surface fields,
+   metadata row, limits; decisions.md D29 (particles/impacts, defaults from particles.a, sheet
+   timing rule, Portal 2 impact mapping assumption, uncertain functions list).
+4. Delete tests/zz_pcf_inventory.rs before commit.
+5. User in-game checklist: furnace effects (flames, steam, ash blow, dust), escape_02/P2 effects,
+   shoot map walls with arrows + TacZ (escape_02 concrete/metal), sounds, /src2mc_particles.
+Uncertain (user verifies): sheet timing (FPS flag = frames/s, else loops/s), oscillate wave,
+ramp end times, Position Along Ring, Place On Ground, plane cull side, P2 impact table.
+
+## DONE: Source baked lighting (DEV-0.36.0) -- user-confirmed 2026-10-07, uncommitted
+
+User test 2026-10-07 on furnace: "No issues, everything looks amazing." 7 ms avg top-down over the
+whole map (worst case), 3-8 ms at gameplay spots, steady. Shader packs: map invisible (accepted).
+Design and scope: docs/decisions.md D28; formats: docs/format.md section 5 (surfaces v3) and
+section 22 (light.s2light). Nothing committed since a83be58 (commit only when asked).
+
+- Unlit fragments checked 2026-10-07: on all maps they are NOLIGHT faces only (tools/toolsblack,
+  toolsblack_noportal, lights/* panels, effects/fizzler*); vrad gives them no lightmap and Source
+  draws them unlit, so fullbright is right.
+- Old hl2.src2mc (v2 format) moved to mod/runs/client/config/src2mc/bundles-old-format/; needs
+  re-export from its source if wanted.
+- Not done: world lights (direct light on dynamic models; engine adds up to 4 to the ambient
+  cube), light styles, bumped lightmaps, auto exposure, env_cubemap, stop writing the unused
+  occlusion.s2occl. Earlier backlog: .pcf particle runtime, impacts for MC projectiles + TacZ.
+  Do not start .phy.
+
+## NEXT TASK: sky (D26, D27) -- 2D skybox user-confirmed (DEV-0.34.3); 3D skybox DEV-0.35.1 in test
+
+DEV-0.35.8 (2026-10-05): timeline result (map view / away / flatworld, GPU ms): to shadow
+after_solid 8.45/5.10/0.83, to main after_solid 7.92/1.09/0.56, to after_particles 1.65/0.17/0.01,
+to after_level (composite) 3.00/3.32/2.73, GPU frame 22.7/11.3/5.8. Map blocks are all INVISIBLE
+render shape (no Sodium geometry), so the map-dependent ~15 ms is our opaque-stage draws; timed
+ones (surfaces+props) explain ~5. Added GpuTimer phases LOGIC_PROPS, ANIMATED_PROPS, MOVERS
+(+_SHADOW); timeline report lists all mod phases. Next: user re-runs map view.
+
+DEV-0.35.7 (2026-10-05): user: without shaders 210+ fps over the whole map, rock solid at 120 cap
+-> CPU side is fine; the cost is GPU under Complementary (flatworld 6 ms, map 23 ms; mod's own
+draws ~6 ms). Added FrameTimeline: GL_TIMESTAMP after every RenderLevelStageEvent (shadow ones
+prefixed), RenderFrameEvent Pre/Post; `/src2mc_gpu_frame on|off`, bare command prints per-span
+average and logs it. Next: user runs it on flatworld vs map to see which span grows.
+
+DEV-0.35.6 (2026-10-05): user on 0.35.5: same 12/23 ms averages, spikes much reduced. 2nd JFR
+(/tmp/src2mc2.jfr): 1.8M jdk.Deoptimization in 90 s, ~all ClientChunkCache.getChunk bci 9
+(storage.inRange false) "unstable_if" action "none" from PropRenderer.rootStatus -- lookups of
+roots in chunks outside the client chunk storage deopt every call once HotSpot stopped
+recompiling. Fix: ChunkWindow (player chunk +- render distance + 2) skips those roots before any
+level call; loaded ones read via getChunkSource().getChunk(x, z, false) and the LevelChunk.
+Phase 0 render thread after 0.35.5: PropRenderer 25% (updateRoots 16, draw 7), Sodium
+setupTerrain 25%, swap 13%.
+
+DEV-0.35.5 (2026-10-05): user: flatworld 6 ms; furnace looking away 12 ms, looking at map 23 ms,
+1000 blocks away 7 ms. JFR (jcmd attach, /tmp/src2mc.jfr): looking away the render thread is
+CPU-bound (swap 7%); PropRenderer.render 37% of its samples: updateRoots copied every root's NBT
+(Src2mcDataBlockEntity.payload -> CompoundTag.copy) 9046 roots every 10th frame, plus a seen-set
+sweep; discardExpiredMeshes streamed LAST_VISIBLE every frame; LogicPropRenderer.prepare rebuilt a
+9k-entry stableId map every frame. Fixes: payloadInt/payloadString (no copy), roots rechecked in
+1/10 slices per frame (no sweep: placement/generation changes clear all), expiry check every 10th
+frame, PLACED cache (identity) in LogicPropRenderer. Looking at the map it is GPU-bound (swap 20%).
+Remaining CPU near maps: Sodium OcclusionCuller/iris shadow render lists (~20%, MC terrain).
+
+DEV-0.35.4 (2026-10-05): user on 0.35.3: 21 ms (was 26; ~16 long ago), prop shadow 6.58 ms, room
+trees/buildings blobs ("ugly"; user OK keeping it if fixing costs noticeable fps). Fix: room
+materials get own textures (ExtractedMaterials.room_material_ids, standalone_material helper,
+span = texture_spans x scale); TextureAsset.room_only -> LogicalTexture.after_map; atlas::pack
+sorts (after_map, height desc, width desc, id). Furnace: map textures page 0, room on page 1.
+All 10 re-exported/installed/validated. User 0.35.4: room "looks great" (confirmed), 19 ms avg
+(target 16.7 = 60 fps). GPU: surfaces 0.59+0.02, props 1.00+0.07, shadow surfaces 0.40, shadow
+props 3.10, sky ~0.8; looking away from the map ~13.3 ms (floor). Mod costs ~6 ms; movers not timed
+yet (`/src2mc_movers draw off` A/B asked).
+
+DEV-0.35.3 (2026-10-05): user confirmed 0.35.2 room no longer tears with shaders. Timers: sky
+<1 ms total; frame 26 ms, 13 ms with props off, prop shadow pass 10.4 ms GPU; user had 60 fps
+before. Cause found: skybox export forced TEXTURE_SPAN 64 on every room material incl. ones
+shared with world props/faces -> furnace atlas 1 page (0.18 area) became 6 pages (1.46 area).
+Fix: shared materials keep the map's buckets (room_material_ids in mod_export.rs), room-only
+materials use SkyboxExport::texture_spans (median room blocks per repeat). Furnace now 2 pages
+(0.20 area), 74 MB. All 10 re-exported, installed, validated. Waiting on user fps numbers.
+
+DEV-0.35.2 (2026-10-05): user report on 0.35.1 with Complementary: room torn into streaks/holes
+when moving, no visible improvement, ~48 ms frames (fine without shaders). Cause of the tearing:
+drawRoom cleared the room depth while depthMask was false (Iris path draws faces without depth
+writes) -- clear now sets depthMask/colorMask true first. FPS cause NOT known yet: added
+GpuTimer phases SKY_SNAPSHOTS/SKY_ROOM/SKY_FACES + CPU nanos, printed as status line 4. Waiting
+on user's numbers (status with room on vs off, shaders on).
+
+STATE AT COMPACT (2026-10-05): DEV-0.35.1 installed (jar built, all 10 bundles + schematics in
+mod/runs/client/config/src2mc/{bundles,schematics}, exported from target/sky-test/ by
+/tmp/export_all.sh -- recreate it if /tmp was cleared: loops the 10 test maps through
+`src2mc mod export --campaign <n> --out target/sky-test/<n> <map>`). DEV-0.35.0 crashed on
+first room draw (BufferOverflowException: skybox shader's vec3 `FogColor` clashed with MC's
+vec4 default uniform written by ShaderInstance.setDefaultUniforms); DEV-0.35.1 renamed to
+SkyFogColor/SkyFogRange + CoreShaderUniformTest guard. User test 2026-10-05: no crash anymore;
+visual checks (high-up streaks covered? smokestacks continue? exposure value closest to Source?
+metro/tunnel4 scenery? room on/off fps? shaders on? /src2mc_sky status line 3) NOT done yet --
+user compacting first and says something needs fixing ("before you fix anything"): ASK what to
+fix / wait for their report before changing code. Nothing committed since f498fa7 (DEV-0.34.0
+to 0.35.1 all uncommitted; commit only when asked).
+
+Uncommitted work since f498fa7: sky table (sky.rs, SkyTable, SkyRenderer, DepthSnapshot,
+sky/skybox shaders), drawn tool textures (Material.drawn, palette drawn_tool), area portal
+window fade (AreaPortalWindows, fade brushes separated as movers incl. func_illusionary without
+collision), 3D skybox (lighting.rs, skybox.rs, mdl.rs Part.hardware, SkyboxTable, SkyboxScene).
+Tests: Rust 607 pass, clippy 17 (baseline), Java 142 pass, all 10 bundles validate.
+
+DEV-0.35.0 (stage 2, D27, format section 21): converter `src/output/skybox.rs` writes the room as
+camera-relative triangles: brush faces + displacements lit by HDR lightmaps (`src/bsp/lighting.rs`,
+LUMP_FACES_HDR/LIGHTING_HDR, one 1024-wide page), static props lit by `sp_hdr_N.vhv` (VTX hardware
+order recorded per corner in `mdl.rs` Part.hardware), fog from sky_camera, per-cluster
+LEAF_FLAGS_SKY bits. Mod: `SkyboxScene` cuts per atlas region on a worker and uploads raw VAOs;
+`SkyRenderer.drawRoom` renders 2D cube + room into a screen-sized target from
+sky_camera + eye/scale, sky faces composite it (sky shader Mode 2). `/src2mc_sky room on|off`,
+`/src2mc_sky exposure <x>` (Source tone map scale, default 1). 5 maps have rooms: furnace (1735
+faces, 62 disps, 265 props), metro, tunnel4, escape_02 (tiny), sp_a3_01 (tiny).
+
+
+User, 2026-10-04: sky and the void around maps break immersion most; also particles and the
+furnace pipe-burst scene. Chosen order: (1) sky, (2) map effects as a REAL `.pcf` particle
+runtime (not MC approximations), (3) impact effects triggered by Minecraft projectiles and the
+TacZ gun mod. DEV-0.32.0 to 0.33.1 committed and pushed (f498fa7).
+
+DEV-0.34.0 (stage 1 of the sky): converter writes `maps/<id>/sky.s2sky` (format section 20):
+world faces with SURF_SKY outside the 3D skybox room, and the six 2D skybox sides baked from
+`skybox/<skyname><side>` (LDR `$basetexture`, `$color`, `$basetexturetransform`) as
+`sky/<id>.png`. Mod `SkyRenderer` draws the faces with core shader `src2mc:sky`, sampling the
+side by view direction (orientation from noclip.website's SkyboxRenderer). 7 of 10 test maps
+have sky faces (waterplant, bts4, testchmb_a_00 have none). `/src2mc_sky on|off|status`.
+Open: Iris/Complementary behaviour of the custom shader is untested.
+
+DEV-0.34.0 user test (2026-10-04): sky correct and oriented as in Source without shaders,
+toggle works, sp_a3_01 fog colour right. Problems: (a) with Complementary the sky was missing
+(Iris blocks unknown core shaders: MixinShaderInstance, allowUnknownShaders=false); (b) furnace
+towers cut off where they pass through sky brushes (Source draws sky behind all map content);
+(c) wakeup showed MC sky: tools/toolsblack(_noportal) walls were dropped as tool textures;
+(d) high up, the clamped lower half of the sides streaks (3D skybox will cover it); (e) user said
+yes to solid sky brushes. DEV-0.34.1: three depth snapshots (DepthSnapshot, raw GL blits) decide
+per pixel; vanilla draws the sky at AFTER_PARTICLES (before map glass), Iris at AFTER_LEVEL
+after the final pass (map glass in front of sky then shows sky without glass); drawn tool
+materials kept by texinfo flags (Material.drawn); sky brushes collide. Waiting on user test.
+
+DEV-0.34.1 user test (2026-10-05): wakeup black walls right; Iris shows the sky. Frame spikes up
+to 144 ms on wakeup and furnace, unchanged by /src2mc_sky off (so not the sky pass). Furnace
+towers still cut: they continue as smokestack_001_skybox.mdl in the 3D skybox (stage 2 fixes).
+User: sky brush collision useless, remove -> DEV-0.34.2 (furnace carriers back to 110,910;
+wakeup 223,470 vs 159,994 before, from the black walls, which also doubled its fragments to
+205k). Window over sky with shaders: user sees "a dull gray plane, then the sky, then Minecraft
+again" -- not understood yet, screenshot requested. Spikes: diagnosis pending
+(/src2mc_render_status).
+
+2026-10-05: spikes were the user's PC power-saving mode. The gray plane is a
+func_areaportalwindow fade brush (func_brush/func_illusionary in toolsblack), drawn since
+drawn tools are kept. DEV-0.34.3: converter separates every window target as a mover
+(func_illusionary without collision); MoverRenderer draws it with Source's distance blend
+(AreaPortalWindows, C_FuncAreaPortalWindow::GetDistanceBlend). User-confirmed 2026-10-05 with and
+without shaders (doorway clear, fades with distance, wakeup basement entry open). 2D sky stage done;
+next: stage 2, the 3D skybox room.
+
+Stage 2 (next): the 3D skybox room -- convert its brushes/displacements/props separately, light
+them with BSP lightmaps and leaf ambient cubes (they are not in the MC world), render from
+`sky_camera` origin + eye / scale into an offscreen target with sky_camera fog, show it through
+the sky faces when the camera's cluster has LEAF_FLAGS_SKY (vrad BuildVisForLightEnvironment).
+
+Particles research (for step 2): .pcf is binary DMX (v2 Portal/P2, v5 INFRA); the test maps'
+effects use about 70 functions (3 renderers, 3 emitters, 29 initializers, 28 operators, 3 forces,
+3 constraints). Valve's particle library source is not public; noclip.website
+(src/SourceEngine/ParticleSystem.ts, MIT, reverse-engineered) implements about 25. SDK client
+code exists for the legacy entities (env_spark, env_steam/c_steamjet, env_smokestack, env_fire,
+fx_impact). Five INFRA tunnel4 effects are missing from the VPKs (likely map pakfile).
 
 ## DONE: belt module glow (DEV-0.33.1)
 

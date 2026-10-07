@@ -218,6 +218,14 @@ final class SurfaceSounds {
         return map.audio().surface(surfaceMaterial.surfaceProp());
     }
 
+    /** Plays script {@code index} of the map's sound table at its own volume, as a block's noise. */
+    void playIndex(MapSound map, int index, Vec3 at) {
+        if (index < 0 || index >= map.audio().scripts().size()) return;
+        AudioTable.Script script = map.audio().scripts().get(index);
+        if (script.soundCount() == 0) return;
+        play(scripted(map, script, at, (float) script.volume().sample(random), SoundSource.BLOCKS));
+    }
+
     private SourceSound scripted(MapSound map, AudioTable.Script script, Vec3 at, float volume, SoundSource category) {
         AudioTable.Sound sound = map.sound(script.sound(random.nextInt(script.soundCount())));
         SourceSound voice = new SourceSound(library, map.bundle(), sound, category, at,

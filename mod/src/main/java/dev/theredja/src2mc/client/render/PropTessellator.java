@@ -19,20 +19,33 @@ final class PropTessellator {
     static List<Triangle> tessellate(RuntimeMesh mesh, RuntimeMesh.Submesh submesh, BundleProp prop,
                                     BundleMaterial.TextureReference material, AtlasIndex.Texture texture,
                                     int pageSize) {
-        return tessellate(mesh.vertices(), mesh.indices(), submesh.firstIndex(), submesh.indexCount(), prop, material, texture, pageSize);
+        return tessellate(mesh, submesh, prop, material, texture, pageSize, null);
+    }
+
+    /** As above, each vertex carrying {@code light}: linear RGB per mesh vertex, or null for none. */
+    static List<Triangle> tessellate(RuntimeMesh mesh, RuntimeMesh.Submesh submesh, BundleProp prop,
+                                    BundleMaterial.TextureReference material, AtlasIndex.Texture texture,
+                                    int pageSize, float[] light) {
+        return tessellate(mesh.vertices(), mesh.indices(), submesh.firstIndex(), submesh.indexCount(), prop, material, texture, pageSize, light);
     }
 
     /** As above over a mesh's own arrays, which {@link RuntimeMesh} copies on every call: for a caller that goes triangle by triangle. */
     static List<Triangle> tessellate(float[] vertices, int[] indices, int firstIndex, int indexCount, BundleProp prop,
                                     BundleMaterial.TextureReference material, AtlasIndex.Texture texture,
                                     int pageSize) {
+        return tessellate(vertices, indices, firstIndex, indexCount, prop, material, texture, pageSize, null);
+    }
+
+    static List<Triangle> tessellate(float[] vertices, int[] indices, int firstIndex, int indexCount, BundleProp prop,
+                                    BundleMaterial.TextureReference material, AtlasIndex.Texture texture,
+                                    int pageSize, float[] light) {
         List<Triangle> result = new ArrayList<>();
         int end = firstIndex + indexCount;
         for (int index = firstIndex; index < end; index += 3) {
             List<Vertex> triangle = new ArrayList<>(3);
             for (int corner = 0; corner < 3; corner++) {
                 int vertex = indices[index + corner] * 8;
-                triangle.add(transform(vertices, vertex, prop, material));
+                triangle.add(transform(vertices, vertex, prop, material, light, indices[index + corner]));
             }
             double minU = min(triangle, 3), maxU = max(triangle, 3);
             double minV = min(triangle, 4), maxV = max(triangle, 4);
@@ -76,14 +89,17 @@ final class PropTessellator {
         return result;
     }
 
-    private static Vertex transform(float[] values, int offset, BundleProp prop, BundleMaterial.TextureReference material) {
+    private static Vertex transform(float[] values, int offset, BundleProp prop, BundleMaterial.TextureReference material,
+                                    float[] light, int vertexIndex) {
         double scale = prop.scale(), px = values[offset] * scale, py = values[offset + 1] * scale, pz = values[offset + 2] * scale;
         double[] q = prop.rotation();
         double[] position = rotate(q, px, py, pz);
         double[] normal = rotate(q, values[offset + 3], values[offset + 4], values[offset + 5]);
         double[] translation = prop.translation();
+        boolean lit = light != null && vertexIndex * 3 + 2 < light.length;
         return new Vertex(position[0] + translation[0], position[1] + translation[1], position[2] + translation[2],
-            normal[0], normal[1], normal[2], values[offset + 6] * material.outputWidth(), values[offset + 7] * material.outputHeight());
+            normal[0], normal[1], normal[2], values[offset + 6] * material.outputWidth(), values[offset + 7] * material.outputHeight(),
+            lit ? light[vertexIndex * 3] : -1, lit ? light[vertexIndex * 3 + 1] : -1, lit ? light[vertexIndex * 3 + 2] : -1);
     }
 
     /** q * vector * inverse(q), with bundle quaternions stored as XYZW. */
@@ -145,12 +161,19 @@ final class PropTessellator {
     }
 
     private static Vertex flipped(Vertex vertex) {
-        return new Vertex(vertex.x(), vertex.y(), vertex.z(), -vertex.nx(), -vertex.ny(), -vertex.nz(), vertex.u(), vertex.v());
+        return new Vertex(vertex.x(), vertex.y(), vertex.z(), -vertex.nx(), -vertex.ny(), -vertex.nz(), vertex.u(), vertex.v(),
+            vertex.r(), vertex.g(), vertex.b());
     }
 
     record Triangle(int page, Vertex a, Vertex b, Vertex c) {}
-    record Vertex(double x, double y, double z, double nx, double ny, double nz, double u, double v) {
-        Vertex withUv(double nextU, double nextV) { return new Vertex(x, y, z, nx, ny, nz, nextU, nextV); }
-        Vertex interpolate(Vertex other, double t) { return new Vertex(x + (other.x - x) * t, y + (other.y - y) * t, z + (other.z - z) * t, nx + (other.nx - nx) * t, ny + (other.ny - ny) * t, nz + (other.nz - nz) * t, u + (other.u - u) * t, v + (other.v - v) * t); }
+    /** {@code r, g, b}: the vertex's baked light, linear; negative for none. */
+    record Vertex(double x, double y, double z, double nx, double ny, double nz, double u, double v, double r, double g, double b) {
+        Vertex(double x, double y, double z, double nx, double ny, double nz, double u, double v) { this(x, y, z, nx, ny, nz, u, v, -1, -1, -1); }
+        Vertex withUv(double nextU, double nextV) { return new Vertex(x, y, z, nx, ny, nz, nextU, nextV, r, g, b); }
+        Vertex interpolate(Vertex other, double t) {
+            return new Vertex(x + (other.x - x) * t, y + (other.y - y) * t, z + (other.z - z) * t, nx + (other.nx - nx) * t, ny + (other.ny - ny) * t,
+                nz + (other.nz - nz) * t, u + (other.u - u) * t, v + (other.v - v) * t, r + (other.r - r) * t, g + (other.g - g) * t, b + (other.b - b) * t);
+        }
+        boolean lit() { return r >= 0 && g >= 0 && b >= 0; }
     }
 }

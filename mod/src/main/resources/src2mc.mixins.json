@@ -1,0 +1,13 @@
+{
+    "required": true,
+    "minVersion": "0.8",
+    "package": "dev.theredja.src2mc.mixin",
+    "compatibilityLevel": "JAVA_21",
+    "client": [
+        "EntityRendererLightMixin",
+        "LivingEntityRendererTintMixin"
+    ],
+    "injectors": {
+        "defaultRequire": 1
+    }
+}

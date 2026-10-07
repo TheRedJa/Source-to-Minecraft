@@ -33,6 +33,9 @@ pub struct Prop {
     /// Index of the entity in the BSP entity lump; `None` for a `prop_static`,
     /// which has none. What a prop parented to a moving entity is found by.
     pub entity: Option<usize>,
+    /// A `prop_static`'s index in the static prop lump, which names the
+    /// `.vhv` vrad lit it in; `None` for an entity's prop.
+    pub static_index: Option<usize>,
 }
 
 /// Not solid at all; the player walks through it in the game.
@@ -92,8 +95,9 @@ pub fn extract(map: &crate::bsp::Map) -> Vec<Prop> {
     props
         .props
         .iter()
-        .filter(|prop| !prop.no_draw())
-        .filter_map(|prop| {
+        .enumerate()
+        .filter(|(_, prop)| !prop.no_draw())
+        .filter_map(|(index, prop)| {
             let model = props.models.get(prop.prop_type as usize)?.as_str();
             (!model.is_empty()).then(|| Prop {
                 model: model.replace('\\', "/").to_ascii_lowercase(),
@@ -109,6 +113,7 @@ pub fn extract(map: &crate::bsp::Map) -> Vec<Prop> {
                 skin: prop.skin,
                 color: prop.color,
                 entity: None,
+                static_index: Some(index),
             })
         })
         .collect()
@@ -172,6 +177,7 @@ pub fn extract_entities(bsp: &vbsp::Bsp) -> Vec<Prop> {
                 skin,
                 color,
                 entity: Some(index),
+                static_index: None,
             })
         })
         .collect()
@@ -237,6 +243,7 @@ mod tests {
             skin: 0,
             color: [255; 3],
             entity: None,
+            static_index: None,
         }
     }
 

@@ -266,7 +266,25 @@ struct EntityModel {
 /// Match every brush entity to its model and the mode configured for its
 /// classname.
 fn entity_models(map: &Map, config: &Config, transform: &Transform) -> Vec<EntityModel> {
-    crate::bsp::entities::extract(map, transform)
+    let records = crate::bsp::entities::extract(map, transform);
+    // What `func_areaportalwindow`s fade: `CFuncAreaPortalWindow::Activate`
+    // takes the model of the first entity of its `target` name.
+    let faded: BTreeSet<usize> = if config.entities.separate_fade_brushes {
+        records
+            .iter()
+            .filter(|r| r.classname.eq_ignore_ascii_case("func_areaportalwindow"))
+            .filter_map(|window| window.get("target"))
+            .filter_map(|target| {
+                records
+                    .iter()
+                    .find(|r| r.targetname.as_deref() == Some(target) && r.brush_model.is_some())
+                    .map(|r| r.index)
+            })
+            .collect()
+    } else {
+        BTreeSet::new()
+    };
+    records
         .into_iter()
         .filter_map(|record| {
             let model = record.brush_model?;
@@ -274,12 +292,16 @@ fn entity_models(map: &Map, config: &Config, transform: &Transform) -> Vec<Entit
             if model == 0 || model >= map.bsp.models.len() {
                 return None;
             }
-            let mode = config
-                .entities
-                .classname_modes
-                .get(&record.classname)
-                .copied()
-                .unwrap_or(config.entities.brush_entities);
+            let mode = if faded.contains(&record.index) {
+                crate::config::BrushEntityMode::Separate
+            } else {
+                config
+                    .entities
+                    .classname_modes
+                    .get(&record.classname)
+                    .copied()
+                    .unwrap_or(config.entities.brush_entities)
+            };
             let origin = record
                 .origin_source
                 .map(|[x, y, z]| Vec3::new(x, y, z))
@@ -332,7 +354,9 @@ fn is_invisible(flags: vbsp::TextureFlags) -> bool {
 }
 
 /// Whether a brush no side of which is drawn still collides with a player,
-/// as Source's does: solid contents, or a player clip. Such a brush makes no
+/// as Source's does: solid contents, or a player clip. Sky brushes are left
+/// out: they only keep a player from leaving the map, and filling them more
+/// than doubled furnace's carrier blocks (D26). Such a brush makes no
 /// block and no mesh, so its volume joins the collision on its own, as a thin
 /// brush's does. Monster clips stop only NPCs, which Minecraft has none of.
 fn collides_unseen(solid: &Solid) -> bool {
@@ -494,6 +518,8 @@ fn voxelize_displacement(
                 },
                 material,
                 uv: texcoord.in_block_space(transform, Vec3::ZERO),
+                // Voxel-face candidates; the drawn terrain is lit through its polygons.
+                light: None,
             }),
             _ => None,
         };
@@ -904,6 +930,8 @@ fn voxelize_solids(
                             material,
                             uv: crate::bsp::texcoord::TexCoord::of(texcoord)
                                 .in_block_space(transform, origin),
+                            // A brush side is not a BSP face, and has no lightmap.
+                            light: None,
                         })
                     })
                     .collect();
@@ -1339,6 +1367,7 @@ fn exact_polygons(
                     },
                     material,
                     uv,
+                    light: face_light(map, face_index, info, transform, origin),
                 },
                 transform.transform_direction(source_normal),
                 points
@@ -1393,6 +1422,21 @@ fn exact_polygons(
             if normal.length() <= 1.0e-12 || !normal.is_finite() {
                 continue;
             }
+            // The base face's lightmap spreads evenly over the grid; each
+            // triangle maps its corners' places on it, which is affine within it.
+            let light = map.light.face(surface.face).and_then(|face_light| {
+                map.light.raw_lightmap(surface.face)?;
+                let corners = surface.grid.get(triangle)?.map(|[s, t]| {
+                    [
+                        s * f64::from(face_light.size[0]) + 0.5,
+                        t * f64::from(face_light.size[1]) + 0.5,
+                    ]
+                });
+                Some(crate::voxel::surface::FaceLight {
+                    face: surface.face,
+                    luxel: crate::bsp::texcoord::BlockTexCoord::fit([a, b, c], corners)?,
+                })
+            });
             polygons.push(Polygon::new(
                 FaceSource {
                     provenance: SourceProvenance::Displacement {
@@ -1401,6 +1445,7 @@ fn exact_polygons(
                     },
                     material,
                     uv,
+                    light,
                 },
                 normal.normalized(),
                 vec![a, b, c],
@@ -2301,6 +2346,33 @@ pub fn block_bounds(map: &Map, transform: &Transform) -> Aabb {
     transform.transform_bounds(bounds)
 }
 
+/// The lightmap of BSP face `face_index` and the affine map from a block-space
+/// position to its luxels: the texinfo's lightmap vectors, as vrad projects
+/// the face's points, less the face's lightmap mins, plus half a luxel so the
+/// first luxel's centre is 0.5. Positions are of the brush where it was
+/// compiled, so a brush entity's `origin` is taken off as for its texture.
+fn face_light(
+    map: &crate::bsp::Map,
+    face_index: usize,
+    info: &vbsp::TextureInfo,
+    transform: &Transform,
+    origin: Vec3,
+) -> Option<crate::voxel::surface::FaceLight> {
+    let light = map.light.face(face_index)?;
+    map.light.raw_lightmap(face_index)?;
+    let mut luxel = crate::bsp::texcoord::TexCoord {
+        u: info.light_map_scale.map(f64::from),
+        v: info.light_map_transform.map(f64::from),
+    }
+    .in_block_space(transform, origin);
+    luxel.u[3] += 0.5 - f64::from(light.mins[0]);
+    luxel.v[3] += 0.5 - f64::from(light.mins[1]);
+    Some(crate::voxel::surface::FaceLight {
+        face: face_index,
+        luxel,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2317,6 +2389,7 @@ mod tests {
             name: name.into(),
             raw_name: name.into(),
             reflectivity: [0.2, 0.2, 0.2],
+            drawn: true,
         }
     }
 
@@ -2350,7 +2423,12 @@ mod tests {
     /// Trusting the contents flag alone paves a city block in glass.
     #[test]
     fn a_tool_material_vetoes_the_contents_flag() {
-        let materials = [material("tools/toolsfog"), material("tools/toolsinvisible")];
+        // As compiled: vbsp flags every face of both `NODRAW`.
+        let materials =
+            [material("tools/toolsfog"), material("tools/toolsinvisible")].map(|mut m| {
+                m.drawn = false;
+                m
+            });
         let r = resolver(&materials);
         let glass = Decision::Force("minecraft:glass".into());
         for (index, material) in materials.iter().enumerate() {

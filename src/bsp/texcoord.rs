@@ -24,6 +24,33 @@ pub struct BlockTexCoord {
 }
 
 impl BlockTexCoord {
+    /// The affine map in the plane of triangle `points` that takes each point
+    /// to its `values`, and is constant along the triangle's normal; `None`
+    /// for a degenerate triangle.
+    pub fn fit(points: [Vec3; 3], values: [[f64; 2]; 3]) -> Option<BlockTexCoord> {
+        let e1 = points[1] - points[0];
+        let e2 = points[2] - points[0];
+        let n = e1.cross(e2);
+        let area = n.dot(n);
+        if area <= 1.0e-18 || !area.is_finite() {
+            return None;
+        }
+        // g·e1 = d1 and g·e2 = d2 with g in the plane: (e2 × n)·e1 and
+        // (n × e1)·e2 are both |n|², and each term is orthogonal to the other edge.
+        let a = e2.cross(n);
+        let b = n.cross(e1);
+        let row = |axis: usize| {
+            let d1 = values[1][axis] - values[0][axis];
+            let d2 = values[2][axis] - values[0][axis];
+            let g = (a * d1 + b * d2) / area;
+            [g.x, g.y, g.z, values[0][axis] - g.dot(points[0])]
+        };
+        Some(BlockTexCoord {
+            u: row(0),
+            v: row(1),
+        })
+    }
+
     pub fn s(&self, p: Vec3) -> f64 {
         self.u[0] * p.x + self.u[1] * p.y + self.u[2] * p.z + self.u[3]
     }

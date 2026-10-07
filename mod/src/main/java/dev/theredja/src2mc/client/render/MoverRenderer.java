@@ -74,6 +74,8 @@ public final class MoverRenderer {
         final double[] bounds;
         /** The logic prop states it was built with; see {@link #propStates}. */
         final List<dev.theredja.src2mc.world.PropStates.State> propStates;
+        /** The map's baked light; null for none. */
+        dev.theredja.src2mc.bundle.LightTable lightTable;
         /** The light at the mover's middle, and where the mover was, when it was last lit. */
         int light = Integer.MIN_VALUE;
         Vector3d litPosition;
@@ -143,6 +145,17 @@ public final class MoverRenderer {
 
     @SubscribeEvent
     public static void render(RenderLevelStageEvent event) {
+        boolean timed = event.getStage() == MapSurfaceRenderer.opaqueStage() || event.getStage() == RenderLevelStageEvent.Stage.AFTER_PARTICLES;
+        GpuTimer.Phase phase = IrisCompat.renderingShadowPass() ? GpuTimer.Phase.MOVERS_SHADOW : GpuTimer.Phase.MOVERS;
+        if (timed) GpuTimer.begin(phase);
+        try {
+            renderStage(event);
+        } finally {
+            if (timed) GpuTimer.end(phase);
+        }
+    }
+
+    private static void renderStage(RenderLevelStageEvent event) {
         boolean shadowPass = IrisCompat.renderingShadowPass();
         if (event.getStage() == MapSurfaceRenderer.opaqueStage()) {
             if (!shadowPass) prepare();
@@ -208,6 +221,10 @@ public final class MoverRenderer {
         if (built.litFrame == Long.MIN_VALUE || built.litPerVertex != perVertexLight) return true;
         if (!perVertexLight) return lightAt(level, subLevel, resolved) != built.light;
         if (frame - built.litFrame < RELIGHT_FRAMES) return false;
+        // Only Minecraft's light sources light it besides the baked light: with none near where it
+        // was and is, moving changes nothing to relight.
+        if (built.light == 0 && frame - built.litFrame < LIGHT_CHECK_FRAMES) return false;
+        if (built.light == 0 && lightAt(level, subLevel, resolved) == 0) { built.litFrame = frame; return false; }
         Pose3dc pose = subLevel.logicalPose();
         if (built.litPosition.distance(pose.position().x(), pose.position().y(), pose.position().z()) > RELIGHT_DISTANCE
             || built.litOrientation.difference(new Quaterniond(pose.orientation()), new Quaterniond()).angle() > RELIGHT_ANGLE) return true;
@@ -330,7 +347,7 @@ public final class MoverRenderer {
         MoverTable.Mover mover = resolved.mover();
         Vec3 middle = subLevel.logicalPose().transformPosition(new Vec3(plotOrigin.getX() + mover.sizeX() / 2.0,
             plotOrigin.getY() + mover.sizeY() / 2.0, plotOrigin.getZ() + mover.sizeZ() / 2.0));
-        return LevelRenderer.getLightColor(level, BlockPos.containing(middle));
+        return level.getBrightness(net.minecraft.world.level.LightLayer.BLOCK, BlockPos.containing(middle));
     }
 
     /**
@@ -378,8 +395,8 @@ public final class MoverRenderer {
                     for (var triangle : SurfaceTessellator.tessellate(x, y, z, face,
                         mover.surfaces().uvRegions().get(face.uvRegionId()), material.texture(), texture, map.atlas().pageSize())) {
                         PackedVertices out = meshes.computeIfAbsent(new PageClass(triangle.page(), material.renderClass()), ignored -> new PackedVertices());
-                        addSurface(out, triangle, light, false);
-                        if (material.doubleSided()) addSurface(out, triangle, light, true);
+                        addSurface(out, triangle, light, false, map, mover.surfaces(), face);
+                        if (material.doubleSided()) addSurface(out, triangle, light, true, map, mover.surfaces(), face);
                     }
                 }
             }
@@ -416,8 +433,9 @@ public final class MoverRenderer {
                 for (PropTessellator.Triangle triangle : tessellated) {
                     PackedVertices out = meshes.computeIfAbsent(new PageClass(triangle.page(), material.renderClass()), ignored -> new PackedVertices());
                     for (PropTessellator.Vertex vertex : List.of(triangle.a(), triangle.b(), triangle.c())) {
+                        // Lit by the ambient cube where the mover is, set for each draw.
                         out.add((float) vertex.x(), (float) vertex.y(), (float) vertex.z(), (float) vertex.u(), (float) vertex.v(),
-                            (float) vertex.nx(), (float) vertex.ny(), (float) vertex.nz(), light, tint);
+                            (float) vertex.nx(), (float) vertex.ny(), (float) vertex.nz(), light, tint, AMBIENT_LIT);
                     }
                 }
             }
@@ -433,10 +451,15 @@ public final class MoverRenderer {
             else for (int axis = 0; axis < 3; axis++) { bounds[axis] = Math.min(bounds[axis], b[axis]); bounds[axis + 3] = Math.max(bounds[axis + 3], b[axis + 3]); }
         }
         // Uploaded once it is lit, in the same frame.
-        return new Built(mover, bundle, map.atlas(), kept, shaders, complete, bounds, propStates);
+        Built built = new Built(mover, bundle, map.atlas(), kept, shaders, complete, bounds, propStates);
+        built.lightTable = map.light();
+        return built;
     }
 
-    private static void addSurface(PackedVertices out, SurfaceTessellator.Triangle triangle, int light, boolean back) {
+    private static final float[] AMBIENT_LIT = {0, 0, 0, BakedLighting.AMBIENT};
+
+    private static void addSurface(PackedVertices out, SurfaceTessellator.Triangle triangle, int light, boolean back,
+                                   BundleMap map, SurfaceTable surfaces, SurfaceTable.Face face) {
         var a = triangle.a();
         var b = back ? triangle.c() : triangle.b();
         var c = back ? triangle.b() : triangle.c();
@@ -445,13 +468,16 @@ public final class MoverRenderer {
         float nx = (float) (aby * acz - abz * acy), ny = (float) (abz * acx - abx * acz), nz = (float) (abx * acy - aby * acx);
         float length = (float) Math.sqrt(nx * nx + ny * ny + nz * nz);
         if (length > 0) { nx /= length; ny /= length; nz /= length; }
+        float[] baked = new float[4];
         for (SurfaceTessellator.Vertex vertex : List.of(a, b, c)) {
-            out.add((float) vertex.x(), (float) vertex.y(), (float) vertex.z(), (float) vertex.u(), (float) vertex.v(), nx, ny, nz, light);
+            // Its own lightmap, which moves with it as Source's does: mover-local light regions.
+            BakedLighting.surfaceLight(map.light(), surfaces, face, vertex.x(), vertex.y(), vertex.z(), nx, ny, nz, baked);
+            out.add((float) vertex.x(), (float) vertex.y(), (float) vertex.z(), (float) vertex.u(), (float) vertex.v(), nx, ny, nz, light, 0xFFFFFF, baked);
         }
     }
 
     private static void draw(RenderLevelStageEvent event, boolean translucent, boolean shadowPass) {
-        if (!enabled || BUILT.isEmpty()) return;
+        if (!enabled || BUILT.isEmpty() || !BakedLighting.ready()) return;
         ClientLevel level = Minecraft.getInstance().level;
         if (level == null) return;
         ClientSubLevelContainer container = SubLevelContainer.getContainer(level);
@@ -471,6 +497,12 @@ public final class MoverRenderer {
             if (resolved == null || (MoverRegistry.state(true, resolved) & MoverRegistry.HIDDEN) != 0) continue;
             Pose3dc pose = client.renderPose(partialTick);
             BlockPos plotOrigin = MoverRegistry.plotOrigin(client.getPlot());
+            // A func_areaportalwindow's brush: faded by distance, drawn with the translucent surfaces.
+            AreaPortalWindows.Window window = AreaPortalWindows.of(resolved.map(), resolved.mover().entity());
+            float blend = 1;
+            if (window != null && built.bounds != null) blend = window.blend(worldBounds(pose, plotOrigin, built.bounds), camera);
+            if (blend <= 0 || blend < 1 && (shadowPass || !translucent)) continue;
+            boolean faded = blend < 1;
             if (built.bounds != null && !shadowPass && MapSurfaceRenderer.frustumCulling()) {
                 AABB box = worldBounds(pose, plotOrigin, built.bounds);
                 if (!event.getFrustum().isVisible(box)) continue;
@@ -482,6 +514,16 @@ public final class MoverRenderer {
                 RenderSystem.setShaderLights(back.transform(LIGHT_0, new org.joml.Vector3f()),
                     back.transform(netherLighting ? NETHER_LIGHT_1 : LIGHT_1, new org.joml.Vector3f()));
             }
+            // Its props take the ambient cube where its middle is now, their mover-local normals
+            // turned into map axes by its rotation.
+            float[] cube = null;
+            if (built.bounds != null) {
+                AABB box = worldBounds(pose, plotOrigin, built.bounds);
+                BlockPos t = resolved.placement().translation();
+                var centre = box.getCenter();
+                cube = BakedLighting.cube(built.lightTable, centre.x - t.getX(), centre.y - t.getY(), centre.z - t.getZ());
+            }
+            org.joml.Matrix3f normalTurn = new org.joml.Matrix3f().set(new Quaternionf(pose.orientation()));
             Matrix4f modelView = new Matrix4f(event.getModelViewMatrix())
                 .translate((float) (pose.position().x() - camera.x), (float) (pose.position().y() - camera.y), (float) (pose.position().z() - camera.z))
                 .rotate(new Quaternionf(pose.orientation()))
@@ -489,7 +531,7 @@ public final class MoverRenderer {
                     (float) (plotOrigin.getZ() - pose.rotationPoint().z()));
             for (Map.Entry<PageClass, VertexBuffer> buffer : built.buffers.entrySet()) {
                 PageClass key = buffer.getKey();
-                if ((key.renderClass() == BundleMaterial.RenderClass.TRANSLUCENT) != translucent) continue;
+                if (!faded && (key.renderClass() == BundleMaterial.RenderClass.TRANSLUCENT) != translucent) continue;
                 ResourceLocation texture = MapSurfaceRenderer.atlasPages().request(generation.sequence(), built.bundle, built.atlas, key.page(), frame)
                     .orElseGet(MapSurfaceRenderer.atlasPages()::placeholderTexture);
                 RenderType type = translucent ? RenderType.entityTranslucent(texture)
@@ -497,11 +539,11 @@ public final class MoverRenderer {
                 type.setupRenderState();
                 MapSurfaceRenderer.applyAtlasFilter(texture);
                 if (suppressDepthWrite) RenderSystem.depthMask(false);
+                if (faded) RenderSystem.setShaderColor(1, 1, 1, blend);
                 buffer.getValue().bind();
                 buffer.getValue().drawWithShader(modelView, event.getProjectionMatrix(),
-                    translucent ? GameRenderer.getRendertypeEntityTranslucentShader()
-                        : key.renderClass() == BundleMaterial.RenderClass.SOLID
-                            ? GameRenderer.getRendertypeEntitySolidShader() : GameRenderer.getRendertypeEntityCutoutShader());
+                    BakedLighting.prepare(built.lightTable, key.renderClass(), cube, normalTurn));
+                if (faded) RenderSystem.setShaderColor(1, 1, 1, 1);
                 type.clearRenderState();
                 if (suppressDepthWrite) RenderSystem.depthMask(true);
                 drawn++;

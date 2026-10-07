@@ -29,6 +29,23 @@ pub struct TextureAsset {
     pub content_id: String,
     pub bytes: Vec<u8>,
     pub image: image::RgbaImage,
+    /// Only the 3D skybox room draws it: packed after every texture the map
+    /// draws, so the room never spreads the map's textures over more pages.
+    pub room_only: bool,
+}
+
+/// Every material of a map and the textures they need.
+struct ExtractedMaterials {
+    materials: Vec<metadata::MaterialReference>,
+    textures: Vec<TextureAsset>,
+    /// Per face, map faces then movers' faces.
+    face_material_ids: Vec<u32>,
+    /// The material ID props draw each material with.
+    prop_bucket_ids: BTreeMap<String, u32>,
+    /// The material ID the 3D skybox room draws each material with.
+    room_material_ids: BTreeMap<String, u32>,
+    /// The material ID each particle material draws with.
+    effect_material_ids: BTreeMap<String, u32>,
 }
 
 pub struct Prop {
@@ -43,6 +60,9 @@ pub struct Prop {
     pub color: [u8; 3],
     /// Content ID of the model's animation, for an animated prop.
     pub animation: Option<String>,
+    /// A static prop's `.vhv` light, one colour per mesh vertex (format
+    /// section 22); `None` lights it by the ambient cube.
+    pub vertex_light: Option<Vec<[u8; 3]>>,
 }
 
 /// A prop the map's logic changes (format section 18).
@@ -103,7 +123,26 @@ pub struct MapExport {
     pub movers: Vec<MoverExport>,
     /// The props the logic changes, in entity lump order (format section 18).
     pub logic_props: Vec<LogicPropExport>,
+    /// The map's sky (format section 20); absent when it has no sky face.
+    pub sky: Option<crate::output::sky::SkyExport>,
+    /// The encoded 3D skybox (format section 21); absent without one.
+    pub skybox: Option<Vec<u8>>,
+    /// The map's baked light (format section 22); the props' vertex light is
+    /// on the props.
+    pub light: Option<LightExport>,
+    /// The map's particle systems (format section 23); absent when it has
+    /// none and its impacts draw nothing.
+    pub particles: Option<crate::output::particles::ParticleTable>,
     pub diagnostics: metadata::Diagnostics,
+}
+
+/// A static prop's `.vhv` colours, one per mesh vertex.
+type VertexLight = Vec<[u8; 3]>;
+
+/// The lightmap pages and ambient samples of a map.
+pub struct LightExport {
+    pub atlas: crate::output::light::Atlas,
+    pub ambient: Option<crate::output::light::AmbientExport>,
 }
 
 /// One moving entity, cut out of the world and moved into cells of its own.
@@ -291,6 +330,23 @@ pub fn from_conversion(
             }
         }
     }
+    // The 3D skybox room draws through the sky faces with the map's atlas.
+    let skybox_room = config
+        .contents
+        .skip_3d_skybox
+        .then(|| map.skybox())
+        .flatten();
+    let skybox_vfs =
+        crate::source::vfs::Vfs::for_map(&map.path, &config.materials.game_dir_paths());
+    let skybox = crate::output::skybox::build(
+        map,
+        &skybox_vfs,
+        &conversion.transform,
+        skybox_room,
+        visibility.as_ref().map(|v| v.rows.len()),
+    )
+    .context("exporting the 3D skybox")?;
+    crate::timing::mark("export: 3D skybox");
     // The movers' faces are the map's faces too: they share its material table
     // and atlas, so they are resolved in the same pass, after the world's.
     let all_fragments: Vec<&crate::voxel::fragments::Fragment> = conversion
@@ -298,10 +354,73 @@ pub fn from_conversion(
         .iter()
         .chain(conversion.movers.iter().flat_map(|mover| &mover.fragments))
         .collect();
-    let (mut materials, textures, face_material_ids, prop_bucket_ids) =
-        extract_materials(map, config, &prop_texture_spans, &all_fragments, quality);
+    // Every lightmap a drawn face wears, the movers' too, on one set of pages.
+    let lit_faces: BTreeSet<usize> = all_fragments
+        .iter()
+        .filter_map(|fragment| fragment.source.light.map(|light| light.face))
+        .collect();
+    let light_atlas = crate::output::light::Atlas::build(&map.light, &lit_faces)
+        .context("packing the map's lightmaps")?;
+    crate::timing::mark("export: lightmaps");
+    // The room gets textures of its own, at the detail of its size as the
+    // player sees it, enlarged by its scale; the map's materials keep theirs.
+    // Asking room detail of the map's own textures enlarged every texture the
+    // two share: furnace's atlas grew from 1 page to 6 and its props' shadow
+    // pass slowed with a shader pack (user, 2026-10-05).
+    let room_texture_spans: BTreeMap<String, f64> = skybox
+        .as_ref()
+        .map(|skybox| {
+            let scale = f64::from(skybox.scale.max(1.0));
+            skybox
+                .texture_spans()
+                .into_iter()
+                .map(|(material, span)| (material, span * scale))
+                .collect()
+        })
+        .unwrap_or_default();
+    let particle_vfs =
+        crate::source::vfs::Vfs::for_map(&map.path, &config.materials.game_dir_paths());
+    let particles_collected = crate::output::particles::collect(map, &particle_vfs);
+    let ExtractedMaterials {
+        mut materials,
+        textures,
+        face_material_ids,
+        prop_bucket_ids,
+        room_material_ids: skybox_material_ids,
+        effect_material_ids,
+    } = extract_materials(
+        map,
+        config,
+        &prop_texture_spans,
+        &room_texture_spans,
+        &particles_collected.materials,
+        &all_fragments,
+        quality,
+    );
     drop(all_fragments);
     crate::timing::mark("export: materials and textures");
+    let (particles, particle_diagnostics) = {
+        let resolver = crate::source::vmt::Materials::new(&particle_vfs, Some(&map.bsp.pack));
+        let decoder =
+            crate::source::vtf::Textures::new(&particle_vfs, config.materials.texture_size);
+        crate::output::particles::finish(
+            particles_collected,
+            &effect_material_ids,
+            &resolver,
+            &decoder,
+        )
+    };
+    drop(particle_vfs);
+    crate::timing::mark("export: particles");
+    let skybox_diagnostics = skybox
+        .as_ref()
+        .map_or_else(Vec::new, |s| s.diagnostics.clone());
+    let skybox_table = skybox
+        .as_ref()
+        .map(|skybox| crate::output::skybox::encode(skybox, &skybox_material_ids))
+        .transpose()
+        .context("encoding the 3D skybox")?;
+    drop(skybox);
     let (face_material_ids, mut mover_material_ids) =
         face_material_ids.split_at(conversion.fragments.len());
     let mut mover_face_ids: BTreeMap<usize, &[u32]> = BTreeMap::new();
@@ -315,7 +434,13 @@ pub fn from_conversion(
         .iter()
         .zip(face_material_ids.iter().copied())
         .map(|(fragment, material_id)| {
-            surface::EncodedFace::from_fragment(fragment, surface::MaterialId(material_id))
+            let mut face =
+                surface::EncodedFace::from_fragment(fragment, surface::MaterialId(material_id));
+            face.light = fragment
+                .source
+                .light
+                .and_then(|light| light_atlas.region(&light));
+            face
         })
         .collect();
     let mut material_ids: BTreeMap<String, u32> =
@@ -406,6 +531,7 @@ pub fn from_conversion(
                 bytes,
                 surface_prop: model.surface_prop.clone(),
                 animation,
+                hardware: mesh.hardware.clone(),
             },
         );
     }
@@ -494,6 +620,11 @@ pub fn from_conversion(
             material_ids: built.slots.clone(),
             color: item.prop.color,
             animation: built.animation_id(),
+            vertex_light: crate::output::light::prop_vertex_light(
+                map,
+                item.prop.static_index,
+                &built.hardware,
+            ),
         });
     }
     if let Some(collision) = collision.as_mut() {
@@ -519,6 +650,11 @@ pub fn from_conversion(
         // not make one of an entity that is nothing else: hundreds of INFRA's
         // invisible button volumes would each become a sub-level.
         if shape.is_some_and(|mover| mover.only_unseen) && riders.is_empty() {
+            mover_collision = Default::default();
+        }
+        // `CFuncIllusionary` is `SOLID_NONE`; one is a mover only when a
+        // `func_areaportalwindow` fades it.
+        if shape.is_some_and(|mover| mover.classname.eq_ignore_ascii_case("func_illusionary")) {
             mover_collision = Default::default();
         }
         // A rider the logic can take the collision of, or whose collision
@@ -597,7 +733,20 @@ pub fn from_conversion(
             mover_collision,
             props,
         )? {
-            Some(mover) => {
+            Some(mut mover) => {
+                // Lit as the map's faces are, on the map's pages; the region
+                // moves with the faces into mover-local cells.
+                for (face, fragment) in mover.faces.iter_mut().zip(fragments) {
+                    face.light = fragment.source.light.and_then(|light| {
+                        let mut region = light_atlas.region(&light)?;
+                        for projection in [&mut region.st.u, &mut region.st.v] {
+                            projection[3] += (0..3)
+                                .map(|axis| projection[axis] * f64::from(mover.cell_origin[axis]))
+                                .sum::<f64>();
+                        }
+                        Some(region)
+                    });
+                }
                 for mut record in rider_logic {
                     if let Some(own) = rider_collision.remove(&record.entity) {
                         (record.collision, record.poses) = own
@@ -829,6 +978,19 @@ pub fn from_conversion(
         crate::timing::mark("export: logic");
         Some(logic.table)
     };
+    let skybox = config
+        .contents
+        .skip_3d_skybox
+        .then(|| map.skybox())
+        .flatten();
+    let sky = crate::output::sky::build(map, &vfs, &conversion.transform, skybox)
+        .context("exporting the map's sky")?;
+    if let Some(sky) = &sky {
+        diagnostics.extend(sky.diagnostics.iter().cloned());
+    }
+    diagnostics.extend(skybox_diagnostics);
+    diagnostics.extend(particle_diagnostics);
+    crate::timing::mark("export: sky");
     Ok(MapExport {
         map_id: portable_id(&map.name),
         source_name: map.name.clone(),
@@ -849,6 +1011,13 @@ pub fn from_conversion(
         logic,
         movers,
         logic_props,
+        sky,
+        skybox: skybox_table,
+        light: Some(LightExport {
+            ambient: crate::output::light::ambient(map, &conversion.transform),
+            atlas: light_atlas,
+        }),
+        particles,
         diagnostics: metadata::Diagnostics::new(diagnostics)?,
     })
 }
@@ -875,6 +1044,8 @@ struct BuiltModel {
     bytes: Vec<u8>,
     surface_prop: Option<String>,
     animation: Option<(String, Vec<u8>)>,
+    /// Each mesh vertex's `.vtx` hardware vertex, for `.vhv` light.
+    hardware: Vec<u32>,
 }
 
 impl BuiltModel {
@@ -1211,14 +1382,11 @@ fn extract_materials(
     map: &crate::bsp::Map,
     config: &crate::config::Config,
     prop_texture_spans: &BTreeMap<String, f64>,
+    room_texture_spans: &BTreeMap<String, f64>,
+    effect_materials: &BTreeSet<String>,
     surfaces: &[&crate::voxel::fragments::Fragment],
     quality: atlas::TextureQuality,
-) -> (
-    Vec<metadata::MaterialReference>,
-    Vec<TextureAsset>,
-    Vec<u32>,
-    BTreeMap<String, u32>,
-) {
+) -> ExtractedMaterials {
     use rayon::prelude::*;
     let vfs = crate::source::vfs::Vfs::for_map(&map.path, &config.materials.game_dir_paths());
     let resolver = crate::source::vmt::Materials::new(&vfs, Some(&map.bsp.pack));
@@ -1231,6 +1399,8 @@ fn extract_materials(
     let _ = assign_materials(
         map,
         prop_texture_spans,
+        room_texture_spans,
+        effect_materials,
         surfaces,
         &resolver,
         &mut decoder,
@@ -1258,6 +1428,8 @@ fn extract_materials(
     assign_materials(
         map,
         prop_texture_spans,
+        room_texture_spans,
+        effect_materials,
         surfaces,
         &resolver,
         &mut decoder,
@@ -1279,20 +1451,18 @@ struct TextureRequest {
 /// Give every map and prop material its reference and texture, taking each
 /// texture's PNG bytes and image from `produce`.
 #[allow(clippy::type_complexity)]
+#[allow(clippy::too_many_arguments)]
 fn assign_materials(
     map: &crate::bsp::Map,
     prop_texture_spans: &BTreeMap<String, f64>,
+    room_texture_spans: &BTreeMap<String, f64>,
+    effect_materials: &BTreeSet<String>,
     surfaces: &[&crate::voxel::fragments::Fragment],
     resolver: &crate::source::vmt::Materials,
     decoder: &mut crate::source::vtf::Textures,
     quality: atlas::TextureQuality,
     produce: &mut dyn FnMut(TextureRequest) -> Option<(Vec<u8>, image::RgbaImage)>,
-) -> (
-    Vec<metadata::MaterialReference>,
-    Vec<TextureAsset>,
-    Vec<u32>,
-    BTreeMap<String, u32>,
-) {
+) -> ExtractedMaterials {
     let mut assets_by_id = BTreeMap::new();
     let face_rates = per_face_rates(surfaces);
     let mut faces_by_material: Vec<Vec<usize>> = vec![Vec::new(); map.materials().len()];
@@ -1427,70 +1597,154 @@ fn assign_materials(
         if existing.contains(name.as_str()) {
             continue;
         }
-        let mut reference = metadata::MaterialReference {
-            source_material: name.clone(),
-            source_material_raw: None,
-            render_class: metadata::RenderClass::Fallback,
-            texture: None,
-            surface_prop: None,
-            reflectivity: [0.0; 3],
-            double_sided: false,
-        };
-        let Some(material_assets) = resolver.assets(name, None) else {
-            materials.push(reference);
-            continue;
-        };
-        reference.render_class = if material_assets.alpha_test {
-            metadata::RenderClass::Cutout
-        } else if material_assets.translucent {
-            metadata::RenderClass::Translucent
-        } else {
-            metadata::RenderClass::Solid
-        };
-        reference.surface_prop = material_assets.surface_prop;
-        reference.double_sided = material_assets.no_cull;
-        let Some(header) = decoder.header(&material_assets.base_texture) else {
-            materials.push(reference);
-            continue;
-        };
-        reference.reflectivity = header.reflectivity;
-        let Ok(decision) = atlas::analyze_resolution(header.size, [*blocks_spanned; 2], quality)
-        else {
-            materials.push(reference);
-            continue;
-        };
-        let Some((bytes, image)) = produce(TextureRequest {
-            texture: material_assets.base_texture.clone(),
-            output: decision.output,
-            alpha_test: material_assets.alpha_test,
-            opaque: !material_assets.alpha_test && !material_assets.translucent,
-        }) else {
-            materials.push(reference);
-            continue;
-        };
-        let content_id = bundle::content_id(&bytes);
-        assets_by_id
-            .entry(content_id.clone())
-            .or_insert((bytes, image));
-        reference.texture = Some(metadata::TextureReference {
-            content_id,
-            original_width: decision.original[0],
-            original_height: decision.original[1],
-            output_width: decision.output[0],
-            output_height: decision.output[1],
-        });
+        let reference = standalone_material(
+            name,
+            *blocks_spanned,
+            false,
+            resolver,
+            decoder,
+            quality,
+            produce,
+            &mut assets_by_id,
+        );
+        let textured = reference.texture.is_some();
         materials.push(reference);
-        prop_bucket_ids.insert(name.clone(), (materials.len() - 1) as u32);
+        if textured {
+            prop_bucket_ids.insert(name.clone(), (materials.len() - 1) as u32);
+        }
+    }
+    let drawn_by_map: BTreeSet<String> = assets_by_id.keys().cloned().collect();
+    let mut room_material_ids = BTreeMap::new();
+    for (name, blocks_spanned) in room_texture_spans {
+        let reference = standalone_material(
+            name,
+            *blocks_spanned,
+            false,
+            resolver,
+            decoder,
+            quality,
+            produce,
+            &mut assets_by_id,
+        );
+        if reference.texture.is_some() {
+            materials.push(reference);
+            room_material_ids.insert(name.clone(), (materials.len() - 1) as u32);
+        }
+    }
+    // Particle textures keep their own resolution, alpha and all: a sprite
+    // sheet is many small frames, and an additive sprite still fades by its
+    // alpha. Packed after the map's, as the room's are.
+    let mut effect_material_ids = BTreeMap::new();
+    for name in effect_materials {
+        let reference = standalone_material(
+            name,
+            EFFECT_SPAN,
+            true,
+            resolver,
+            decoder,
+            quality,
+            produce,
+            &mut assets_by_id,
+        );
+        if reference.texture.is_some() {
+            materials.push(reference);
+            effect_material_ids.insert(name.clone(), (materials.len() - 1) as u32);
+        }
     }
     let textures = assets_by_id
         .into_iter()
         .map(|(content_id, (bytes, image))| TextureAsset {
+            room_only: !drawn_by_map.contains(&content_id),
             content_id,
             bytes,
             image,
         })
         .collect();
-    (materials, textures, face_material_ids, prop_bucket_ids)
+    ExtractedMaterials {
+        materials,
+        textures,
+        face_material_ids,
+        prop_bucket_ids,
+        room_material_ids,
+        effect_material_ids,
+    }
+}
+
+/// A projection span large enough that a particle texture keeps every texel
+/// it has.
+const EFFECT_SPAN: f64 = 1.0e6;
+
+/// A material drawn outside the map's faces, by props or the 3D skybox room,
+/// with one texture of the detail `blocks_spanned` asks; without a texture
+/// when it cannot be resolved or decoded.
+#[allow(clippy::too_many_arguments)]
+fn standalone_material(
+    name: &str,
+    blocks_spanned: f64,
+    effect: bool,
+    resolver: &crate::source::vmt::Materials,
+    decoder: &mut crate::source::vtf::Textures,
+    quality: atlas::TextureQuality,
+    produce: &mut dyn FnMut(TextureRequest) -> Option<(Vec<u8>, image::RgbaImage)>,
+    assets_by_id: &mut BTreeMap<String, (Vec<u8>, image::RgbaImage)>,
+) -> metadata::MaterialReference {
+    let mut reference = metadata::MaterialReference {
+        source_material: name.to_string(),
+        source_material_raw: None,
+        render_class: metadata::RenderClass::Fallback,
+        texture: None,
+        surface_prop: None,
+        reflectivity: [0.0; 3],
+        double_sided: false,
+    };
+    let Some(material_assets) = resolver.assets(name, None) else {
+        return reference;
+    };
+    reference.render_class = if effect {
+        metadata::RenderClass::Translucent
+    } else if material_assets.alpha_test {
+        metadata::RenderClass::Cutout
+    } else if material_assets.translucent {
+        metadata::RenderClass::Translucent
+    } else {
+        metadata::RenderClass::Solid
+    };
+    reference.surface_prop = material_assets.surface_prop;
+    reference.double_sided = material_assets.no_cull;
+    let Some(header) = decoder.header(&material_assets.base_texture) else {
+        return reference;
+    };
+    reference.reflectivity = header.reflectivity;
+    let Ok(mut decision) = atlas::analyze_resolution(header.size, [blocks_spanned; 2], quality)
+    else {
+        return reference;
+    };
+    if effect {
+        // Particles and decals draw from one atlas region; a texture wider
+        // than a page's usable area would be split into several.
+        decision.output = atlas::fit_one_region(decision.output);
+        decision.resampled = decision.output != decision.original;
+    }
+    let Some((bytes, image)) = produce(TextureRequest {
+        texture: material_assets.base_texture.clone(),
+        output: decision.output,
+        alpha_test: material_assets.alpha_test && !effect,
+        opaque: !effect && !material_assets.alpha_test && !material_assets.translucent,
+    }) else {
+        return reference;
+    };
+    let content_id = bundle::content_id(&bytes);
+    assets_by_id
+        .entry(content_id.clone())
+        .or_insert((bytes, image));
+    reference.texture = Some(metadata::TextureReference {
+        content_id,
+        original_width: decision.original[0],
+        original_height: decision.original[1],
+        output_width: decision.output[0],
+        output_height: decision.output[1],
+    });
+    reference
 }
 
 /// Texels of stretch per block along each texture axis, measured in the
@@ -1576,9 +1830,16 @@ pub fn write_campaign(
                 bundle::content_id(&texture.bytes) == texture.content_id,
                 "logical texture content ID changed"
             );
-            if let Some(old) = atlas_assets.insert(texture.content_id.clone(), texture.image) {
+            // Room-only when no map of the bundle draws it.
+            let room_only = atlas_assets
+                .get(&texture.content_id)
+                .is_none_or(|(_, room_only)| *room_only)
+                && texture.room_only;
+            if let Some((old, _)) =
+                atlas_assets.insert(texture.content_id.clone(), (texture.image, room_only))
+            {
                 ensure!(
-                    old.as_raw() == atlas_assets[&texture.content_id].as_raw(),
+                    old.as_raw() == atlas_assets[&texture.content_id].0.as_raw(),
                     "shared logical texture differs"
                 );
             }
@@ -1589,16 +1850,17 @@ pub fn write_campaign(
     if atlas_path.is_some() {
         let logical = atlas_assets
             .iter()
-            .map(|(content_id, image)| atlas::LogicalTexture {
+            .map(|(content_id, (image, room_only))| atlas::LogicalTexture {
                 content_id: content_id.clone(),
                 width: image.width(),
                 height: image.height(),
+                after_map: *room_only,
             })
             .collect::<Vec<_>>();
         let layout = atlas::pack(&logical)?;
         let images = atlas_assets
             .into_iter()
-            .map(|(content_id, image)| atlas::ImageAsset { content_id, image })
+            .map(|(content_id, (image, _))| atlas::ImageAsset { content_id, image })
             .collect::<Vec<_>>();
         let pages = atlas::build_pages(&layout, &images)?;
         crate::timing::mark("  write: pack atlas pages");
@@ -1751,6 +2013,7 @@ pub fn write_campaign(
             &map.map_id,
             map.anchor_cell,
         )?);
+        let mut prop_light: Vec<([u8; 32], Option<VertexLight>)> = Vec::new();
         for prop in map.props {
             ensure!(
                 occupied.insert(prop.root_cell),
@@ -1789,7 +2052,10 @@ pub fn write_campaign(
                 rotation: prop.rotation,
                 scale: prop.scale,
             });
+            prop_light.push((stable_id, prop.vertex_light));
         }
+        // In the placement table's order, which is by stable ID.
+        prop_light.sort_by_key(|(stable_id, _)| *stable_id);
         archive.add(
             format!("{prefix}/props.s2props"),
             placement::encode(placements, model_refs.len() as u32)?,
@@ -1797,6 +2063,17 @@ pub fn write_campaign(
         let has_pvs = map.pvs.is_some();
         if let Some(pvs) = map.pvs {
             archive.add(format!("{prefix}/pvs.s2pvs"), pvs)?;
+        }
+        let has_light = map.light.is_some();
+        if let Some(light) = &map.light {
+            let records: Vec<Option<&[[u8; 3]]>> = prop_light
+                .iter()
+                .map(|(_, colors)| colors.as_deref())
+                .collect();
+            archive.add(
+                format!("{prefix}/light.s2light"),
+                crate::output::light::encode(&light.atlas, light.ambient.as_ref(), &records)?,
+            )?;
         }
         let has_occlusion = map.occlusion.is_some();
         if let Some(occlusion) = map.occlusion {
@@ -1817,6 +2094,10 @@ pub fn write_campaign(
         let has_logic = map.logic.is_some();
         if let Some(logic) = map.logic {
             archive.add(format!("{prefix}/logic.json"), logic.encode()?)?;
+        }
+        let has_particles = map.particles.is_some();
+        if let Some(particles) = &map.particles {
+            archive.add(format!("{prefix}/particles.json"), particles.encode()?)?;
         }
         let has_movers = !map.movers.is_empty();
         if has_movers {
@@ -1958,6 +2239,21 @@ pub fn write_campaign(
                     .encode(&map.map_id, model_refs.len() as u32)?,
             )?;
         }
+        let has_skybox = map.skybox.is_some();
+        if let Some(skybox) = map.skybox {
+            archive.add(format!("{prefix}/skybox.s2box"), skybox)?;
+        }
+        let has_sky = map.sky.is_some();
+        if let Some(sky) = &map.sky {
+            for side in sky.sides.iter().flatten() {
+                let added = archive.add_content("sky", "png", side.png.clone())?;
+                ensure!(added == side.content_id, "sky side content ID changed");
+            }
+            archive.add(
+                format!("{prefix}/sky.s2sky"),
+                crate::output::sky::encode(sky)?,
+            )?;
+        }
         archive.add(
             format!("{prefix}/diagnostics.json"),
             map.diagnostics.encode()?,
@@ -1983,6 +2279,10 @@ pub fn write_campaign(
             logic: has_logic.then(|| format!("{prefix}/logic.json")),
             movers: has_movers.then(|| format!("{prefix}/movers.json")),
             logic_props: has_logic_props.then(|| format!("{prefix}/logic_props.json")),
+            sky: has_sky.then(|| format!("{prefix}/sky.s2sky")),
+            skybox: has_skybox.then(|| format!("{prefix}/skybox.s2box")),
+            light: has_light.then(|| format!("{prefix}/light.s2light")),
+            particles: has_particles.then(|| format!("{prefix}/particles.json")),
             diagnostics: format!("{prefix}/diagnostics.json"),
         };
         archive.add(&metadata_path, meta.encode()?)?;
@@ -2088,6 +2388,7 @@ mod tests {
                 index_count: 3,
                 material_slot: 0,
             }],
+            hardware: Vec::new(),
         })
         .unwrap()
     }
@@ -2123,6 +2424,7 @@ mod tests {
                     u: [1.0, 0.0, 0.0, 0.0],
                     v: [0.0, 0.0, 1.0, 0.0],
                 },
+                light: None,
                 provenance: SourceProvenance::Face { face: 0, piece: 0 },
                 vertices: vec![
                     [0, 4096, 0],
@@ -2148,6 +2450,10 @@ mod tests {
             logic: None,
             movers: Vec::new(),
             logic_props: Vec::new(),
+            sky: None,
+            skybox: None,
+            light: None,
+            particles: None,
             props: vec![Prop {
                 source_ordinal: 0,
                 source_model: source_model.into(),
@@ -2159,6 +2465,7 @@ mod tests {
                 material_ids: vec![0],
                 color: [255; 3],
                 animation: None,
+                vertex_light: None,
             }],
             diagnostics: metadata::Diagnostics::new(Vec::new()).unwrap(),
         }
@@ -2177,6 +2484,7 @@ mod tests {
                 provenance: SourceProvenance::Face { face: 0, piece: 0 },
                 material,
                 uv: BlockTexCoord { u, v },
+                light: None,
             },
             normal: Vec3::new(0.0, 1.0, 0.0),
             vertices: vec![
@@ -2377,6 +2685,7 @@ mod tests {
             material_ids: vec![1],
             color: [255; 3],
             animation: None,
+            vertex_light: None,
         });
         let dir = temp_dir("material-bindings");
         let written = write_campaign(&dir, "fixture", vec![map]).unwrap();
@@ -2425,6 +2734,7 @@ mod tests {
             material_ids: vec![1],
             color: red,
             animation: None,
+            vertex_light: None,
         });
         let mut shapes = BTreeMap::new();
         shapes.insert([2, 0, 0], vec![[0, 0, 0, 16, 8, 16]]);

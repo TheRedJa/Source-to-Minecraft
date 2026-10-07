@@ -236,6 +236,11 @@ impl<'a> Materials<'a> {
         })
     }
 
+    /// A material's keys as written, patches merged; `None` when it is missing.
+    pub fn vmt(&self, name: &str) -> Option<Vmt> {
+        self.load(name, 0)
+    }
+
     /// Load a VMT and merge in whatever it patches.
     fn load(&self, name: &str, depth: usize) -> Option<Vmt> {
         if depth > MAX_INCLUDE_DEPTH {

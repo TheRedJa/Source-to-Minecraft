@@ -802,3 +802,287 @@ debris included).
   use boxes are the client's lump records), ambient sounds in templates,
   `SetParentAttachment`, and collision of mounted props.
 
+
+## D26 — The sky is drawn through the map's sky faces, as Source's skybox shows
+
+Converted maps showed Minecraft's sky and whatever world the map was placed in
+wherever Source shows its skybox (user, 2026-10-04: "one of the most important
+parts that currently breaks immersion"). Source never draws a sky face: the
+engine draws the skybox around the eye -- the 3D skybox room first, then the
+2D box of six textures -- and the world over it, so a sky face is where the
+skybox shows. The converter now writes the sky faces and the 2D skybox (format
+section 20) and the mod draws each sky face showing the skybox side its view
+direction points at, depth-tested with the map's opaque surfaces.
+
+- **Order.** Sky first, then the map's effects as a real `.pcf` particle
+  runtime, then impact effects for Minecraft projectiles and TacZ guns (user,
+  2026-10-04). The sky comes in two steps: the 2D skybox now (DEV-0.34.0), the
+  3D skybox room next.
+- **Which faces.** The world's faces with `SURF_SKY`; `toolsskybox2d` sets it
+  too. In Source the per-frame choice between 3D and 2D sky comes from the
+  camera leaf's flags (`LEAF_FLAGS_SKY`, set by vrad's
+  `BuildVisForLightEnvironment`); with only the 2D box drawn it makes no
+  difference, so the flags are left for the 3D step. Maps compiled without a
+  `light_environment` keep vbsp's default flag (every leaf sees 3D sky);
+  waterplant, bts4 and testchmb_a_00 have no sky face at all and export no
+  sky.
+- **Sides.** `skybox/<skyname><side>`: the `Sky` shader's LDR path
+  (`$basetexture`), since Minecraft has no HDR, tinted by `$color` and with
+  `$basetexturetransform` baked into the image -- Portal's and INFRA's sides
+  are half height under `scale 1 2`, the clamped bottom row filling the lower
+  half as in Source. Portal 2's `sky_fog` is an `UnlitGeneric` of `$color`
+  alone. The transform's parsing is not in the public SDK; only scale about a
+  corner occurs in the test maps, which reads the same in any order.
+- **Orientation.** The box's side directions and texture axes follow
+  noclip.website's `SkyboxRenderer` (MIT, reverse-engineered, visually
+  checked across Source games); the engine's `R_DrawSkyBox` is not public.
+- **Shader.** A core shader of the mod's own (`src2mc:sky`) with the six sides
+  as samplers; not drawn in Iris's shadow pass. `/src2mc_sky on|off|status`.
+- **Where the sky shows** (DEV-0.34.1). Drawn depth-tested, the faces hid
+  everything of the map behind them: furnace's two towers stand out through
+  the sky brushes and were cut off where they met them (user test,
+  2026-10-04). Source draws the sky behind everything of the map, while here
+  it must also hide the world the map stands in. Three depth snapshots decide
+  it per pixel: before the map is drawn (Minecraft's own terrain), after the
+  map's opaque geometry, and before the map's translucent surfaces. The sky
+  shows where its face is in front of the terrain, the map drew nothing over
+  the terrain there, and nothing drawn since is in front of the face.
+- **Shader packs.** Iris draws no core shader it does not know while it
+  renders the world (`MixinShaderInstance.iris$shouldSkipThis` with
+  `allowUnknownShaders=false`, the default), so the sky was missing with
+  Complementary (user test, 2026-10-04); and Complementary keeps its own sky
+  only where depth is 1 and lights and fogs everything nearer. With a shader
+  pack the sky is drawn after Iris has finished the frame (`AFTER_LEVEL`),
+  over the finished image, from the same snapshots (taken with raw GL, which
+  Iris leaves alone; the main target's depth texture is also Iris's
+  `depthtex0`). A map window in front of the sky then shows the sky without
+  its glass. Without a shader pack the sky is drawn before the map's
+  translucent surfaces, depth written, so windows and clouds behave.
+- **Below the horizon.** Seen from high up, the lower half of a half-height
+  side shows its clamped bottom row as streaks (user test, 2026-10-04, high on
+  furnace). Source shows the same 2D sky there; its 3D skybox room is what
+  covers it, so this waits for the 3D step.
+- **Tool textures Source draws.** `tools/toolsblack`, `toolsblack_noportal`
+  and `toolswhite` are plain unlit walls (vbsp gives them only `NOLIGHT`);
+  every `tools/*` material was dropped, so sp_a1_wakeup showed Minecraft's sky
+  where its black void walls are (user test, 2026-10-04: "still broken"). A
+  tool material is now kept when some face wearing it is drawn by vbsp's
+  flags (not `NODRAW`, `SKIP`, `HINT`, `TRIGGER` or sky). sp_a3_01 grows 191
+  blocks along X for its far black walls; wakeup, metro, bts4 and sp_a3_end
+  by 1 or 2.
+- **Sky brushes do not collide.** Made solid in DEV-0.34.1 (user, 2026-10-04:
+  yes), they more than doubled furnace's carrier blocks (111,082 to 241,837);
+  the user then judged blocking the way out of the map not worth it (user,
+  2026-10-05: "If it's practically useless get rid of it") and DEV-0.34.2
+  takes it back out.
+- **Towers through the sky.** furnace's smokestacks end at the sky brushes
+  because the map ends there: vbsp drops world faces outside the sealed map,
+  and the stacks go on as `smokestack_001_skybox.mdl` in the 3D skybox room
+  (4 of them, 1/16 scale). The 3D step draws them; drawing order cannot.
+- **Area portal windows fade.** Keeping `toolsblack` put a dark plane in
+  furnace's doorway to the outside (user test, 2026-10-05): it is the brush a
+  `func_areaportalwindow` draws instead of what lies beyond. Source hides that
+  brush (`EF_NODRAW`) and the window draws its model with the blend
+  `RemapValClamped(distance, FadeStartDist, FadeDist, TranslucencyLimit, 1)`,
+  the eye's distance to the brush's bounds (`C_FuncAreaPortalWindow`), so it is
+  gone up close and solid far away, where the engine has closed the portal.
+  The converter now makes every brush entity a window targets a mover,
+  whatever its class (wakeup's is a `func_illusionary`, kept without
+  collision, as `SOLID_NONE`), and the mod draws it faded: not at all at 0,
+  with the translucent surfaces below 1, as before at 1. 14 windows across
+  five test maps. Not done: `SetFadeStartDistance`/`SetFadeEndDistance`
+  inputs, `BackgroundBModel`, the zoom factor (`GetFOVDistanceAdjustFactor`).
+- **Frame spikes** reported on DEV-0.34.1 were the PC's power-saving mode
+  (user, 2026-10-05), not the sky.
+
+## D27 — The 3D skybox room is drawn as Source draws it, with Source's light
+
+The sky faces show the 2D skybox (D26); Source draws its 3D skybox room in
+front of it, which is what covers the streaked lower half of the sides seen
+from high up and continues furnace's smokestacks (user test, 2026-10-05).
+
+- **Geometry.** The converter writes the room's brush faces, displacements,
+  brush entities wholly inside it and static props as triangles relative to
+  the `sky_camera` (format section 21); the mod draws them from
+  `sky_camera + eye / scale`, as `CSkyboxView` does, into a screen-sized
+  target over the 2D skybox, and the sky faces show that image. Drawn only
+  from a cluster whose leaves have `LEAF_FLAGS_SKY`.
+- **Light.** The room is not in the Minecraft world, so it keeps Source's baked
+  light: lightmaps for faces and displacements (HDR, as all test maps but
+  escape_02 only have HDR light), `.vhv` vertex light for props, both matched
+  as noclip.website does (MIT, reverse-engineered). The props' VTX hardware
+  vertex order is read alongside `vmdl`. The shading is the SDK shaders':
+  albedo times light times the tone map scale, range fog with the factor
+  squared, written as sRGB.
+- **Exposure.** Source's HDR exposure follows its auto exposure, which
+  depends on what the player sees; here it is a fixed scale, 1 by default,
+  `/src2mc_sky exposure <scale>`, so the user can match the game by eye.
+  `/src2mc_sky room on|off` switches the room.
+- **Not done.** Dynamic props, overlays, decals, water and sprites in the
+  room; `sky_camera` angles (`use_angles`, zero in every test map); fog
+  blending (`fogblend`, off in every test map); light styles.
+- **Uniform names.** DEV-0.35.0 crashed as the room was first drawn (user,
+  2026-10-05): its shader's three-float `FogColor` took the name of
+  Minecraft's four-float fog colour, which `ShaderInstance.setDefaultUniforms`
+  writes into any uniform so named. The room's fog uniforms are `SkyFog*`
+  now, and a test checks no core shader of the mod reuses a vanilla uniform
+  name at another size.
+- **Room depth with a shader pack.** DEV-0.35.1 with Complementary showed the
+  room torn into streaks and holes as soon as the view moved (user,
+  2026-10-05): with a pack the faces are drawn without depth writes, and the
+  room's depth clear ran under that mask, so it never cleared and kept every
+  earlier frame's nearest surface. The clear now sets the masks first. The
+  same test showed ~48 ms frames with the pack; `/src2mc_sky status` now
+  prints the CPU and GPU time of the snapshots, the room and the faces so the
+  cost can be located before anything is changed for it.
+- **Room textures.** The timers showed the sky under 1 ms; the frame time
+  was the map's props (user, 2026-10-05: 26 ms, 13 ms with props off, 60 fps
+  before the room). The room had asked every material it draws for a
+  64-block texture span, shared ones too, so furnace's own props and brushes
+  got larger textures: its atlas went from 0.18 pages of texels on 1 page to
+  1.46 on 6. DEV-0.35.3 had the room reuse the map's textures, which made
+  the room's trees and buildings blobs (user: "ugly"), as it is seen
+  enlarged by its scale. DEV-0.35.4: the room's materials get textures of
+  their own, at the span one repeat covers in the room times the scale (as
+  the player sees it, so mostly the source resolution); the map's keep
+  theirs. The atlas packs the map's textures first, tallest first, and the
+  room-only ones after, so the room never spreads the map's textures over
+  more pages: furnace's map textures fit page 0 again (in content ID order,
+  0.2 pages of texels had needed 2), the room's 0.24 pages follow.
+
+## D28 — The map is lit by its own baked light, not Minecraft's
+
+The map was lit by Minecraft's light engine: a sky-light bake from the
+occlusion mask (section 13) plus vanilla block light, re-sampled whenever a
+section's light changed. It looked nothing like the game, and placing or
+breaking a block relit the map and stalled the frame. Shader packs did not
+fix the look and cost most of the frame (user, 2026-10-06: 23 ms facing the
+map with Complementary, over 200 fps without). The user chose Source's own
+light instead, accepting that shader packs no longer draw the map (user,
+2026-10-06).
+
+- **Light.** The converter writes what vrad baked (format section 22): every
+  drawn face's lightmap on shared pages, the leaves' ambient samples with
+  the tree that finds a point's leaf, and each static prop's `.vhv` vertex
+  light. All of it is matched as noclip.website reads it (MIT,
+  reverse-engineered), as the 3D skybox room's light already is (D27).
+- **What lights what.** Brush faces and displacements, the movers' faces too,
+  use their lightmaps; static props their vertex light; everything else
+  (props without a `.vhv`, logic and animated props, props riding movers)
+  the ambient cube at its centre, turned with the thing's orientation.
+  Surfaces vrad leaves without a lightmap (`NOLIGHT`: black tool brushes,
+  light panels, fizzlers) are drawn at full brightness, as Source draws
+  them; on every test map they are all of the unlit fragments.
+- **Minecraft's light.** Sky light is ignored entirely and the sky-light bake
+  is removed. Block light from vanilla sources (torches, lamps) is added on
+  top, in linear light, so a torch still lights the map; only a change of
+  block light re-samples a section, so placing or breaking a block does not.
+- **Entities.** Players, mobs and items in a map take the ambient cube's
+  brightness as their light level and its colour as a tint, through two
+  client mixins (`EntityRenderer.getPackedLightCoords`,
+  `LivingEntityRenderer.render`'s model tint), allowed by the user for this
+  (user, 2026-10-06).
+- **Exposure.** A fixed scale, 1 by default, shared with the 3D skybox:
+  `/src2mc_light exposure <scale>`. Source's auto exposure is not done.
+- **Shader packs.** The map is drawn with the mod's own core shader; Iris
+  does not draw unknown core shaders, so with a pack the map is invisible.
+  Accepted (user, 2026-10-06: "shaders don't need to work").
+- **Result.** DEV-0.36.0 looks right on furnace (user, 2026-10-07: "everything
+  looks amazing"), 7 ms facing the whole map from above, 3 to 8 ms at
+  gameplay spots, steady.
+- **Not done.** Direct light from Source's lights on moving things (the
+  engine adds up to four world lights to the ambient cube); light styles;
+  bump-mapped lightmaps; auto exposure; `env_cubemap` reflections. The
+  converter still writes the occlusion mask, which nothing reads.
+
+## D29 — Particles run the game's own `.pcf` systems; impacts and decals as the game draws them
+
+Minecraft's particles look nothing like Source's effects, and the user asked
+for the real thing: "closest to Source", from the game's files. Valve's
+particle library is closed source, so the runtime follows the public
+references: noclip.website's particle code (MIT), the Valve Developer
+Community pages for each function, and the public SDK's `spritecard` shader
+and client effect code.
+
+- **Systems.** The converter exports every system the map can start, with its
+  children, its material and the material's sprite sheet (format section 23).
+  The mod simulates them in Source units and axes: emitters, then
+  initializers on new particles, then operators weighted by their fade, then
+  forces, constraints and children, in substeps no longer than the system's
+  maximum time step. About sixty functions are implemented; a function the
+  mod does not know is skipped.
+- **Defaults.** A `.pcf` stores only values that differ from the default. The
+  defaults come from Source SDK 2013's linux64 `particles.a`: each
+  function's unpack table, read from its relocations, gives each parameter's
+  name and default string. Nine functions newer than that library (Position
+  Along Ring, Place On Ground, Alpha Fade In/Out Simple, Oscillate Scalar
+  Simple, Ramp Scalar Linear/Spline Random, Remap Percentage, Set CP to
+  Impact Point) keep their stored values and take the mod's defaults from the
+  wiki.
+- **Drawing.** Sprites, trails and ropes are drawn with the `spritecard`
+  maths: frame blending or the max-luminance pick, overbright, `$addself`,
+  and its blend modes (ONE/INV_SRC_ALPHA for `$addself` and
+  `$addoverblend`, SRC_ALPHA/ONE when additive, alpha blending otherwise),
+  in linear light at the map's exposure. Sheet timing: with "use animation
+  rate as FPS" the rate is frames per second; with "animation_fit_lifetime"
+  the sequence plays once over the particle's life; otherwise the rate is
+  sequences per second. This last rule is read from the wiki and the
+  library default (0.1), not from Valve's code.
+- **Map effects.** `info_particle_system` runs from the map's logic: `Start`
+  starts it and the client catches up as the game's `SkipToTime` does (up to
+  four seconds), `Stop` stops emission, `DestroyImmediately` kills it.
+  Control point 0 is the entity, `cpoint<N>` the named entity's origin.
+- **Impacts.** Server-side hits of Minecraft projectiles and TacZ bullets
+  (`AmmoHitBlockEvent`, hooked by reflection so TacZ stays optional) are sent
+  to nearby clients. The client plays the surface's `bulletimpact` sound and
+  draws the impact as the map's game does: Portal 2 (BSP 21+) with the
+  `impact_*` system of the surface's game material and its control points
+  (0 out of the surface, 1 the reflection, 2 back along the shot, 3 the
+  scale); older games with the SDK's code effects (`cl_new_impact_effects
+  0`), whose colours come from the material's reflectivity and the light at
+  the hit. Which letter maps to which Portal 2 system is our reading of
+  `s_pImpactEffect` and still needs the user's check.
+- **Decals.** A bullet hole is picked by weight from the game's
+  `decals_subrect.txt` group for the surface's game material, laid out as
+  `R_DecalComputeBasis` does, clipped to the map fragments in the hit plane
+  and drawn with the map's own shader: lit by the surface's lightmap, or
+  `decalmodulate`'s 2x multiply. INFRA has no shot decals. Decals on props
+  and movers are not drawn; a decal goes with the block its surface lies on,
+  and with a bundle or placement change.
+- **Sparks.** `env_spark` runs on the server as `CEnvSpark` does: while
+  sparking, a spark every 0.1 s plus up to `MaxDelay`, `SparkOnce` sparks once
+  and stops it; each spark fires `OnSpark`, plays `DoSpark` unless silent, and
+  moves the entity's synced serial on, which clients draw as the SDK's
+  `FX_ElectricSpark`. Its glow caps use an `$ignorez` material that Source
+  shows only where the point is seen; here a trace from the eye stands in for
+  that test.
+- **Local axes.** Source's particle code uses three conventions for a
+  control point's local frame, read from the compiled SDK 2013
+  `particles.a`: the transform matrix (x forward, y left, z up) for position
+  offsets, bias and initial velocity noise; the raw orientation vectors (x
+  forward, y **right**, z up) for the local speed of Position Within Sphere
+  Random and Velocity Random; `TransformAxis` (x right, y forward, z up) for
+  Twist Around Axis and Constrain Distance's centre offset. Using left for
+  the local speed sent INFRA's pipe flames down instead of up (user,
+  2026-10-07).
+- **Drag.** `C_OP_BasicMovement` keeps `(1 - drag)^(30 dt)` of the step
+  since the previous position, scaled by `dt / previous dt`, and adds the
+  acceleration undamped (read from `particles.a`, constant 30). Damping
+  `1 - drag` every frame made everything at the user's 150-300 fps barely
+  move (user, 2026-10-07). `C_OP_DampenToCP` scales that step by
+  `(distance / range)^scale`. Initializers write a velocity as the step
+  back over the previous step's length (`m_flPreviousDt`); over the current
+  step, a short frame followed by a long one launched new particles several
+  times too fast, now and then (user, 2026-10-07).
+- **Texture size.** Particle sheets up to 4,096 texels (INFRA's fire and
+  smoke) were split across atlas pages, and the renderer drew nothing for
+  them; effect textures are now scaled to fit one region (4,064), about 1%.
+- **Toggles.** `/src2mc_particles [on|off|range N|decals on|off|clear]`
+  reports systems, particles, impacts heard and drawn, and decals.
+- **Result.** DEV-0.38.3 on furnace: flames, smoke, steam, ash, sparks and
+  impacts look and move right (user, 2026-10-07: "All perfect now"). Bullet
+  hole decals and the Portal 2 impact systems are not checked in game yet.
+- **Not done.** The older effect entities (`env_sprite`,
+  `env_steam`, `env_fire`, `env_smokestack`, `func_dustmotes`); decals on
+  props; `DmeParticleSystemDefinition` attributes the mod does not read
+  (bounding boxes, view-model and low-detail fallbacks).
