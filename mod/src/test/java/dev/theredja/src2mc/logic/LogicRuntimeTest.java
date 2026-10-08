@@ -454,6 +454,32 @@ final class LogicRuntimeTest {
     }
 
     /**
+     * The furnace's crane: a crucible riding its rotator is parented to the crane's hook, which
+     * mounts it there, and parented back where it was compiled it stands where the bundle has it
+     * again. Set back after its parent turned, it stays mounted.
+     */
+    @Test void aPropParentedAwayIsMountedAndComesHomeOnItsOwnParent() {
+        MapLogic logic = run(at(entity("func_rotating", "targetname", "rotator", "maxspeed", "90"), 0, 0, 0),
+            at(entity("prop_dynamic", "targetname", "crucible", "parentname", "rotator"), 2, 0, 0),
+            at(entity("func_rotating", "targetname", "hook", "maxspeed", "0"), 2, 3, 0));
+        LogicEntity crucible = logic.findFirst("crucible", null, null, null);
+        logic.queue(0, "crucible", null, "SetParent", "hook", null, null);
+        seconds(logic, 0.05);
+        assertTrue(crucible.reparented(), crucible.describe());
+        logic.queue(0, "crucible", null, "SetParent", "rotator", null, null);
+        seconds(logic, 0.05);
+        assertTrue(!crucible.reparented(), crucible.describe());
+
+        logic.queue(0, "crucible", null, "SetParent", "hook", null, null);
+        seconds(logic, 0.05);
+        logic.queue(0, "rotator", null, "Start", null, null, null);
+        seconds(logic, 1.0);
+        logic.queue(0, "crucible", null, "SetParent", "rotator", null, null);
+        seconds(logic, 0.05);
+        assertTrue(crucible.reparented(), crucible.describe());
+    }
+
+    /**
      * Pushers touch triggers (FinishPushers): a train runs through a trigger that lets everything
      * through and is filtered to trains, and through one for players only.
      */

@@ -10,7 +10,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-/// Inputs that change how a model entity looks or collides.
+/// Inputs that change how a model entity looks, collides or where it rides.
 const STATE_INPUTS: &[&str] = &[
     "skin",
     "color",
@@ -22,6 +22,8 @@ const STATE_INPUTS: &[&str] = &[
     "killhierarchy",
     "disablecollision",
     "enablecollision",
+    "setparent",
+    "clearparent",
 ];
 
 /// `CBaseAnimating` and `CDynamicProp` inputs that play or change an
@@ -33,12 +35,15 @@ const ANIMATION_INPUTS: &[&str] = &[
     "setcycle",
 ];
 
-/// Inputs after which the prop may no longer collide.
+/// Inputs after which the prop may no longer collide where it was compiled:
+/// a prop given a new parent leaves its mover or its place in the map.
 const COLLISION_INPUTS: &[&str] = &[
     "kill",
     "killhierarchy",
     "disablecollision",
     "enablecollision",
+    "setparent",
+    "clearparent",
 ];
 
 /// `CDynamicProp` and the classes built on it that read `StartDisabled` as
@@ -388,6 +393,44 @@ mod tests {
         );
         assert!(!roles.contains_key(&4));
         assert!(!roles.contains_key(&1), "a brush entity is no prop");
+    }
+
+    /// Furnace's crane: a relay parents the crucible riding the rotator to the
+    /// crane's hooks, so it is drawn and collides apart from the rotator.
+    #[test]
+    fn a_prop_given_a_new_parent_is_a_logic_prop() {
+        let lump = vec![
+            entity(&[("classname", "worldspawn")]),
+            entity(&[
+                ("classname", "logic_relay"),
+                (
+                    "OnTrigger",
+                    "traveling_ladle\x1bSetParent\x1bladle_ch_hooks\x1b0\x1b-1",
+                ),
+            ]),
+            entity(&[
+                ("classname", "prop_dynamic"),
+                ("targetname", "traveling_ladle"),
+                ("parentname", "ladle_rotator"),
+                ("model", "models/props_machinery/steel_ladle.mdl"),
+            ]),
+            entity(&[
+                ("classname", "prop_dynamic"),
+                ("targetname", "not_traveling_ladle"),
+                ("parentname", "ladle_rotator"),
+                ("model", "models/props_machinery/steel_ladle.mdl"),
+            ]),
+        ];
+        let roles = roles_of(&lump);
+        assert_eq!(
+            roles.get(&2),
+            Some(&Role {
+                start_hidden: false,
+                collision: true,
+                animated: false
+            })
+        );
+        assert!(!roles.contains_key(&3));
     }
 
     /// `UpdateOnRemove` deletes a removed entity's children; a dynamic prop

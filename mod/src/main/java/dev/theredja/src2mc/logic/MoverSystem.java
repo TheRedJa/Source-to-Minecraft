@@ -74,6 +74,8 @@ public final class MoverSystem {
     private static final class Live {
         FixedConstraintHandle lock;
         MoverPose pose;
+        /** Substeps it is placed again whatever its pose: its blocks changed, so its centre of mass may move. */
+        int relock;
     }
 
     private static final Map<UUID, Live> LIVE = new HashMap<>();
@@ -92,6 +94,15 @@ public final class MoverSystem {
     private static final int RELEASE_TICKS = 20;
     private static long ensureEpoch = -1, ensureGeneration = -1;
     private static int ticks;
+    /**
+     * Mover blocks put into a sub-level beyond its own, as packed mover-local cells: where the
+     * props parented onto it reach ({@link dev.theredja.src2mc.world.MountCollision}), and the
+     * runs joining those to its blocks.
+     */
+    private static final Map<UUID, it.unimi.dsi.fastutil.longs.LongOpenHashSet> MOUNT_BLOCKS = new HashMap<>();
+    private static long mountVersion = Long.MIN_VALUE;
+    /** How many substeps a sub-level whose blocks changed is placed again. */
+    private static final int RELOCK_SUBSTEPS = 20;
 
     // ---- Saved data.
 
@@ -159,10 +170,130 @@ public final class MoverSystem {
         BundleGeneration generation = Src2mc.bundles().active();
         long epoch = PlacementIndex.epoch();
         boolean changed = epoch != ensureEpoch || generation.sequence() != ensureGeneration;
-        if (!changed && ++ticks % ENSURE_INTERVAL != 0) return;
-        ensureEpoch = epoch;
-        ensureGeneration = generation.sequence();
-        for (ServerLevel level : event.getServer().getAllLevels()) ensure(level, generation);
+        long mounts = dev.theredja.src2mc.world.PropMounts.version(false);
+        boolean ensuring = changed || ++ticks % ENSURE_INTERVAL == 0;
+        if (ensuring) {
+            ensureEpoch = epoch;
+            ensureGeneration = generation.sequence();
+            for (ServerLevel level : event.getServer().getAllLevels()) ensure(level, generation);
+        }
+        if (ensuring || mounts != mountVersion) {
+            mountVersion = mounts;
+            for (ServerLevel level : event.getServer().getAllLevels()) mountBlocks(level);
+        }
+    }
+
+    /**
+     * Gives every sub-level mover blocks where the props parented onto it reach, so they collide
+     * there, and takes back those no longer reached. New cells are joined to the mover's own
+     * blocks as {@link #connected} joins its pieces, or Sable would split them off.
+     */
+    private static void mountBlocks(ServerLevel level) {
+        ServerSubLevelContainer container = SubLevelContainer.getContainer(level);
+        if (container == null) return;
+        for (Entry entry : loaded(level).entries.values()) {
+            UUID uuid = entry.instance.subLevel();
+            if (!(container.getSubLevel(uuid) instanceof ServerSubLevel subLevel) || subLevel.isRemoved()) continue;
+            MoverRegistry.Resolved resolved = MoverRegistry.resolve(level, uuid);
+            if (resolved == null) continue;
+            it.unimi.dsi.fastutil.longs.LongOpenHashSet want = dev.theredja.src2mc.world.MountCollision.cells(level, resolved);
+            it.unimi.dsi.fastutil.longs.LongOpenHashSet had = MOUNT_BLOCKS.get(uuid);
+            if (had != null && had.isEmpty() && want.isEmpty()) continue;
+            int[] own = connected(resolved.mover().blockCells());
+            it.unimi.dsi.fastutil.longs.LongOpenHashSet ownSet = new it.unimi.dsi.fastutil.longs.LongOpenHashSet();
+            for (int i = 0; i < own.length; i += 3) ownSet.add(BlockPos.asLong(own[i], own[i + 1], own[i + 2]));
+            BlockPos plotOrigin = MoverRegistry.plotOrigin(subLevel.getPlot());
+            // After a restart: the blocks a mount left in the saved plot.
+            if (had == null) had = leftOver(level, subLevel.getPlot(), plotOrigin, ownSet);
+            it.unimi.dsi.fastutil.longs.LongOpenHashSet next = new it.unimi.dsi.fastutil.longs.LongOpenHashSet();
+            if (!want.isEmpty()) {
+                int[] joined = new int[(own.length / 3 + want.size()) * 3];
+                System.arraycopy(own, 0, joined, 0, own.length);
+                int at = own.length;
+                for (long cell : want) {
+                    joined[at++] = BlockPos.getX(cell); joined[at++] = BlockPos.getY(cell); joined[at++] = BlockPos.getZ(cell);
+                }
+                int[] all = connected(joined);
+                for (int i = 0; i < all.length; i += 3) {
+                    long cell = BlockPos.asLong(all[i], all[i + 1], all[i + 2]);
+                    if (!ownSet.contains(cell)) next.add(cell);
+                }
+            }
+            boolean changed = false;
+            BlockState mover = Src2mcWorldContent.MOVER.get().defaultBlockState(), air = Blocks.AIR.defaultBlockState();
+            // Farthest first when taking back, nearest first when adding: every step stays one piece.
+            it.unimi.dsi.fastutil.longs.LongArrayList gone = outward(ownSet, had);
+            for (int i = gone.size() - 1; i >= 0; i--) {
+                if (!next.contains(gone.getLong(i))) changed |= setPlotBlock(level, subLevel.getPlot(), plotOrigin, gone.getLong(i), air);
+            }
+            for (long cell : outward(ownSet, next)) if (!had.contains(cell)) changed |= setPlotBlock(level, subLevel.getPlot(), plotOrigin, cell, mover);
+            MOUNT_BLOCKS.put(uuid, next);
+            if (changed) {
+                Live live = LIVE.computeIfAbsent(uuid, ignored -> new Live());
+                live.relock = RELOCK_SUBSTEPS;
+            }
+        }
+    }
+
+    /** {@code cells} in the order a flood from {@code own} reaches them; any it does not reach last. */
+    private static it.unimi.dsi.fastutil.longs.LongArrayList outward(it.unimi.dsi.fastutil.longs.LongOpenHashSet own,
+                                                                     it.unimi.dsi.fastutil.longs.LongOpenHashSet cells) {
+        it.unimi.dsi.fastutil.longs.LongArrayList out = new it.unimi.dsi.fastutil.longs.LongArrayList(cells.size());
+        it.unimi.dsi.fastutil.longs.LongOpenHashSet reached = new it.unimi.dsi.fastutil.longs.LongOpenHashSet();
+        it.unimi.dsi.fastutil.longs.LongArrayFIFOQueue queue = new it.unimi.dsi.fastutil.longs.LongArrayFIFOQueue();
+        for (long cell : own) queue.enqueue(cell);
+        while (!queue.isEmpty()) {
+            long cell = queue.dequeueLong();
+            for (net.minecraft.core.Direction direction : net.minecraft.core.Direction.values()) {
+                long near = BlockPos.offset(cell, direction);
+                if (cells.contains(near) && reached.add(near)) { out.add(near); queue.enqueue(near); }
+            }
+        }
+        for (long cell : cells) if (!reached.contains(cell)) out.add(cell);
+        return out;
+    }
+
+    /** The mover blocks of a plot outside the mover's own cells, as packed mover-local cells. */
+    private static it.unimi.dsi.fastutil.longs.LongOpenHashSet leftOver(ServerLevel level, LevelPlot plot, BlockPos plotOrigin,
+                                                                        it.unimi.dsi.fastutil.longs.LongOpenHashSet own) {
+        it.unimi.dsi.fastutil.longs.LongOpenHashSet out = new it.unimi.dsi.fastutil.longs.LongOpenHashSet();
+        var box = plot.getBoundingBox();
+        if (box == null) return out;
+        BlockState mover = Src2mcWorldContent.MOVER.get().defaultBlockState();
+        BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
+        for (int x = box.minX(); x <= box.maxX(); x++) {
+            for (int z = box.minZ(); z <= box.maxZ(); z++) {
+                ChunkPos chunkPos = new ChunkPos(x >> 4, z >> 4);
+                if (!plot.contains(chunkPos) || plot.getChunkHolder(plot.toLocal(chunkPos)) == null) continue;
+                LevelChunk chunk = plot.getChunk(plot.toLocal(chunkPos));
+                for (int y = Math.max(box.minY(), level.getMinBuildHeight()); y <= Math.min(box.maxY(), level.getMaxBuildHeight() - 1); y++) {
+                    if (chunk.getBlockState(pos.set(x, y, z)) != mover) continue;
+                    long cell = BlockPos.asLong(x - plotOrigin.getX(), y - plotOrigin.getY(), z - plotOrigin.getZ());
+                    if (!own.contains(cell)) out.add(cell);
+                }
+            }
+        }
+        return out;
+    }
+
+    /** Sets one mover-local cell of a plot, as {@link #spawn} does; false when the plot cannot hold it or it already is so. */
+    private static boolean setPlotBlock(ServerLevel level, LevelPlot plot, BlockPos plotOrigin, long cell, BlockState state) {
+        BlockPos pos = plotOrigin.offset(BlockPos.getX(cell), BlockPos.getY(cell), BlockPos.getZ(cell));
+        if (pos.getY() < level.getMinBuildHeight() || pos.getY() >= level.getMaxBuildHeight()) return false;
+        ChunkPos chunkPos = new ChunkPos(pos);
+        if (!plot.contains(chunkPos)) return false;
+        if (plot.getChunkHolder(plot.toLocal(chunkPos)) == null) {
+            if (state.isAir()) return false;
+            plot.newEmptyChunk(chunkPos);
+        }
+        LevelChunk chunk = plot.getChunk(plot.toLocal(chunkPos));
+        BlockState old = chunk.getBlockState(pos);
+        if (old == state) return false;
+        // Only ever takes back a mover block of ours.
+        if (state.isAir() && old != Src2mcWorldContent.MOVER.get().defaultBlockState()) return false;
+        chunk.setBlockState(pos, state, false);
+        SubLevelAssemblyHelper.markAndNotifyBlock(level, pos, chunk, old, state, 3, 512);
+        return true;
     }
 
     /**
@@ -307,6 +438,7 @@ public final class MoverSystem {
     private static void remove(ServerLevel level, ServerSubLevelContainer container, Data data, UUID uuid) {
         data.entries.remove(uuid);
         MoverRegistry.remove(false, uuid);
+        MOUNT_BLOCKS.remove(uuid);
         Live live = LIVE.remove(uuid);
         if (live != null && live.lock != null && live.lock.isValid()) live.lock.remove();
         SubLevel subLevel = container.getSubLevel(uuid);
@@ -481,7 +613,8 @@ public final class MoverSystem {
             if (!(container.getSubLevel(instance.subLevel()) instanceof ServerSubLevel subLevel) || subLevel.isRemoved()) continue;
             MoverPose target = poseAt(level, instance, partial);
             Live live = LIVE.get(instance.subLevel());
-            if (live != null && live.lock != null && live.lock.isValid() && target.equals(live.pose)) continue;
+            if (live != null && live.relock > 0) live.relock--;
+            else if (live != null && live.lock != null && live.lock.isValid() && target.equals(live.pose)) continue;
             place(level, subLevel, target);
         }
     }
@@ -606,6 +739,8 @@ public final class MoverSystem {
 
     public static void onServerStopped(net.neoforged.neoforge.event.server.ServerStoppedEvent event) {
         LIVE.clear();
+        MOUNT_BLOCKS.clear();
+        mountVersion = Long.MIN_VALUE;
         HANDED_OVER.clear();
         RELEASED.clear();
         MoverRegistry.clear(false);
@@ -617,14 +752,16 @@ public final class MoverSystem {
     static String status(ServerLevel level) {
         ServerSubLevelContainer container = SubLevelContainer.getContainer(level);
         Data data = loaded(level);
-        int loaded = 0, moving = 0;
+        int loaded = 0, moving = 0, carrying = 0, mountBlocks = 0;
         for (Entry entry : data.entries.values()) {
             if (container != null && container.getSubLevel(entry.instance.subLevel()) != null) loaded++;
             Live live = LIVE.get(entry.instance.subLevel());
             if (live != null && live.pose != null && !live.pose.equals(MoverPose.IDENTITY)) moving++;
+            var added = MOUNT_BLOCKS.get(entry.instance.subLevel());
+            if (added != null && !added.isEmpty()) { carrying++; mountBlocks += added.size(); }
         }
         return "src2mc movers: " + data.entries.size() + " sub-levels (" + loaded + " loaded, " + moving + " away from their compiled place), "
-            + data.removals.size() + " waiting to be removed";
+            + data.removals.size() + " waiting to be removed; " + carrying + " carrying parented props on " + mountBlocks + " added blocks";
     }
 
     /** Removes and rebuilds every mover sub-level of the dimension. */

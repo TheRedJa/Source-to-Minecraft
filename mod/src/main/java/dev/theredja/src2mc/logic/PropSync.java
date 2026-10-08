@@ -183,7 +183,11 @@ public final class PropSync {
         }
         if (!sameMounts(SENT_MOUNTS.get(key), mounts)) {
             SENT_MOUNTS.put(key, mounts);
-            PacketDistributor.sendToPlayersInDimension(level, mountPayload(key, mounts));
+            MountPayload payload = mountPayload(key, mounts);
+            Map<Integer, PropMounts.Mount> byEntity = new HashMap<>();
+            for (PropMounts.Mount mount : payload.mounts()) byEntity.put(mount.entity(), mount);
+            PropMounts.replace(false, key, byEntity);
+            PacketDistributor.sendToPlayersInDimension(level, payload);
         }
         if (!changed.isEmpty())
             PacketDistributor.sendToPlayersInDimension(level, StatePayload.of(key.dimension(), key.anchor(), false, logic.time(), changed));
@@ -223,7 +227,10 @@ public final class PropSync {
     }
 
     /** Forgets what was sent, for a server stop. */
-    static void clear() { SENT_MOUNTS.clear(); }
+    static void clear() {
+        SENT_MOUNTS.clear();
+        PropMounts.clear(false);
+    }
 
     public static void onPlayerLoggedIn(PlayerEvent.PlayerLoggedInEvent event) {
         if (event.getEntity() instanceof ServerPlayer player) sendAll(player);

@@ -125,7 +125,8 @@ public final class CollisionShapes {
             int[] pairs = cells.get(cell);
             // A full cube already holds whatever a prop could add.
             if (pairs == null || base == Shapes.block()) return base;
-            long now = PropStates.version(client);
+            // A prop parented anew no longer stands here; its mount collides where it went.
+            long now = PropStates.version(client) * 31 + PropMounts.version(client);
             if (now != version) {
                 combined.clear();
                 version = now;
@@ -137,7 +138,7 @@ public final class CollisionShapes {
             for (int i = 0; i < pairs.length; i += 2) {
                 var prop = props[pairs[i]];
                 PropStates.State state = PropStates.effective(client, key, map, prop);
-                if (!state.solid() || PropStates.collision(prop, state) != tables[pairs[i]]) continue;
+                if (!state.solid() || PropStates.collision(prop, state) != tables[pairs[i]] || PropMounts.mounted(client, key, prop.entity())) continue;
                 int id = pairs[i + 1];
                 VoxelShape part = shapes[pairs[i]].get(id);
                 if (part == null) {

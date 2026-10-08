@@ -1,8 +1,22 @@
 # src2mc implementation handoff
 
-Updated: 2026-10-07 (Europe/Berlin), DEV-0.38.0 installed, awaiting user in-game test (see top)
+Updated: 2026-10-08 (Europe/Berlin), DEV-0.40.0 user-confirmed and committed
 
-## DONE: particles + impacts + env_spark (DEV-0.38.3) -- user-confirmed 2026-10-07 ("All perfect now"), uncommitted
+## DONE: re-parented props (DEV-0.39.0 lift, DEV-0.40.0 carried collision) -- user-confirmed 2026-10-08 -- furnace crane lifts the crucible
+
+User 2026-10-08: crane at end of rolling hall phases through crucible, crucible never budges.
+Cause: `traveling_ladle` (#2025) gets `SetParent ladle_ch_hooks` from `ladle_ch_rele1b`, but was
+baked into `ladle_rotator`'s (#2029) mover; SetParent/ClearParent were not logic-prop inputs, so
+the existing mount system never saw it. Fix: converter `src/bsp/logic_props.rs` adds both inputs
+(collision kept apart); mod `LogicEntity.reparent` drops compiled collision while parented anew,
+restores bundle place when back on compiled parent within 0.001 blocks. User 2026-10-08: lift works,
+"collision is must". Carried collision: `world/MountCollision` moves the prop's table by its mount
+into the carrier's cells (both sides, server keeps last-sent mounts in `PropMounts`), `MoverSystem
+.mountBlocks` adds/removes mover blocks in the carrier plot (flood order, relock 20 substeps),
+`LogicProps` skips mounted props. Not yet: copies, props parented into the map (no mover). Logic props: furnace 115->116,
+escape_02 40->43 (brain cores onto trains, dummy core), others unchanged. Commit only when asked.
+
+## DONE: particles + impacts + env_spark (DEV-0.38.3) -- user-confirmed 2026-10-07 ("All perfect now"), committed 6b73be6
 
 Still unchecked in game: escape_02 bullet-hole decals, Portal 2 maps' effects and impact systems
 (user skipped those checks). Next candidates: env_sprite (303 in furnace), env_steam, env_fire,

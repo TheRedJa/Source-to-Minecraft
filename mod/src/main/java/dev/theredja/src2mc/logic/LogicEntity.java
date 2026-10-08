@@ -100,8 +100,8 @@ public class LogicEntity implements Actor {
             case "addoutput" -> addOutput(value);
             case "runscriptcode", "runscriptfile", "callscriptfunction" -> map.scriptCall(this, input);
             // CBaseEntity::InputSetParent: an empty name, as ClearParent, leaves it where it is.
-            case "setparent" -> setParent(value == null || value.isBlank() ? null : map.findFirst(value.trim(), this, activator, caller));
-            case "clearparent" -> setParent(null);
+            case "setparent" -> reparent(value == null || value.isBlank() ? null : map.findFirst(value.trim(), this, activator, caller));
+            case "clearparent" -> reparent(null);
             default -> { return false; }
         }
         return true;
@@ -390,6 +390,31 @@ public class LogicEntity implements Actor {
         parentFound = true;
         reparented = true;
         attached = hold.near(Rigid.IDENTITY, 1e-12) ? null : hold;
+    }
+
+    /** How far from its compiled place, in blocks and quaternion parts, a prop is still home. */
+    private static final double HOME = 1e-3;
+
+    /**
+     * The {@code SetParent} and {@code ClearParent} inputs: {@link #setParent}, and an entity
+     * that is back on the parent the map compiled it on, in the place it was compiled at -- the
+     * furnace's crucible set down on its rotator by the crane -- stands where the bundle has it
+     * again, drawn and colliding there rather than by a mount.
+     */
+    private void reparent(LogicEntity next) {
+        setParent(next);
+        if (!reparented || parent != next || next != compiledParent()) return;
+        if (attached != null && !attached.near(Rigid.IDENTITY, HOME)) return;
+        attached = null;
+        reparented = false;
+    }
+
+    /** The entity its {@code parentname} names, whatever parent it has now. */
+    private LogicEntity compiledParent() {
+        String name = key("parentname");
+        if (name == null || name.isBlank()) return null;
+        LogicEntity found = map.findFirst(name.split(",", 2)[0].trim(), this, null, null);
+        return found == this ? null : found;
     }
 
     /**

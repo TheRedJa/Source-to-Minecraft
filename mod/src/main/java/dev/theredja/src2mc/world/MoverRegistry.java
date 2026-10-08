@@ -43,10 +43,12 @@ public final class MoverRegistry {
     /**
      * An instance with its map, mover and collision shapes found; {@code initialState} is its state
      * before the logic says otherwise. {@code riders} is the collision of the logic props riding it
-     * that keep their own (format.md section 18), null for none.
+     * that keep their own (format.md section 18), null for none; {@code mounted} that of the
+     * props parented onto it at runtime.
      */
     public record Resolved(Instance instance, MapPlacement placement, BundleMap map, MoverTable.Mover mover,
-                           AtomicReferenceArray<VoxelShape> shapes, int initialState, CollisionShapes.LogicProps riders) {}
+                           AtomicReferenceArray<VoxelShape> shapes, int initialState, CollisionShapes.LogicProps riders,
+                           MountCollision.Layer mounted) {}
 
     /** State bits of a mover: not drawn, does not collide. Zero for one drawn and solid. */
     public static final int HIDDEN = 1, NOT_SOLID = 2;
@@ -134,7 +136,7 @@ public final class MoverRegistry {
         MoverTable.Mover mover = map.movers().movers().get(index2);
         var shapes = new AtomicReferenceArray<VoxelShape>(mover.collision() == null ? 0 : mover.collision().shapeCount());
         var riders = CollisionShapes.LogicProps.of(map, new PropStates.Key(level.dimension().location(), instance.anchor()), mover.entity());
-        hit = new Resolved(instance, placement, map, mover, shapes, initialState(map, mover), riders);
+        hit = new Resolved(instance, placement, map, mover, shapes, initialState(map, mover), riders, new MountCollision.Layer());
         resolved.put(subLevel, hit);
         return hit;
     }
@@ -196,6 +198,8 @@ public final class MoverRegistry {
             }
         }
         // Riders that keep their own collision add it while they are solid, in the pose they stand in.
-        return resolved.riders() == null ? shape : resolved.riders().apply(level.isClientSide(), x, y, z, shape);
+        if (resolved.riders() != null) shape = resolved.riders().apply(level.isClientSide(), x, y, z, shape);
+        // And props parented onto it since, where it carries them.
+        return MountCollision.apply(level, resolved, x, y, z, shape);
     }
 }

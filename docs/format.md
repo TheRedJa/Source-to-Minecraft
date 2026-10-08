@@ -792,7 +792,8 @@ absent when there are none.
 
 A *logic prop* is an entity of the lump with a `.mdl` model that some output
 of the map sends `Skin`, `Color`, `Enable`, `Disable`, `TurnOn`, `TurnOff`,
-`Kill`, `KillHierarchy`, `DisableCollision` or `EnableCollision`, or that is a
+`Kill`, `KillHierarchy`, `DisableCollision`, `EnableCollision`, `SetParent` or
+`ClearParent`, or that is a
 `prop_dynamic`, `prop_dynamic_override` or `prop_dynamic_ornament` with a
 non-zero `StartDisabled`, or such a dynamic prop that animates: some output
 sends it `SetAnimation`, `SetDefaultAnimation`, `SetPlaybackRate` or
@@ -826,7 +827,8 @@ these fields in order:
 
 Exactly one of `stable_id` and `mover` is present. A prop that some input
 removes or switches the collision of (`Kill`, `KillHierarchy`,
-`DisableCollision`, `EnableCollision`, or a removed ancestor) and is solid by
+`DisableCollision`, `EnableCollision`, a removed ancestor, or `SetParent` and
+`ClearParent`, which take it away from where it was compiled) and is solid by
 the rules of section 14 keeps its volume out of the map's collision table: its
 cells are the section 14 S2COLL format of its own, map-local, and the mod adds
 each cell's shape to the cell's own while the prop is solid. Its cells follow
@@ -835,7 +837,10 @@ nothing, and a cell with no map block gets an `src2mc:carrier`, which collides
 as nothing while the prop is gone. A riding prop's is the same in its mover's
 cells (section 17): kept out of the mover's table, its cells in mover-local
 coordinates, a cell with no mover block getting a carrier there, and the mod
-adds it to the mover's cell shapes while the prop is solid.
+adds it to the mover's cell shapes while the prop is solid. A prop parented
+onto a mover at runtime collides there instead: the mod moves its table from
+its compiled place into the carrying mover's cells and puts mover blocks where
+it reaches.
 
 A `point_template`'s entities leave the map as it spawns, unless its
 spawnflag 1 keeps them: the mod spawns them neither shown nor solid, movers

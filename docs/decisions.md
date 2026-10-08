@@ -772,6 +772,27 @@ debris included).
   lit is lit again: belt modules lit on a reused sub-level before Sable had
   carried it from the belt's end kept that light along the belt, every few
   modules glowing (user test, 2026-10-04).
+- **Re-parented props are logic props.** A prop some output sends `SetParent`
+  or `ClearParent` was baked into its mover or the map like any other, so the
+  runtime parent moved nothing: the furnace's crane lowered its hooks through
+  the crucible on the rotator and left without it (user, 2026-10-08). Such a
+  prop is now a logic prop with its collision kept apart, drawn by its mount
+  once parented anew. Set back on its compiled parent within 0.001 blocks of
+  its compiled place it stands in the bundle again, drawn and solid there.
+- **Mounted props collide on their carrier** (user, 2026-10-08: "collision is
+  must as without it's useless"). The prop's own table, moved by its mount
+  into the carrying mover's cells, is added to those cells' shapes while the
+  prop is solid; its compiled place collides as nothing meanwhile. A rotation
+  of whole quarter turns turns each box exactly (the move rounded to a
+  sixteenth); any other is covered by the box around each turned box. The
+  server puts mover blocks into the carrier's plot where the table reaches,
+  joined to its own blocks as a mover's pieces are, nearest first, so Sable
+  never splits it, and takes them back farthest first; a sub-level whose
+  blocks changed is placed again for 20 substeps, as its centre of mass moves.
+  Both sides build the shapes from the same mounts (the server keeps what it
+  last sent). After a restart, mover blocks in a plot beyond its own cells are
+  taken as left by a mount. `/src2mc movers` counts the carrying sub-levels and
+  their added blocks.
 - **Triggers** are touched by solid movers as well as players, by the
   mover's moved brush box, when the trigger lets everything through
   (`FinishPushers` touches triggers for every pusher). Solid props riding a
@@ -800,7 +821,8 @@ debris included).
   every module and debris on them.
 - **Not done.** A moving point_template, copies of usable entities (their
   use boxes are the client's lump records), ambient sounds in templates,
-  `SetParentAttachment`, and collision of mounted props.
+  `SetParentAttachment`, collision of copies, and of props parented into the
+  map (no mover) rather than onto a mover.
 
 
 ## D26 — The sky is drawn through the map's sky faces, as Source's skybox shows
