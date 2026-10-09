@@ -1438,6 +1438,8 @@ public final class MapSurfaceRenderer {
     private static void clear() {
         dropMeshes();
         BakedLighting.clear();
+        dev.theredja.src2mc.client.look.SourcePost.clearTables();
+        dev.theredja.src2mc.client.look.LookClient.clearTables();
         REGION_GROUPS.clear(); PLACEMENT_REGIONS.clear(); REGION_VERSIONS.clear(); BUILD_INFO.clear();
         WorldSnapshot.SHARED.clear();
         PAGES.reset(-1);

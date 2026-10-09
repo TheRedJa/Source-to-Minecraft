@@ -24,6 +24,7 @@ uniform vec3 AmbientPZ;
 uniform vec3 AmbientNZ;
 
 out float vertexDistance;
+out float viewDepth;
 out vec4 vertexColor;
 out vec2 texCoord0;
 out vec4 bakedLight;
@@ -37,6 +38,7 @@ void main() {
     vec4 view = ModelViewMat * vec4(Position, 1.0);
     gl_Position = ProjMat * view;
     vertexDistance = length(view.xyz);
+    viewDepth = -view.z;
     vertexColor = Color;
     texCoord0 = UV0;
     if (Baked.w > 1.5) {

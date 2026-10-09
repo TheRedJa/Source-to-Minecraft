@@ -193,6 +193,7 @@ fields in order:
 | `skybox` | optional canonical `maps/<map-id>/skybox.s2box` path (section 21); absent without a 3D skybox room |
 | `light` | optional canonical `maps/<map-id>/light.s2light` path (section 22) |
 | `particles` | optional canonical `maps/<map-id>/particles.json` path (section 23) |
+| `look` | optional canonical `maps/<map-id>/look.s2look` path (section 24) |
 | `diagnostics` | canonical `maps/<map-id>/diagnostics.json` path |
 
 Surface-table material IDs index `materials` directly. This array therefore
@@ -1103,4 +1104,34 @@ S points along +X. It is clipped to each map fragment in the hit surface's
 plane that it covers. A `decalmodulate` decal multiplies the colour behind it
 by twice its own; any other draws alpha-blended and lit by the surface's
 lightmap. The 2,048 newest decals stay (`r_decals`).
+
+## 24. Look
+
+`maps/<map-id>/look.s2look` holds what the mod needs to draw the map's view as
+the game's post-processing does: whether the map has HDR light, how the game
+blooms, the game's vignette, and the map's colour correction lookups. Map
+metadata references it through the optional `look` field, after `particles`.
+Little-endian, after the magic `S2LOOK\0\0` and `u32` version 1:
+
+- `u8` flags: 1 the map has HDR light (`LUMP_LIGHTING_HDR`), which turns on
+  auto exposure and bloom; 2 the game blooms as the later branch (Alien Swarm,
+  Portal 2, INFRA) does, its `dev/downsample_non_hdr` material having
+  `$bloomtype`; 4 a vignette follows. At most 7.
+- `u8` bloom type, the material's `$bloomtype` (0 or 1); 0 without flag 2.
+- `u8` x and `u8` y blur kernels, `$kernel` of `dev/blurfilterx_nohdr` and
+  `dev/blurfiltery_nohdr`, 0 to 4; 0 is the SDK 2013 cross filter.
+- With flag 4: `u32` width and height, at most 4,096, then that many bytes,
+  row by row, of the red channel of the game's vignette texture
+  (`$internal_vignettetexture` of `dev/engine_post`, default `dev/vignette`).
+  Present only when `dev/engine_post` sets `$vignetteenable` and no ConVar
+  proxy turns it on and off.
+- `u32` lookup count, at most 256, then per lookup sorted by name `u32` name
+  length, the name, and 98,304 bytes: a 32 × 32 × 32 RGB lookup, red fastest,
+  then green, then blue, as the game's `.raw` file stores it. The name is the
+  `filename` of a `color_correction` or `color_correction_volume` trimmed,
+  lowercased and with `/` separators, which is how the entity names it.
+  Names are unique.
+
+A map without HDR light, colour correction or vignette still has the file;
+its flags say so.
 

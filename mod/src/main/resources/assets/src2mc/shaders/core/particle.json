@@ -10,6 +10,8 @@
         { "name": "FogStart", "type": "float", "count": 1, "values": [ 0.0 ] },
         { "name": "FogEnd", "type": "float", "count": 1, "values": [ 1.0 ] },
         { "name": "FogColor", "type": "float", "count": 4, "values": [ 0.0, 0.0, 0.0, 0.0 ] },
+        { "name": "SourceFog", "type": "float", "count": 4, "values": [ 0.0, 1.0, 1.0, 0.0 ] },
+        { "name": "SourceFogColor", "type": "float", "count": 3, "values": [ 0.0, 0.0, 0.0 ] },
         { "name": "ParticleExposure", "type": "float", "count": 1, "values": [ 1.0 ] },
         { "name": "ParticleOverbright", "type": "float", "count": 1, "values": [ 1.0 ] },
         { "name": "ParticleAddSelf", "type": "float", "count": 1, "values": [ 0.0 ] },

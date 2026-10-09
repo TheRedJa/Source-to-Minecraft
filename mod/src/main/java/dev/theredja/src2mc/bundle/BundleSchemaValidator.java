@@ -101,6 +101,7 @@ final class BundleSchemaValidator {
         if (map.has("skybox")) expected.add("skybox");
         if (map.has("light")) expected.add("light");
         if (map.has("particles")) expected.add("particles");
+        if (map.has("look")) expected.add("look");
         expected.add("diagnostics");
         keys(map, expected.toArray(String[]::new));
         format(map, "src2mc-map", path);
@@ -232,6 +233,12 @@ final class BundleSchemaValidator {
             referenced.add(particlesPath);
             particles = validateParticles(json(zip, required(entries, particlesPath), particlesPath), materials.size());
         }
+        LookTable look = null;
+        if (map.has("look")) {
+            String lookPath = exactPath(map, "look", prefix + "look.s2look");
+            referenced.add(lookPath);
+            look = validateLook(zip, required(entries, lookPath));
+        }
         validateDiagnostics(json(zip, required(entries, diagnostics), diagnostics));
 
         // A map's meshes are the bulk of its validation and each is walked on
@@ -288,7 +295,7 @@ final class BundleSchemaValidator {
         long mapHeight = (long) max[1] - min[1] + 1;
         return new BundleMap(mapId, sourceName, min, max, anchor, loadedMaterials, modelRefs, propRecords, mapHeight > 384,
             surfaceTable, modelRefs.stream().map(BundleModel::contentId).collect(java.util.stream.Collectors.toUnmodifiableSet()), atlas, pvs, occlusion, collision, audio, logic, movers,
-            logicProps, sky, skybox, light, particles);
+            logicProps, sky, skybox, light, particles, look);
     }
 
     /** Format section 23. */
@@ -452,6 +459,39 @@ final class BundleSchemaValidator {
     private static final byte[] LIGHT_MAGIC = {'S','2','L','I','T','E',0,0};
 
     /** Format section 22. */
+    private static final byte[] LOOK_MAGIC = {'S','2','L','O','O','K',0,0};
+
+    private static LookTable validateLook(ZipFile zip, ZipEntry entry) throws IOException {
+        limit(entry.getSize(), 28L + 4096L * 4096 + (long) BundleLimits.MAX_LOOK_LOOKUPS * (4 + BundleLimits.MAX_LOOK_NAME_BYTES + LookTable.LOOKUP_BYTES), "look size");
+        try (Binary in = new Binary(zip.getInputStream(entry), entry.getSize())) {
+            in.magic(LOOK_MAGIC);
+            in.version();
+            byte[] head = in.bytes(4);
+            int flags = head[0] & 0xFF, bloomType = head[1] & 0xFF, kernelX = head[2] & 0xFF, kernelY = head[3] & 0xFF;
+            if ((flags & ~7) != 0) fail(BundleErrorCode.INVALID_SCHEMA, "unknown look flags");
+            if (bloomType > 1 || kernelX > 4 || kernelY > 4) fail(BundleErrorCode.INVALID_SCHEMA, "unknown bloom setup");
+            LookTable.Vignette vignette = null;
+            if ((flags & 4) != 0) {
+                int width = (int) in.count(4096, "vignette width"), height = (int) in.count(4096, "vignette height");
+                if (width == 0 || height == 0) fail(BundleErrorCode.INVALID_SCHEMA, "empty vignette");
+                vignette = new LookTable.Vignette(width, height, in.bytes(width * height));
+            }
+            long count = in.count(BundleLimits.MAX_LOOK_LOOKUPS, "look lookup");
+            java.util.Map<String, byte[]> lookups = new java.util.HashMap<>();
+            String previous = null;
+            for (long i = 0; i < count; i++) {
+                int length = (int) in.count(BundleLimits.MAX_LOOK_NAME_BYTES, "look name");
+                String name = new String(in.bytes(length), java.nio.charset.StandardCharsets.UTF_8);
+                if (name.isEmpty() || !name.equals(LookTable.name(name)) || (previous != null && previous.compareTo(name) >= 0))
+                    fail(BundleErrorCode.INVALID_SCHEMA, "look lookup names must be normalized, unique and sorted");
+                lookups.put(name, in.bytes(LookTable.LOOKUP_BYTES));
+                previous = name;
+            }
+            in.end();
+            return new LookTable((flags & 1) != 0, (flags & 2) != 0 ? bloomType : -1, kernelX, kernelY, vignette, lookups);
+        }
+    }
+
     private static LightTable validateLight(ZipFile zip, ZipEntry entry, int propCount) throws IOException {
         limit(entry.getSize(), BundleLimits.MAX_LIGHT_BYTES, "light size");
         try (Binary in = new Binary(zip.getInputStream(entry), entry.getSize())) {

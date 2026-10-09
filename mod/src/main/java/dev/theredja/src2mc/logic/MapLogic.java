@@ -68,6 +68,12 @@ public final class MapLogic {
     private final Map<String, List<LogicEntity>> byName = new HashMap<>();
     private final Map<String, List<LogicEntity>> byClass = new HashMap<>();
     private final Map<UUID, LogicEntity> playerEntities = new HashMap<>();
+    /** {@code mat_hdr_manual_tonemap_rate} as the map's tonemap controllers last set it. */
+    float tonemapRate = dev.theredja.src2mc.world.LookState.DEFAULT_RATE;
+    /** The 2013 client's tonemap controller in use: the one changed last; -1 before any. */
+    int tonemapInUse = -1;
+    /** The fog and tonemap controller each player was told to follow. */
+    private final Map<UUID, dev.theredja.src2mc.world.LookState.Player> lookPlayers = new HashMap<>();
     private final EventQueue queue = new EventQueue();
     private double time;
     private LoadType loadType = LoadType.NEW_GAME;
@@ -105,6 +111,9 @@ public final class MapLogic {
         byName.clear();
         byClass.clear();
         playerEntities.clear();
+        lookPlayers.clear();
+        tonemapRate = dev.theredja.src2mc.world.LookState.DEFAULT_RATE;
+        tonemapInUse = -1;
         entities.clear();
         freeSlots.clear();
         copies.clear();
@@ -429,7 +438,7 @@ public final class MapLogic {
     /** Inputs sent to a player go to a stand-in that has none of its own, and are counted as unhandled. */
     private LogicEntity actorEntity(Actor actor) {
         if (actor instanceof LogicEntity entity) return entity;
-        if (actor instanceof PlayerActor player) return playerEntities.computeIfAbsent(player.id(), id -> new LogicEntity(this, -1, null));
+        if (actor instanceof PlayerActor player) return playerEntities.computeIfAbsent(player.id(), id -> new LookEntities.Player(this, id));
         return null;
     }
 
@@ -448,6 +457,34 @@ public final class MapLogic {
     }
 
     LogicEntity entity(int index) { return index >= 0 && index < entities.size() ? entities.get(index) : null; }
+
+    /** The controllers {@code player} follows. */
+    dev.theredja.src2mc.world.LookState.Player lookPlayer(UUID player) { return view().of(player); }
+
+    void setLookPlayer(UUID player, dev.theredja.src2mc.world.LookState.Player controllers) { lookPlayers.put(player, controllers); }
+
+    /** What the map's view entities network, for {@link LookSync}. */
+    dev.theredja.src2mc.world.LookState.View view() {
+        List<dev.theredja.src2mc.world.LookState.Tonemap> tonemaps = new ArrayList<>();
+        List<dev.theredja.src2mc.world.LookState.Fog> fogs = new ArrayList<>();
+        List<dev.theredja.src2mc.world.LookState.Correction> corrections = new ArrayList<>();
+        int masterFog = -1, masterTonemap = -1;
+        for (LogicEntity entity : entities) {
+            if (entity.removed) continue;
+            if (entity instanceof LookEntities.Tonemap tonemap) {
+                tonemaps.add(tonemap.lookState());
+                // CTonemapSystem/CFogSystem::LevelInitPostEntity: the first, or the last flagged master.
+                if (masterTonemap < 0 || entity.hasSpawnFlags(1)) masterTonemap = entity.index;
+            } else if (entity instanceof LookEntities.Fog fog) {
+                fogs.add(fog.lookState());
+                if (masterFog < 0 || entity.hasSpawnFlags(1)) masterFog = entity.index;
+            } else if (entity instanceof LookEntities.ColorCorrection correction) {
+                corrections.add(correction.lookState());
+            }
+        }
+        return new dev.theredja.src2mc.world.LookState.View(List.copyOf(tonemaps), tonemapInUse, tonemapRate, List.copyOf(fogs),
+            masterFog, masterTonemap, List.copyOf(corrections), Map.copyOf(lookPlayers));
+    }
 
     double time() { return time; }
 
@@ -648,6 +685,17 @@ public final class MapLogic {
             events.add(item);
         }
         tag.put("events", events);
+        tag.putFloat("tonemap_rate", tonemapRate);
+        tag.putInt("tonemap_in_use", tonemapInUse);
+        ListTag looks = new ListTag();
+        for (Map.Entry<UUID, dev.theredja.src2mc.world.LookState.Player> look : lookPlayers.entrySet()) {
+            CompoundTag item = new CompoundTag();
+            item.putUUID("player", look.getKey());
+            item.putInt("fog", look.getValue().fog());
+            item.putInt("tonemap", look.getValue().tonemap());
+            looks.add(item);
+        }
+        tag.put("look_players", looks);
         return tag;
     }
 
@@ -706,6 +754,12 @@ public final class MapLogic {
                 item.contains("caller") ? entity(item.getInt("caller")) : null);
         }
         for (LogicEntity entity : entities) if (entity instanceof SoundEntities.Synced) soundChanges.add(entity.index);
+        if (tag.contains("tonemap_rate")) tonemapRate = tag.getFloat("tonemap_rate");
+        tonemapInUse = tag.contains("tonemap_in_use") ? tag.getInt("tonemap_in_use") : -1;
+        for (Tag value : tag.getList("look_players", Tag.TAG_COMPOUND)) {
+            CompoundTag item = (CompoundTag) value;
+            lookPlayers.put(item.getUUID("player"), new dev.theredja.src2mc.world.LookState.Player(item.getInt("fog"), item.getInt("tonemap")));
+        }
         return true;
     }
 

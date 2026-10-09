@@ -97,6 +97,7 @@ public final class ParticleRenderer {
         RenderSystem.enableDepthTest();
         RenderSystem.disableCull();
         shader.safeGetUniform("ParticleExposure").set(dev.theredja.src2mc.client.render.BakedLighting.currentExposure());
+        dev.theredja.src2mc.client.look.LookClient.applyFog(shader);
         int previousTexture = RenderSystem.getShaderTexture(0);
         try {
             for (Draw draw : sorted) {

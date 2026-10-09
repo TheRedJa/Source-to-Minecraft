@@ -32,6 +32,9 @@ final class BundleLimits {
     static final int MAX_SKYBOX_PAGE = 4096;
     static final long MAX_LIGHT_BYTES = 1024L * 1024 * 1024;
     public static final int MAX_LIGHT_PAGES = 64;
+    /** Colour lookups one map's look table may hold; Source blends four at a time. */
+    public static final int MAX_LOOK_LOOKUPS = 256;
+    public static final int MAX_LOOK_NAME_BYTES = 1024;
     static final int MAX_LIGHT_PAGE = 4096;
     static final int MAX_AMBIENT_NODES = 4_000_000;
     static final int MAX_AMBIENT_SAMPLES = 4_000_000;

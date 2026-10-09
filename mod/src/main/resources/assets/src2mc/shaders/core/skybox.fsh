@@ -27,7 +27,7 @@ void main() {
     vec3 color = pow(albedo.rgb, vec3(2.2)) * Tint * light * Exposure;
     if (SkyFogRange.y > SkyFogRange.x) {
         float fog = min(SkyFogRange.z, clamp((viewDepth - SkyFogRange.x) / (SkyFogRange.y - SkyFogRange.x), 0.0, 1.0));
-        color = mix(color, SkyFogColor, fog * fog);
+        color = mix(color, SkyFogColor * Exposure, fog * fog);
     }
     fragColor = vec4(pow(max(color, vec3(0.0)), vec3(1.0 / 2.2)), albedo.a);
 }

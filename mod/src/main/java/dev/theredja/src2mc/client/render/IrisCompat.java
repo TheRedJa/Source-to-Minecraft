@@ -129,7 +129,7 @@ public final class IrisCompat {
 
     private IrisCompat() {}
 
-    static boolean shaderPackInUse() {
+    public static boolean shaderPackInUse() {
         if (GET_INSTANCE == null) return false;
         try {
             Object instance = GET_INSTANCE.invoke();

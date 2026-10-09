@@ -133,6 +133,8 @@ pub struct MapExport {
     /// The map's particle systems (format section 23); absent when it has
     /// none and its impacts draw nothing.
     pub particles: Option<crate::output::particles::ParticleTable>,
+    /// The map's HDR flag and colour lookups (format section 24).
+    pub look: crate::output::look::LookTable,
     pub diagnostics: metadata::Diagnostics,
 }
 
@@ -410,6 +412,7 @@ pub fn from_conversion(
             &decoder,
         )
     };
+    let (look, look_diagnostics) = crate::output::look::collect(map, &particle_vfs);
     drop(particle_vfs);
     crate::timing::mark("export: particles");
     let skybox_diagnostics = skybox
@@ -990,6 +993,7 @@ pub fn from_conversion(
     }
     diagnostics.extend(skybox_diagnostics);
     diagnostics.extend(particle_diagnostics);
+    diagnostics.extend(look_diagnostics);
     crate::timing::mark("export: sky");
     Ok(MapExport {
         map_id: portable_id(&map.name),
@@ -1018,6 +1022,7 @@ pub fn from_conversion(
             atlas: light_atlas,
         }),
         particles,
+        look,
         diagnostics: metadata::Diagnostics::new(diagnostics)?,
     })
 }
@@ -2099,6 +2104,7 @@ pub fn write_campaign(
         if let Some(particles) = &map.particles {
             archive.add(format!("{prefix}/particles.json"), particles.encode()?)?;
         }
+        archive.add(format!("{prefix}/look.s2look"), map.look.encode())?;
         let has_movers = !map.movers.is_empty();
         if has_movers {
             use crate::output::movers;
@@ -2283,6 +2289,7 @@ pub fn write_campaign(
             skybox: has_skybox.then(|| format!("{prefix}/skybox.s2box")),
             light: has_light.then(|| format!("{prefix}/light.s2light")),
             particles: has_particles.then(|| format!("{prefix}/particles.json")),
+            look: Some(format!("{prefix}/look.s2look")),
             diagnostics: format!("{prefix}/diagnostics.json"),
         };
         archive.add(&metadata_path, meta.encode()?)?;
@@ -2454,6 +2461,7 @@ mod tests {
             skybox: None,
             light: None,
             particles: None,
+            look: crate::output::look::LookTable { hdr: false, post: Default::default(), lookups: Default::default() },
             props: vec![Prop {
                 source_ordinal: 0,
                 source_model: source_model.into(),
@@ -2775,7 +2783,7 @@ mod tests {
             meta.contains(r#""materials":[0],"color":[200,10,10]"#),
             "{meta}"
         );
-        assert!(meta.contains(r#""logic_props":"maps/map/logic_props.json","diagnostics""#));
+        assert!(meta.contains(r#""logic_props":"maps/map/logic_props.json","look":"maps/map/look.s2look","diagnostics""#));
         let id: String = stable_prop_id("map", 1, "models/b.mdl")
             .unwrap()
             .iter()
@@ -2950,7 +2958,7 @@ mod tests {
         };
         let meta = read("maps/map.json");
         assert!(
-            meta.contains(r#""movers":"maps/map/movers.json","diagnostics""#),
+            meta.contains(r#""movers":"maps/map/movers.json","look":"maps/map/look.s2look","diagnostics""#),
             "{meta}"
         );
         let table = read("maps/map/movers.json");

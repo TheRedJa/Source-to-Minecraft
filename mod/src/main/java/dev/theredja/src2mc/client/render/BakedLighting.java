@@ -12,6 +12,7 @@ import dev.theredja.src2mc.bundle.LightTable;
 import dev.theredja.src2mc.bundle.SurfaceTable;
 import java.io.IOException;
 import java.nio.FloatBuffer;
+import dev.theredja.src2mc.client.look.SourcePost;
 import java.util.IdentityHashMap;
 import java.util.Map;
 import net.minecraft.client.renderer.ShaderInstance;
@@ -65,18 +66,18 @@ public final class BakedLighting {
         .build();
 
     private static ShaderInstance shader;
-    /** Source's tone map scale, which its auto exposure moves; by hand here, 1 by default. */
-    private static float exposure = 1.0f;
     /** The map's lightmap pages, one texture each map, stacked; keyed by identity. */
     private static final Map<LightTable, Integer> TEXTURES = new IdentityHashMap<>();
     private static int white = -1;
 
-    static float exposure() { return exposure; }
+    /** Source's tone map scale, which its auto exposure moves ({@link SourcePost}); 1 outside a map. */
+    static float exposure() { return SourcePost.scale(); }
 
     /** For the particle renderer, outside this package. */
-    public static float currentExposure() { return exposure; }
+    public static float currentExposure() { return SourcePost.scale(); }
 
-    static void setExposure(float value) { exposure = value; }
+    /** Holds the scale by hand, as {@code mat_force_tonemap_scale}; 0 gives it back to the auto exposure. */
+    static void setExposure(float value) { SourcePost.force(value); }
 
     static ShaderInstance shader() { return shader; }
 
@@ -177,7 +178,8 @@ public final class BakedLighting {
      */
     static ShaderInstance prepare(LightTable table, BundleMaterial.RenderClass renderClass, float[] cube, Matrix3f normalTurn) {
         RenderSystem.setShaderTexture(3, table == null ? white() : texture(table));
-        shader.safeGetUniform("Exposure").set(exposure);
+        shader.safeGetUniform("Exposure").set(exposure());
+        dev.theredja.src2mc.client.look.LookClient.applyFog(shader);
         // Vanilla's entity cut-out and translucent shaders cut below 0.1; solid cuts nothing.
         shader.safeGetUniform("Cutout").set(renderClass == BundleMaterial.RenderClass.SOLID ? -1f : 0.1f);
         shader.safeGetUniform("NormalTurn").set(normalTurn == null ? new Matrix3f() : normalTurn);
@@ -286,13 +288,13 @@ public final class BakedLighting {
     }
 
     private static int setExposure(CommandSourceStack source, float value) {
-        exposure = value;
-        source.sendSuccess(() -> Component.literal("src2mc baked light exposure " + value), false);
+        setExposure(value);
+        source.sendSuccess(() -> Component.literal("src2mc baked light exposure held at " + value + " (/src2mc_look scale auto releases it)"), false);
         return 1;
     }
 
     private static int status(CommandSourceStack source) {
-        String text = "src2mc baked light: " + (shader == null ? "shader not loaded" : "shader loaded") + ", exposure " + exposure
+        String text = "src2mc baked light: " + (shader == null ? "shader not loaded" : "shader loaded") + ", exposure " + exposure()
             + ", " + TEXTURES.size() + " lightmap texture(s)"
             + (IrisCompat.shaderPackInUse() ? "; a shader pack is in use, which does not draw it" : "");
         source.sendSuccess(() -> Component.literal(text), false);

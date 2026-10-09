@@ -116,6 +116,9 @@ pub struct MapMetadata {
     /// Optional particle systems (section 23).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub particles: Option<String>,
+    /// Optional HDR flag and colour lookups (section 24).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub look: Option<String>,
     pub diagnostics: String,
 }
 
@@ -613,6 +616,7 @@ mod tests {
             skybox: None,
             light: None,
             particles: None,
+            look: None,
             diagnostics: "maps/d1_01/diagnostics.json".into(),
         };
         let value: serde_json::Value =

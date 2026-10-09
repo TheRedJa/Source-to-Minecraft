@@ -1108,3 +1108,52 @@ and client effect code.
   `env_steam`, `env_fire`, `env_smokestack`, `func_dustmotes`); decals on
   props; `DmeParticleSystemDefinition` attributes the mod does not read
   (bounding boxes, view-model and low-detail fallbacks).
+
+## D30 — The view is post-processed as the game's engine does it
+
+The user asked for "Sources shaders, bloom, \"hdr\" ... all these effects that
+source maps have and that actually gives that source vibe". The first stage is
+the screen: fog, auto exposure, bloom, colour correction, and the vignette.
+Every rule below was read from the public SDK 2013 and Alien Swarm sources and
+checked against the games' own binaries; where the two branches differ, the
+converter records which one the game is (format section 24).
+
+- **Map state.** `env_tonemap_controller`, `env_fog_controller` and
+  `color_correction` run in the map's logic and take its inputs: exposure
+  range, bloom scale, tonemap rate, fog distances, colours and transitions,
+  `SetFogController` on the player, colour correction fades. The server sends
+  each running map's view state to the players of its dimension when it
+  changes, with the map's clock, so a fog transition runs on the client from
+  where the server's is. A map whose logic is not running looks as its
+  entities spawn.
+- **Fog.** The camera's map's fog is Source's range fog: on view depth,
+  `min(maxdensity, (depth - start) / (end - start))`, the factor squared, the
+  colour in linear light times the tone map scale. The primary and secondary
+  colours blend by the view direction with `fogblend`; a change of
+  controller blends over the new one's duration. Minecraft's own things fog at
+  the same range.
+- **Auto exposure.** As `CTonemapSystem` does: a 17-bucket luminance histogram
+  of the frame's centre, one occlusion query a frame, read two frames later;
+  the scale that puts 2% of the pixels at 60% brightness (algorithm 1),
+  clamped to the controller's range (default 0.5 to 2), averaged over ten
+  frames and chased at the map's rate, faster going down. The histogram
+  measures the luminance of the stored gamma values. `dev/lumcompare` asks
+  for an sRGB read, which would measure linear light, but with linear light
+  the 3% minimum average holds the furnace hall near scale 2 where INFRA
+  settles near 1 (user's side-by-side check, 2026-10-09); gamma values
+  reproduce INFRA. `/src2mc_look measure linear` switches back for comparison. Every lit surface, the 3D
+  skybox and particles are drawn at that scale. A new map starts at 1.
+- **Bloom.** Only maps with HDR light bloom, by the amount the controller
+  sets, eased each frame. Quarter-size downsample, blur across, blur down,
+  added to the frame: SDK 2013 games (HL2, Portal) with its cross filter and
+  its Y-blur step bug, the later branch with its `$kernel` and bloom type.
+- **Colour correction.** Up to four lookups by weight, each a 32³ texture,
+  weighted by its fade and its falloff from the player, normalised when they
+  add up past 1, as the material system's `GetNormalizedWeights` does.
+- **Vignette.** Drawn where the game's `dev/engine_post` turns it on
+  unconditionally (Portal 2); INFRA ties it to a ConVar that is off.
+- **Where.** After the world and hand, before the GUI, as
+  `CViewRender::RenderView` runs `DoEnginePostProcessing` after the view
+  models. A shader pack skips it. `/src2mc_look` switches each part off and
+  shows what the camera's map makes of its view.
+

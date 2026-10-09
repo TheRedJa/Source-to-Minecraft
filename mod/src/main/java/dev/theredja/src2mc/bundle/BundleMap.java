@@ -36,8 +36,20 @@ public record BundleMap(
     // The map's baked light; null when it was exported without it.
     LightTable light,
     // The map's particle systems; null when it has none.
-    ParticleTable particles
+    ParticleTable particles,
+    // The map's HDR flag and colour lookups; null when it was exported without them.
+    LookTable look
 ) {
+    public BundleMap(String mapId, String sourceName, int[] cellMin, int[] cellMax, int[] anchorCell,
+                     java.util.List<BundleMaterial> materials, java.util.List<BundleModel> models,
+                     java.util.List<BundleProp> props, boolean exceedsVanillaBuildHeight, SurfaceTable surfaces,
+                     java.util.Set<String> modelContentIds, AtlasIndex atlas, PropVisibility pvs,
+                     OcclusionTable occlusion, CollisionTable collision, AudioTable audio, LogicTable logic, MoverTable movers,
+                     LogicPropTable logicProps, SkyTable sky, SkyboxTable skybox, LightTable light, ParticleTable particles) {
+        this(mapId, sourceName, cellMin, cellMax, anchorCell, materials, models, props, exceedsVanillaBuildHeight,
+            surfaces, modelContentIds, atlas, pvs, occlusion, collision, audio, logic, movers, logicProps, sky, skybox, light, particles, null);
+    }
+
     public BundleMap(String mapId, String sourceName, int[] cellMin, int[] cellMax, int[] anchorCell,
                      java.util.List<BundleMaterial> materials, java.util.List<BundleModel> models,
                      java.util.List<BundleProp> props, boolean exceedsVanillaBuildHeight, SurfaceTable surfaces,
@@ -45,7 +57,7 @@ public record BundleMap(
                      OcclusionTable occlusion, CollisionTable collision, AudioTable audio, LogicTable logic, MoverTable movers,
                      LogicPropTable logicProps, SkyTable sky, SkyboxTable skybox, LightTable light) {
         this(mapId, sourceName, cellMin, cellMax, anchorCell, materials, models, props, exceedsVanillaBuildHeight,
-            surfaces, modelContentIds, atlas, pvs, occlusion, collision, audio, logic, movers, logicProps, sky, skybox, light, null);
+            surfaces, modelContentIds, atlas, pvs, occlusion, collision, audio, logic, movers, logicProps, sky, skybox, light, null, null);
     }
 
     public BundleMap(String mapId, String sourceName, int[] cellMin, int[] cellMax, int[] anchorCell,

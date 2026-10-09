@@ -1,6 +1,68 @@
 # src2mc implementation handoff
 
-Updated: 2026-10-08 (Europe/Berlin), DEV-0.40.0 user-confirmed and committed
+Updated: 2026-10-09 (Europe/Berlin), Source look stage 1 DEV-0.41.2 USER-CONFIRMED 2026-10-09 (uncommitted); next stage 2 surfaces
+
+User test 3 (DEV-0.41.2): hall darkens when looking at the patch, "looks perfect now"; brightens
+again in the dark; basement good. Stage 1 done.
+
+User test 2 (DEV-0.41.1): banding gone, no grain; basement good; hall still too bright, never
+darkens; INFRA side-by-side = ours at scale 1 + bloom on. Hall status: 2% at 0.759, half at 0.0309
+LINEAR -> min-avglum term (0.03/0.0309) pins target ~2. INFRA client.dll defaults identical (3.0,
+60, 2, algo 1, rate 1, region 0.9). Fixed-point argument: same algorithm + same image cannot settle
+at 1, so measurement differs -> DEV-0.41.2 measures gamma values (predicted hall equilibrium ~1,
+basement still 4); `/src2mc_look measure linear|gamma` toggle; D30 updated.
+
+User test 1 (DEV-0.41.0): CC + vignette "very very close to real game"; fog good but banding where
+fog meets walls in dark areas (sp_a3_01); no fps cost; furnace too bright at spots, bloom just white,
+no visible exposure change (status: hall scale 2.0 target 1.5, basement scale 4 target 30, range
+1..4 bloom 2). Furnace tonemap I/O: logic_auto 1..4 bloom 1 rate 0.1; trigger_multiple (906,4273)
+and (316,4844) -> 0.5..2 bloom 1; (702,4102) and (316,4884) -> 1..4 bloom 2/1. DEV-0.41.1: histogram
+queries drew into the frame copy's own FBO while sampling it (GL feedback loop, undefined) -> now
+main FBO; status prints histogram %/2%/50% locations; IGN dither 0.5/255 in baked.fsh (in-map)
+and combine.fsh. Open: is light at scale 1 right (user confirmed at exposure 1 before), bloom white.
+
+## DONE: Source look, stage 1 "screen" (fog, auto exposure, bloom, colour correction, vignette) -- D30, format section 24
+
+User decisions 2026-10-09 (memory next-task-source-look): stages 1 screen, 2 surfaces, 3 models,
+4 glass+water (water = cubemap only), 5 sprites; env_projectedtexture later.
+
+References (verified): SDK 2013 clone /tmp/sdk2013/repo (viewpostprocess.cpp, stdshaders), Alien
+Swarm SDK clone /tmp/asw/repo (= INFRA/Portal 2 branch; cleaned copies /tmp/asw/vpp.cpp,
+tonemap_server.cpp, tonemap_client.cpp). /tmp may be gone: re-clone (sparse) if needed. grep is
+ugrep: use grep -a on Valve sources. Disassembly helpers /tmp/tools/{macho.py,annot.py,vpkcat.py}.
+Verified facts: exposure chase identical in INFRA client.dylib (CTonemapSystem) and HL2
+MaterialSystem.dll (rate x2 for algorithm 1, accelerate-down 3 with /1.5 term, step capped 1/64,
+10-sample weighted average); defaults min 0.5 max 2 target 60% bright 2% minavg 3%; fog colour in
+shaders = GammaToLinear(colour) x tonemap scale (INFRA shaderapidx9 ComputeGammaCorrectedFogColor);
+CC weights: top 4, sum > 0.999 normalises, else default 1-sum (INFRA materialsystem); mat_colorcorrection
+on at DX9 levels; bloom: SDK 2013 shapes each tap, cross blur, BlurFilterY steps by WIDTH (bug);
+AS branch shapes the average ($bloomtype 0), $kernel 4 Gaussian; Portal 2 engine_post vignette on
+(dev/vignette red*0.55+0.46), INFRA gates it by mat_vignette_enable (0); local contrast/noise/AA off.
+Histogram reads the frame sRGB-decoded (dev/lumcompare = screenspace_general without
+$linearread_basetexture -> EnableSRGBRead true); downsample/blur/engine_post read gamma on PC
+(sRGB only forced on OSX). Post runs after view models (RenderView: DrawViewModels then
+DoEnginePostProcessing).
+
+Built:
+- Converter src/output/look.rs: maps/<id>/look.s2look (format section 24); metadata `look`.
+- Mod: bundle/LookTable + validator; world/LookState (+ LookStateTest); logic/LookEntities, LookSync
+  (protocol "12"); client/look/LookClient (per-frame Frame; fog uniforms applyFog; vanilla fog via
+  ViewportEvent.RenderFog/ComputeFogColor), SourcePost (histogram, chase, bloom, combine; raw GL,
+  state restored), LookCommands (/src2mc_look on|off, bloom|exposure|correction|vignette|fog on|off,
+  scale <x>|auto, status; logout clear); mixin/GameRendererLookMixin (LookClient.update after
+  Camera.setup in renderLevel; SourcePost.afterLevel after renderLevel in render).
+- BakedLighting exposure = SourcePost.scale(); /src2mc_light exposure and /src2mc_sky exposure now
+  hold the scale (SourcePost.force). Bundle reload clears look textures + INITIAL views.
+- Shaders: baked/particle use SourceFog (start,end,maxDensity,mode 0 MC/1 Source/2 none) +
+  SourceFogColor (linear, x Exposure in shader), view depth; skybox fog colour now x Exposure;
+  post/lumcompare linearises (pow 2.2).
+- Tests: Rust 625 pass, clippy 17 (baseline), mod 157 pass; all 10 maps re-exported
+  (/tmp/export_all.sh -> target/sky-test/) and installed; each validated (BundleValidatorTest +
+  LogicRuntimeTest with -Dsrc2mc.testBundle, 0 failures).
+
+Open / not done: 2D sky (sky.fsh) not tone-mapped (Source HDR skies are; check later, affects
+bloom from sky); MC's vanilla fog cannot do max density; screen fade overlay draws after post
+here (Source: before). Nothing verified in game yet.
 
 ## DONE: re-parented props (DEV-0.39.0 lift, DEV-0.40.0 carried collision) -- user-confirmed 2026-10-08 -- furnace crane lifts the crucible
 

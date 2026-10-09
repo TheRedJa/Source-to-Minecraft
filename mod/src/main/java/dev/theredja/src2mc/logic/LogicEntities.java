@@ -42,6 +42,9 @@ final class LogicEntities {
             case "func_door", "func_door_rotating", "func_movelinear", "infra_button", "prop_door_rotating" -> new Movers.Door(map, index, entity);
             case "game_text" -> new ScreenEffects.GameText(map, index, entity);
             case "env_fade" -> new ScreenEffects.Fade(map, index, entity);
+            case "env_tonemap_controller" -> new LookEntities.Tonemap(map, index, entity);
+            case "env_fog_controller" -> new LookEntities.Fog(map, index, entity);
+            case "color_correction" -> new LookEntities.ColorCorrection(map, index, entity);
             case "env_shake" -> new ScreenEffects.Shake(map, index, entity);
             case "info_particle_system" -> new EffectEntities.ParticleSystem(map, index, entity);
             case "env_spark" -> new EffectEntities.Spark(map, index, entity);

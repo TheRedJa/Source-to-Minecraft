@@ -64,6 +64,7 @@ public final class LogicSystem {
                 OCCUPIED.put(logic, !inside.isEmpty());
                 if (ticking && !inside.isEmpty()) logic.tick(level, inside);
                 PropSync.update(level, logic);
+                LookSync.update(level, logic);
                 LogicNetwork.Update update = logic.drainUpdate(false);
                 if (!update.isEmpty()) send(level, logic, update, false);
                 if (logic.dirty()) data.setDirty();
@@ -125,6 +126,7 @@ public final class LogicSystem {
         RUNNING.clear();
         dev.theredja.src2mc.world.PropStates.clear(false);
         PropSync.clear();
+        LookSync.clear();
         OCCUPIED.clear();
         generationSequence = -1;
     }
@@ -167,6 +169,7 @@ public final class LogicSystem {
         LogicSavedData data = LogicSavedData.get(level);
         boolean had = logic != null | data.pending().remove(placement.anchorWorld().asLong()) != null;
         if (logic != null) OCCUPIED.remove(logic);
+        if (logic != null) LookSync.forget(level, logic);
         data.setDirty();
         PacketDistributor.sendToPlayersInDimension(level, new LogicNetwork.SyncPayload(level.dimension().location(),
             placement.anchorWorld().asLong(), false, true, List.of(), List.of(), List.of()));

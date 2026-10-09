@@ -26,7 +26,8 @@ public final class PlacementNetwork {
         // "9": prop states carry an animated prop's sequence and the map's clock.
         // "10": movers name the bundle mover they carry apart from their entity; prop mounts.
         // "11": bullet and projectile impacts.
-        var registrar = event.registrar("11");
+        // "12": the view state of fog, tonemap and colour correction entities.
+        var registrar = event.registrar("12");
         registrar.playToClient(PlacementSyncPayload.TYPE, PlacementSyncPayload.STREAM_CODEC,
             (payload, context) -> {
                 PlacementIndex index = new PlacementIndex();
@@ -42,6 +43,7 @@ public final class PlacementNetwork {
         dev.theredja.src2mc.logic.MoverNetwork.register(registrar);
         dev.theredja.src2mc.logic.PropSync.register(registrar);
         dev.theredja.src2mc.logic.ScreenEffects.register(registrar);
+        dev.theredja.src2mc.logic.LookSync.register(registrar);
         dev.theredja.src2mc.world.ImpactNetwork.register(registrar);
     }
 

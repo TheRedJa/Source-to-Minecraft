@@ -18,7 +18,19 @@ uniform float ParticleBlendFrames;
 uniform float ParticleMaxLum;
 uniform float ParticleAdditive;
 
+// Source's range fog (D30), when SourceFog.w is 1: on view depth, capped at the maximum density,
+// the factor squared (BlendPixelFog); the colour in linear light times the tone map scale.
+// SourceFog.w 2: the map has no fog; 0: Minecraft's.
+uniform vec4 SourceFog;
+uniform vec3 SourceFogColor;
+
+float source_fog(float depth) {
+    float f = min(SourceFog.z, clamp((depth - SourceFog.x) / (SourceFog.y - SourceFog.x), 0.0, 1.0));
+    return f * f;
+}
+
 in float vertexDistance;
+in float viewDepth;
 in vec4 vertexColor;
 in vec2 texCoord0;
 in vec3 frame1;
@@ -48,6 +60,12 @@ void main() {
         if (blended.a <= 0.01) discard;
     }
     blended.rgb *= ParticleExposure;
+    if (SourceFog.w > 0.5) {
+        // Additive sprites fog to black, as Source draws them with FogToBlack.
+        if (SourceFog.w < 1.5) blended.rgb = mix(blended.rgb, ParticleAdditive > 0.5 ? vec3(0.0) : SourceFogColor * ParticleExposure, source_fog(viewDepth));
+        fragColor = vec4(pow(max(blended.rgb, vec3(0.0)), vec3(1.0 / 2.2)), blended.a);
+        return;
+    }
     vec3 color = pow(max(blended.rgb, vec3(0.0)), vec3(1.0 / 2.2));
     float fog = clamp((vertexDistance - FogStart) / max(FogEnd - FogStart, 1e-4), 0.0, 1.0);
     if (ParticleAdditive > 0.5) {
