@@ -1,6 +1,6 @@
 # src2mc implementation handoff
 
-Updated: 2026-10-10 (Europe/Berlin), stage 1 committed (33b1018); stage 2a+2b confirmed (uncommitted); stage 2 (2a-2c) USER-CONFIRMED DEV-0.45.0 2026-10-10, not committed
+Updated: 2026-10-10 (Europe/Berlin), stage 1 committed (33b1018); stage 2a+2b confirmed (uncommitted); stage 2 (2a-2c) USER-CONFIRMED DEV-0.45.0, committed 12ab766 + pushed 2026-10-10
 
 ## IN PROGRESS: Source look, stage 2 "surfaces" -- D31
 
@@ -82,7 +82,7 @@ with $selfillummask/$selfillumfresnel), standalone_material sets it (+ base_alph
 mod: PropTessellator.Triangle.row, PackedVertices.row()/rows kept through setLight, set in
 PropRenderer, LogicPropRenderer, MoverRenderer, AnimatedPropRenderer. Furnace 47 selfillum mats.
 User 2026-10-10: box + prop glow "all looks good" -> STAGE 2 CONFIRMED.
-NEXT: commit stage 2 when user asks, then stage 3 (models: phong, rimlight, world lights).
+NEXT: stage 3 (models: phong, rimlight, world lights).
 Next after: 2c selfillum, detail, WVT blend.
 
 User test 3 (DEV-0.41.2): hall darkens when looking at the patch, "looks perfect now"; brightens
