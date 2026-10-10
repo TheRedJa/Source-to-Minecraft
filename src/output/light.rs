@@ -32,18 +32,40 @@ pub struct Page {
 #[derive(Debug, Clone, Default)]
 pub struct Atlas {
     pub pages: Vec<Page>,
-    /// Per face, its page and the page position of its first luxel.
-    placed: HashMap<usize, (u32, usize, usize)>,
+    /// Per face, its page, the page position of its first luxel, and for a
+    /// bump-mapped face the luxels from one of its lightmaps to the next.
+    placed: HashMap<usize, (u32, usize, usize, usize)>,
 }
 
 impl Atlas {
     /// Packs the static lightmap of each of `faces` that has one. Tallest
     /// first, so shelves fill evenly; ties by size, then face, so the pages are
-    /// the same for the same map.
+    /// the same for the same map. A bump-mapped face's three bump lightmaps
+    /// sit to the right of its flat one, each with its own border, as Source's
+    /// lightmap pages lay them out.
     pub fn build(light: &BakedLight, faces: &BTreeSet<usize>) -> Result<Atlas> {
-        let mut maps: Vec<(usize, crate::bsp::lighting::RawLightmap)> = faces
+        struct Packed<'a> {
+            width: usize,
+            height: usize,
+            maps: Vec<&'a [u8]>,
+        }
+        let mut maps: Vec<(usize, Packed)> = faces
             .iter()
-            .filter_map(|&face| Some((face, light.raw_lightmap(face)?)))
+            .filter_map(|&face| {
+                let flat = light.raw_lightmap(face)?;
+                let mut all = vec![flat.luxels];
+                if let Some(bump) = light.raw_bump_lightmaps(face) {
+                    all.extend(bump);
+                }
+                Some((
+                    face,
+                    Packed {
+                        width: flat.width,
+                        height: flat.height,
+                        maps: all,
+                    },
+                ))
+            })
             .collect();
         maps.sort_by(|(fa, a), (fb, b)| {
             b.height
@@ -53,12 +75,12 @@ impl Atlas {
         });
         let area: usize = maps
             .iter()
-            .map(|(_, m)| (m.width + 2 * BORDER) * (m.height + 2 * BORDER))
+            .map(|(_, m)| m.maps.len() * (m.width + 2 * BORDER) * (m.height + 2 * BORDER))
             .sum();
         // Square-ish pages, never narrower than the widest lightmap.
         let widest = maps
             .iter()
-            .map(|(_, m)| m.width + 2 * BORDER)
+            .map(|(_, m)| m.maps.len() * (m.width + 2 * BORDER))
             .max()
             .unwrap_or(1);
         let width = ((area as f64 * 1.1).sqrt().ceil() as usize)
@@ -67,7 +89,8 @@ impl Atlas {
         let mut atlas = Atlas::default();
         let (mut x, mut y, mut shelf) = (0usize, 0usize, 0usize);
         for (face, map) in maps {
-            let (w, h) = (map.width + 2 * BORDER, map.height + 2 * BORDER);
+            let stride = map.width + 2 * BORDER;
+            let (w, h) = (map.maps.len() * stride, map.height + 2 * BORDER);
             ensure!(
                 w <= MAX_PAGE && h <= MAX_PAGE,
                 "lightmap of face {face} exceeds a page"
@@ -93,17 +116,21 @@ impl Atlas {
                 page.height = y + h;
                 page.luxels.resize(width * page.height, [0; 4]);
             }
-            let luxels = map.luxels.as_chunks::<4>().0;
-            for row in 0..h {
-                for column in 0..w {
-                    let sx = column.saturating_sub(BORDER).min(map.width - 1);
-                    let sy = row.saturating_sub(BORDER).min(map.height - 1);
-                    page.luxels[(y + row) * width + x + column] = luxels[sy * map.width + sx];
+            for (index, source) in map.maps.iter().enumerate() {
+                let luxels = source.as_chunks::<4>().0;
+                for row in 0..h {
+                    for column in 0..stride {
+                        let sx = column.saturating_sub(BORDER).min(map.width - 1);
+                        let sy = row.saturating_sub(BORDER).min(map.height - 1);
+                        page.luxels[(y + row) * width + x + index * stride + column] =
+                            luxels[sy * map.width + sx];
+                    }
                 }
             }
+            let bump = if map.maps.len() > 1 { stride } else { 0 };
             atlas
                 .placed
-                .insert(face, (page_index as u32, x + BORDER, y + BORDER));
+                .insert(face, (page_index as u32, x + BORDER, y + BORDER, bump));
             x += w;
             shelf = shelf.max(h);
         }
@@ -113,7 +140,7 @@ impl Atlas {
     /// Where `light` lands on the pages: its luxel map moved to its face's
     /// place and divided by the page size. `None` for a face not packed.
     pub fn region(&self, light: &FaceLight) -> Option<LightRegion> {
-        let &(page, x, y) = self.placed.get(&light.face)?;
+        let &(page, x, y, bump) = self.placed.get(&light.face)?;
         let size = &self.pages[page as usize];
         let (w, h) = (size.width as f64, size.height as f64);
         let mut st = light.luxel;
@@ -125,7 +152,11 @@ impl Atlas {
             *value /= h;
         }
         st.v[3] = (st.v[3] + y as f64) / h;
-        Some(LightRegion { page, st })
+        Some(LightRegion {
+            page,
+            st,
+            bump: bump as f64 / w,
+        })
     }
 }
 
@@ -325,7 +356,7 @@ mod tests {
             height: 32,
             luxels: vec![[0; 4]; 64 * 32],
         });
-        atlas.placed.insert(7, (0, 10, 4));
+        atlas.placed.insert(7, (0, 10, 4, 6));
         let light = FaceLight {
             face: 7,
             luxel: BlockTexCoord {
@@ -338,6 +369,8 @@ mod tests {
         assert!((region.st.u[3] - 10.5 / 64.0).abs() < 1e-12);
         assert!((region.st.v[3] - 4.5 / 32.0).abs() < 1e-12);
         assert!((region.st.u[0] - 2.0 / 64.0).abs() < 1e-12);
+        // Bump lightmaps one flat lightmap plus its border further right each.
+        assert!((region.bump - 6.0 / 64.0).abs() < 1e-12);
         assert!(atlas.region(&FaceLight { face: 8, ..light }).is_none());
     }
 }

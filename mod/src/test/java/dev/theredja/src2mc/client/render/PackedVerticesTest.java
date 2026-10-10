@@ -41,4 +41,18 @@ class PackedVerticesTest {
         assertEquals(3000, out.distinctVertices());
         for (int i = 0; i < 3000; i++) assertEquals(out.remapped(i), out.remapped(i + 3000));
     }
+
+    @Test
+    void aMaterialRowStaysInSkyLightsPlaceThroughRelighting() {
+        PackedVertices vertices = new PackedVertices();
+        vertices.add(0, 0, 0, 0, 0, 0, 1, 0, 0x00F0_0070);
+        vertices.row(0xFFF6);
+        vertices.add(1, 0, 0, 0, 0, 0, 1, 0, 0x00F0_0070);
+        assertEquals(0x00F0_0070, vertices.light(0));
+        assertEquals(0xFFF6_0070, vertices.light(1));
+        vertices.setLight(0, 0x00F0_0030);
+        vertices.setLight(1, 0x00F0_0030);
+        assertEquals(0x00F0_0030, vertices.light(0));
+        assertEquals(0xFFF6_0030, vertices.light(1));
+    }
 }

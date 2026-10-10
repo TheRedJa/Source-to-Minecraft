@@ -52,14 +52,39 @@ public final class AtlasPageResidency implements AutoCloseable {
     private long decodeFailures;
     private final List<PageKey> readyPages = new ArrayList<>();
     private DynamicTexture placeholderTexture;
+    private DynamicTexture flatBumpTexture;
+
+    /** Set in a key's page for the page's bump layer. */
+    static final int BUMP_LAYER = 1 << 30;
+    /** Set in a key's page for the page's blend layer. */
+    static final int BLEND_LAYER = 1 << 29;
 
     /** Marks a page needed this frame and returns its texture once uploaded. */
     public Optional<ResourceLocation> request(long generation, BundleManifest bundle, AtlasIndex atlas,
                                                int page, long frame) {
+        return request(generation, bundle, atlas, page, frame, 0);
+    }
+
+    /** The page's bump layer, as {@link #request}; empty when no texture on the page has one. */
+    public Optional<ResourceLocation> requestBump(long generation, BundleManifest bundle, AtlasIndex atlas,
+                                                   int page, long frame) {
+        if (page < 0 || page >= atlas.pages().size() || !atlas.pages().get(page).bumped()) return Optional.empty();
+        return request(generation, bundle, atlas, page, frame, BUMP_LAYER);
+    }
+
+    /** The page's blend layer, as {@link #request}; empty when no texture on the page has one. */
+    public Optional<ResourceLocation> requestBlend(long generation, BundleManifest bundle, AtlasIndex atlas,
+                                                    int page, long frame) {
+        if (page < 0 || page >= atlas.pages().size() || !atlas.pages().get(page).blended()) return Optional.empty();
+        return request(generation, bundle, atlas, page, frame, BLEND_LAYER);
+    }
+
+    private Optional<ResourceLocation> request(long generation, BundleManifest bundle, AtlasIndex atlas,
+                                               int page, long frame, int layer) {
         resetIfGenerationChanged(generation);
         if (page < 0 || page >= atlas.pages().size()) return Optional.empty();
         requests++;
-        Key key = new Key(bundle.fingerprint(), page);
+        Key key = new Key(bundle.fingerprint(), page | layer);
         Entry current = entries.get(key);
         if (current != null) {
             current.lastUsedFrame = frame;
@@ -75,7 +100,9 @@ public final class AtlasPageResidency implements AutoCloseable {
         Entry created = new Entry(decodedBytes, frame);
         pendingRam += decodedBytes;
         created.decode = CompletableFuture.supplyAsync(() -> {
-            DecodedPage decoded = decode(bundle, atlas.pages().get(page));
+            AtlasIndex.Page source = atlas.pages().get(page);
+            DecodedPage decoded = decode(bundle, layer == BUMP_LAYER ? source.bumpMips() : layer == BLEND_LAYER ? source.blendMips() : source.mips(),
+                decodedBytes);
             if (created.abandoned) {
                 decoded.images.forEach(NativeImage::close);
                 throw new IllegalStateException("atlas page request abandoned");
@@ -105,7 +132,10 @@ public final class AtlasPageResidency implements AutoCloseable {
             }
             pendingRam -= entry.decodedBytes;
             entry.decode = null;
-            ResourceLocation id = Src2mcIds.id("atlas/" + item.getKey().fingerprint.substring(0, 16) + "/" + item.getKey().page);
+            int keyPage = item.getKey().page;
+            ResourceLocation id = Src2mcIds.id("atlas/" + item.getKey().fingerprint.substring(0, 16) + "/"
+                + ((keyPage & BUMP_LAYER) != 0 ? "bump_" + (keyPage & ~BUMP_LAYER)
+                    : (keyPage & BLEND_LAYER) != 0 ? "blend_" + (keyPage & ~BLEND_LAYER) : String.valueOf(keyPage)));
             minecraft.getTextureManager().register(id, new MipTexture(decoded.images));
             entry.textureId = id;
             entry.vramBytes = decoded.bytes;
@@ -152,6 +182,18 @@ public final class AtlasPageResidency implements AutoCloseable {
         return Src2mcIds.id("atlas_loading");
     }
 
+    /** A normal pointing straight out, for a page without a bump layer or while its layer loads. */
+    public ResourceLocation flatBumpTexture() {
+        if (flatBumpTexture == null) {
+            var image = new NativeImage(1, 1, false);
+            image.setPixelRGBA(0, 0, FastColor.ABGR32.color(255, 255, 128, 128));
+            flatBumpTexture = new DynamicTexture(image);
+            Minecraft.getInstance().getTextureManager().register(Src2mcIds.id("atlas_flat_bump"), flatBumpTexture);
+            flatBumpTexture.upload();
+        }
+        return Src2mcIds.id("atlas_flat_bump");
+    }
+
     public Stats stats() {
         return new Stats(entries.size(), entries.values().stream().filter(entry -> entry.textureId != null).count(),
             residentVram, pendingRam, requests, hits, misses, denied, evictions, decodeFailures);
@@ -167,10 +209,10 @@ public final class AtlasPageResidency implements AutoCloseable {
         resetIfGenerationChanged(nextGeneration);
     }
 
-    private static DecodedPage decode(BundleManifest bundle, AtlasIndex.Page page) {
-        List<NativeImage> images = new ArrayList<>(page.mips().size());
+    private static DecodedPage decode(BundleManifest bundle, List<AtlasIndex.Mip> mips, long decodedBytes) {
+        List<NativeImage> images = new ArrayList<>(mips.size());
         try (var zip = new ZipFile(bundle.path().toFile())) {
-            for (AtlasIndex.Mip mip : page.mips()) {
+            for (AtlasIndex.Mip mip : mips) {
                 var zipEntry = zip.getEntry(mip.path());
                 BundleManifest.Entry declared = bundle.entries().stream()
                     .filter(entry -> entry.path().equals(mip.path())).findFirst()
@@ -190,7 +232,7 @@ public final class AtlasPageResidency implements AutoCloseable {
                 }
                 images.add(image);
             }
-            return new DecodedPage(images, decodedBytes(page));
+            return new DecodedPage(images, decodedBytes);
         } catch (Exception exception) {
             images.forEach(NativeImage::close);
             throw new IllegalStateException(exception);

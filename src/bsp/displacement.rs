@@ -24,6 +24,9 @@ pub struct Surface {
     /// edge, `t` along corner 0 to 1. The base face's lightmap spreads evenly
     /// over the grid, so this is where each corner's light is.
     pub grid: Vec<[[f64; 2]; 3]>,
+    /// Each triangle's corners' blend alpha, 0 to 1: how much of a blend
+    /// material's second texture shows there.
+    pub alpha: Vec<[f64; 3]>,
     /// The base face, whose lightmap the displacement wears.
     pub face: usize,
     /// The side the displacement is seen from, which is the side the player
@@ -52,20 +55,26 @@ impl super::Map {
 
         let mut triangles = Vec::new();
         let mut grid = Vec::new();
+        let mut alpha = Vec::new();
         let mut bounds = Aabb::empty();
         // `vbsp`'s grid: vertex `row * side + column`, rows along corner 0 to
         // 1, columns from the 0 to 3 edge across. Triangulated as its
         // `triangulated_displaced_vertices` does, keeping each corner's place.
         let vertices: Vec<Vec3> = disp.displaced_vertices().map(Vec3::from).collect();
+        let alphas: Vec<f64> = disp
+            .displacement_vertices()
+            .map(|v| (f64::from(v.alpha) / 255.0).clamp(0.0, 1.0))
+            .collect();
         let steps = 1usize << disp.power;
         let side = steps + 1;
-        if vertices.len() != side * side {
+        if vertices.len() != side * side || alphas.len() != vertices.len() {
             return None;
         }
         let place = |row: usize, column: usize| {
             (
                 vertices[row * side + column],
                 [column as f64 / steps as f64, row as f64 / steps as f64],
+                alphas[row * side + column],
             )
         };
         for column in 0..steps {
@@ -90,7 +99,8 @@ impl super::Map {
                         bounds.extend(tri.b);
                         bounds.extend(tri.c);
                         triangles.push(tri);
-                        grid.push(corners.map(|(_, at)| at));
+                        grid.push(corners.map(|(_, at, _)| at));
+                        alpha.push(corners.map(|(_, _, a)| a));
                     }
                 }
             }
@@ -124,6 +134,7 @@ impl super::Map {
             index,
             triangles,
             grid,
+            alpha,
             face: disp.map_face as usize,
             normal: normal.normalized(),
             material: self.material_index(face.texture_info as usize),

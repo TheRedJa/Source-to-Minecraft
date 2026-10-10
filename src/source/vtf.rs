@@ -206,7 +206,16 @@ pub struct Header {
     /// copies into the BSP for world materials.
     pub reflectivity: [f64; 3],
     pub size: [u32; 2],
+    /// `TEXTUREFLAGS_*`.
+    pub flags: u32,
 }
+
+/// `TEXTUREFLAGS_SSBUMP`: the texture is a self-shadowed bump map.
+pub const FLAG_SSBUMP: u32 = 0x0800_0000;
+
+/// `TEXTUREFLAGS_ONEBITALPHA | TEXTUREFLAGS_EIGHTBITALPHA`: the texture has an
+/// alpha channel (`ITexture::IsTranslucent`).
+pub const FLAG_ALPHA: u32 = 0x1000 | 0x2000;
 
 /// Decodes textures on demand, keeping each one only once.
 pub struct Textures<'a> {
@@ -327,6 +336,7 @@ impl<'a> Textures<'a> {
         Some(Header {
             reflectivity: header.reflectivity.map(f64::from),
             size: [u32::from(header.width), u32::from(header.height)],
+            flags: u32::from_le_bytes(data.get(20..24)?.try_into().ok()?),
         })
     }
 }

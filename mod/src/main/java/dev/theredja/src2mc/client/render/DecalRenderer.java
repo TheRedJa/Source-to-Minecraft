@@ -138,7 +138,7 @@ public final class DecalRenderer {
                         if (modulate) {
                             baked[0] = 1; baked[1] = 1; baked[2] = 1; baked[3] = BakedLighting.VERTEX;
                         } else {
-                            BakedLighting.surfaceLight(map.light(), surfaces, face, v[0], v[1], v[2], nx, ny, nz, baked);
+                            BakedLighting.surfaceLight(map.light(), surfaces, face, BundleMaterial.Bump.NONE, v[0], v[1], v[2], nx, ny, nz, baked);
                         }
                         for (float b : baked) out.add(b);
                         out.add((float) blockLight);
@@ -290,7 +290,8 @@ public final class DecalRenderer {
         int stride = format.getVertexSize();
         int position = format.getOffset(VertexFormatElement.POSITION), color = format.getOffset(VertexFormatElement.COLOR),
             uv0 = format.getOffset(VertexFormatElement.UV0), uv2 = format.getOffset(VertexFormatElement.UV2),
-            normal = format.getOffset(VertexFormatElement.NORMAL), bakedOffset = format.getOffset(BakedLighting.BAKED);
+            normal = format.getOffset(VertexFormatElement.NORMAL), bakedOffset = format.getOffset(BakedLighting.BAKED),
+            surfaceOffset = format.getOffset(BakedLighting.SURFACE);
         for (var byPlacement : groups.entrySet()) {
             MapPlacement placement = byPlacement.getKey();
             for (var byMaterial : byPlacement.getValue().entrySet()) {
@@ -319,6 +320,7 @@ public final class DecalRenderer {
                             MemoryUtil.memPutShort(at + uv2 + 2, (short) 0);
                             for (int k = 0; k < 3; k++) MemoryUtil.memPutByte(at + normal + k, (byte) Math.round(v[o + 10 + k] * 127));
                             for (int k = 0; k < 4; k++) MemoryUtil.memPutFloat(at + bakedOffset + k * 4L, v[o + 5 + k]);
+                            for (int k = 0; k < 3; k++) MemoryUtil.memPutFloat(at + surfaceOffset + k * 4L, 0);
                         }
                     }
                     MeshData mesh = new MeshData(bytes.build(), new MeshData.DrawState(format, vertices, vertices,

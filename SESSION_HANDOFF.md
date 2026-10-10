@@ -1,6 +1,89 @@
 # src2mc implementation handoff
 
-Updated: 2026-10-09 (Europe/Berlin), Source look stage 1 DEV-0.41.2 USER-CONFIRMED 2026-10-09 (uncommitted); next stage 2 surfaces
+Updated: 2026-10-10 (Europe/Berlin), stage 1 committed (33b1018); stage 2a+2b confirmed (uncommitted); stage 2 (2a-2c) USER-CONFIRMED DEV-0.45.0 2026-10-10, not committed
+
+## IN PROGRESS: Source look, stage 2 "surfaces" -- D31
+
+Plan: 2a normal maps + bumped lightmaps (built), 2b cubemaps (env_cubemap pak VTFs, per-face
+cubemap via patched material names, envmap mask/tint/fresnel), 2c selfillum, detail, WVT blend.
+2a: converter bsp/lighting.rs reads texinfo SURF_BUMPLIGHT, raw_bump_lightmaps; light.rs packs
+flat+3 bump lightmaps side by side; surfaces.s2faces v4 light region + f64 bump stride; vmt
+MaterialAssets bump_map/ssbump (LightmappedGeneric/WVT, not $nodiffusebumplighting); atlas v2
+bump_mips pages (same layout, flat 128,128,255 elsewhere); material `bump` normal|ssbump;
+logical texture id = hash(base png ++ bump png). Mod: AtlasIndex.Page.bumpMips, BundleMaterial.Bump,
+LightRegion.bump; BakedLighting.surfaceLight sets Baked.z stride, Baked.w -1 normal / -2 ssbump;
+AtlasPageResidency.requestBump (key page|1<<30), flatBumpTexture; Sampler4 bound in
+MapSurfaceRenderer/MoverRenderer draw; baked.fsh lightmap() = LightmappedGeneric bump blend.
+/src2mc_look bump on|off (rebuilds surface meshes). Bundles total 3.4 GB; furnace 147->188 MB.
+Not yet: props (stage 3), 3D skybox room lightmaps flat.
+2a USER-CONFIRMED 2026-10-09 ("subtle due to low-res textures but worth keeping"), not committed.
+2b cubemaps DEV-0.43.0 built + installed, WAITING on user test (uncommitted): converter
+source/cubemap.rs (edge-continuity test passes INFRA/P1/P2), vmt Envmap, assets() loads compiler
+PATCH first, output/cubemaps.rs (format section 25), material `envmap`, mask in layer alpha. Mod:
+CubemapTable, BundleMaterial.Envmap, Reflections.java (Sampler5 RGB16F strips, Sampler6 RGBA32F
+settings, row -(material+1) in UV2.y), baked shader reflection (derivative TBN), /src2mc_look
+reflections. Rust 630, clippy 16, mod 157, all 10 exported/validated; shaders pass glslangValidator.
+User test (DEV-0.43.0): orientation right, INFRA glass perfect, P2 slightly too strong, P1 much
+too strong (white blob from ceiling light in escape_02). Checked: Source maths identical (P1 and INFRA
+shaderapi both ENV_MAP_SCALE 16 in integer HDR; AS sky_hdr confirms 1/16 storage; SDK2013 LMG tint raw,
+contrast 1 = squared). Hypothesis: our scene darker than Source's -> exposure higher -> absolute
+reflections relatively too strong (P2 status: scale pinned at max 3, target 5.1). DEV-0.43.1 status
+prints "Source's mat_show_histogram AvgLum %" (gamma location^2.2) to compare with real game
+(`developer 1; mat_show_histogram 1`, red marker = tonemap scale between min/max). User 2: strength
+matches Portal; real cause = masks missing ($basealphaenvmapmask/$envmapmask textures were requested
+after the base-texture `else continue`, so the two-pass producer never made them; only
+normal-map-alpha masks worked). DEV-0.43.2 requests masks first (escape_02 metalfloor_bts_001b mask
+mean 8/255, observation tiles 31/255). Gotcha: in assign_materials every produce() must run before
+any early `continue`. User 3: floor good, hallway walls
+reflect too strong, "weirdly cut off". Cause: vmt parse flattened ALL sub-blocks, so P1 `_DX8`
+blocks ($nodiffusebumplighting, other bump/basetexture) overrode `_HDR_DX9`. DEV-0.43.3: parse
+applies top keys + holding conditionals (hdr, >=dx90, GPU>=N at level 3, dx 9.5) + one fallback
+block (_HDR_DX9 else _DX9) + replace/insert; skips the rest incl Proxies (D31 note). Stats after:
+escape_02 bump 161->291, testchmb 38->106, P2 slight gains, INFRA unchanged. User: fully fixed,
+2b CONFIRMED 2026-10-09.
+2c DEV-0.44.0 (built, installed, validated; WAITING on user test): surfaces.s2faces v5 blend regions
+(displacement alpha, bsp/displacement.rs alpha, convert.rs fit), atlas v3 blend_mips ($basetexture2),
+material blend/blend_modulate/detail/selfillum, details/<id>.png (pow2 <=512), vmt parse fallback
+rules. Mod: vertex FORMAT + "Surface" vec3 (texture UV continuous, blend) 60 bytes; PackedVertices
+FLOATS 11; SurfaceTessellator.Vertex textureU/V; SurfaceTable.blend(); AtlasPageResidency
+requestBlend (BLEND_LAYER 1<<29), Sampler7; Reflections renamed SurfaceEffects (settings 8 texels x
+128 materials/row, detail atlas Sampler8 with 8px wrapped gutters, SurfaceToggles uniform);
+baked.fsh blend/detail(TextureCombine)/selfillum/mode10 bump weights. /src2mc_look
+detail|blend|selfillum on|off.
+User test 2c (2026-10-09), NOT FIXED YET (user asked only to note findings before compaction):
+- blend (INFRA + P2 caves): looks great, no issues. fps: no noticeable change.
+- detail: present but SLIGHTLY TOO STRONG (P1 escape_02/testchmb). Check: mode 0 uses raw detail
+  * base linear -- verify Source's base is sRGB-decoded and detail raw (both branches: detail sRGB
+  only mode 1); maybe detail mips/gamma or tint; compare a P1 material's $detailblendfactor.
+- selfillum: self-illuminated surfaces DISAPPEAR when selfillum is on (testchmb light panels),
+  and INFRA's red/green light boxes that switch also vanish. Suspect: base alpha kept (opaque=false)
+  but render class/alpha handling: output fragColor alpha = alpha (base alpha ~0 where not glowing?)
+  -> entitySolid/translucent blending or Cutout?; or "switching" boxes are texture-frame/toggled
+  materials (proxies, $frame) -- check those materials' vmts (render_class, $selfillum, base alpha)
+  and the shader path (diffuse mix by baseAlpha; fragColor alpha).
+FIXES DEV-0.44.1 (2026-10-10, installed + 4 bundles validated, WAITING on user retest):
+- selfillum: Source clears $selfillum/$basealphaenvmapmask when the base VTF lacks ONEBITALPHA|
+  EIGHTBITALPHA (lightmappedgeneric_dx9_helper.cpp ~211); testchmb light_recessedcool002 is DXT1 ->
+  Source lights it by lightmap only, ours replaced that with base*1 (dimmer). Converter now drops
+  them (vtf::FLAG_ALPHA), clears alphatest when either is used; shader alpha=1 for selfillum.
+- INFRA red/green boxes: NOT selfillum (no lightmapped selfillum in INFRA maps). Props with Skin
+  inputs (smallelectricalbox_001 skin1/2, light_002_skin4, ...) exported their other skins'
+  materials as fallback with no texture: prop_texture_spans only walked the start skin's model.
+  Now walks item.skins too. Remaining model fallbacks have no VMT in INFRA's VPKs at all.
+- detail: data and maths match SDK exactly (detail_concrete_03 mean 194.6 both); detail atlas had
+  8px gutters + GL_TEXTURE_MAX_LEVEL 3, so past ~12 blocks detail kept mip-3 contrast (sd 15.7 vs
+  VTF mips 4-7: 12, 8.9, 4.8, 0). Now GL_TEXTURE_2D_ARRAY (one layer each, smaller ones tiled to
+  the largest square, REPEAT, full mips) on unit 15 via int uniform DetailArray (MC binds json
+  samplers by list index on the 2D target only; Sampler8 removed from baked.json).
+User retest DEV-0.44.1 (2026-10-10): selfillum panels good, detail good; INFRA indicator box
+(minilight_001: skin0 plain, skin1 $selfillum VertexLitGeneric) switches but almost invisible
+in the dark -> props had no selfillum. DEV-0.45.0: vmt selfillum also for VertexLitGeneric (not
+with $selfillummask/$selfillumfresnel), standalone_material sets it (+ base_alpha_rules helper);
+mod: PropTessellator.Triangle.row, PackedVertices.row()/rows kept through setLight, set in
+PropRenderer, LogicPropRenderer, MoverRenderer, AnimatedPropRenderer. Furnace 47 selfillum mats.
+User 2026-10-10: box + prop glow "all looks good" -> STAGE 2 CONFIRMED.
+NEXT: commit stage 2 when user asks, then stage 3 (models: phong, rimlight, world lights).
+Next after: 2c selfillum, detail, WVT blend.
 
 User test 3 (DEV-0.41.2): hall darkens when looking at the patch, "looks perfect now"; brightens
 again in the dark; basement good. Stage 1 done.
@@ -26,10 +109,10 @@ and combine.fsh. Open: is light at scale 1 right (user confirmed at exposure 1 b
 User decisions 2026-10-09 (memory next-task-source-look): stages 1 screen, 2 surfaces, 3 models,
 4 glass+water (water = cubemap only), 5 sprites; env_projectedtexture later.
 
-References (verified): SDK 2013 clone /tmp/sdk2013/repo (viewpostprocess.cpp, stdshaders), Alien
-Swarm SDK clone /tmp/asw/repo (= INFRA/Portal 2 branch; cleaned copies /tmp/asw/vpp.cpp,
-tonemap_server.cpp, tonemap_client.cpp). /tmp may be gone: re-clone (sparse) if needed. grep is
-ugrep: use grep -a on Valve sources. Disassembly helpers /tmp/tools/{macho.py,annot.py,vpkcat.py}.
+References (verified): SDK 2013 clone /home/jakob/projects/minecraft/tools/source_refs/sdk2013/repo (viewpostprocess.cpp, stdshaders), Alien
+Swarm SDK clone /home/jakob/projects/minecraft/tools/source_refs/asw/repo (= INFRA/Portal 2 branch; cleaned copies /home/jakob/projects/minecraft/tools/source_refs/asw/vpp.cpp,
+tonemap_server.cpp, tonemap_client.cpp). Persistent since 2026-10-09 (user request): keep SDKs/tools/dev data in /home/jakob/projects/minecraft/tools/source_refs, only scratch exports in /tmp. grep is
+ugrep: use grep -a on Valve sources. Disassembly helpers /home/jakob/projects/minecraft/tools/source_refs/tools/{macho.py,annot.py,vpkcat.py}.
 Verified facts: exposure chase identical in INFRA client.dylib (CTonemapSystem) and HL2
 MaterialSystem.dll (rate x2 for algorithm 1, accelerate-down 3 with /1.5 term, step capped 1/64,
 10-sample weighted average); defaults min 0.5 max 2 target 60% bright 2% minavg 3%; fog colour in
@@ -57,7 +140,7 @@ Built:
   SourceFogColor (linear, x Exposure in shader), view depth; skybox fog colour now x Exposure;
   post/lumcompare linearises (pow 2.2).
 - Tests: Rust 625 pass, clippy 17 (baseline), mod 157 pass; all 10 maps re-exported
-  (/tmp/export_all.sh -> target/sky-test/) and installed; each validated (BundleValidatorTest +
+  (/home/jakob/projects/minecraft/tools/source_refs/tools/export_all.sh -> target/sky-test/) and installed; each validated (BundleValidatorTest +
   LogicRuntimeTest with -Dsrc2mc.testBundle, 0 failures).
 
 Open / not done: 2D sky (sky.fsh) not tone-mapped (Source HDR skies are; check later, affects
@@ -129,7 +212,7 @@ INFRA lacks particle/particle_noisesphere, so the spark smoke puff is absent the
 
 2026-10-07 15:05: all done and installed. VERSION DEV-0.37.0, jar src2mc-DEV-0.37.0.jar built (gradle
 build incl. tests ok, Java 144 pass + 5 skipped), all 10 maps re-exported to target/sky-test/
-(/tmp/export_all.sh recreated) and installed (bundles + src2mc/schematics), each validated with
+(/home/jakob/projects/minecraft/tools/source_refs/tools/export_all.sh recreated) and installed (bundles + src2mc/schematics), each validated with
 BundleValidatorTest + ParticleSimulationTest -Dsrc2mc.testBundle (0 failures). Rust 617 pass,
 clippy 17 (baseline). tests/zz_pcf_inventory.rs deleted. Docs: format.md section 15 (audio v3),
 section 23 (particles.json incl. decals), metadata `particles`, limits; decisions.md D29.
@@ -192,7 +275,7 @@ Remaining:
 1. Run decal export check; Java: parse "decals" in validateParticles + ParticleTable.decals;
    client decal renderer (AFTER_BLOCK_ENTITIES; clip quad to coplanar fragments in 3x3x3 cells;
    DecalModulate = mod2x blend DST_COLOR,SRC_COLOR; max ~256 decals; orient right=cross(n, up)).
-2. VERSION DEV-0.37.0; rebuild jar; re-export all 10 maps (/tmp/export_all.sh), install bundles,
+2. VERSION DEV-0.37.0; rebuild jar; re-export all 10 maps (/home/jakob/projects/minecraft/tools/source_refs/tools/export_all.sh), install bundles,
    validate; java tests; cargo clippy.
 3. Docs: format.md section 23 particles.json + decals, section 15 audio v3 surface fields,
    metadata row, limits; decisions.md D29 (particles/impacts, defaults from particles.a, sheet
@@ -281,7 +364,7 @@ on user's numbers (status with room on vs off, shaders on).
 
 STATE AT COMPACT (2026-10-05): DEV-0.35.1 installed (jar built, all 10 bundles + schematics in
 mod/runs/client/config/src2mc/{bundles,schematics}, exported from target/sky-test/ by
-/tmp/export_all.sh -- recreate it if /tmp was cleared: loops the 10 test maps through
+/home/jakob/projects/minecraft/tools/source_refs/tools/export_all.sh -- recreate it if /tmp was cleared: loops the 10 test maps through
 `src2mc mod export --campaign <n> --out target/sky-test/<n> <map>`). DEV-0.35.0 crashed on
 first room draw (BufferOverflowException: skybox shader's vec3 `FogColor` clashed with MC's
 vec4 default uniform written by ShaderInstance.setDefaultUniforms); DEV-0.35.1 renamed to

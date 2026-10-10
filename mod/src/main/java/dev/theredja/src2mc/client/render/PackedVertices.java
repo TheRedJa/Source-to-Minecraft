@@ -16,7 +16,8 @@ import org.lwjgl.system.MemoryUtil;
  * Positions are relative to the mesh origin the caller chose.
  */
 final class PackedVertices {
-    private static final int FLOATS = 8;
+    /** Position, atlas UV, normal, then the surface attribute: texture UV and blend (see {@link BakedLighting#SURFACE}). */
+    private static final int FLOATS = 11;
     private float[] data = new float[FLOATS * 96];
     private int[] light = new int[96];
     /** Each vertex's tint, {@code 0xRRGGBB}; white leaves the texture as it is. */
@@ -25,6 +26,12 @@ final class PackedVertices {
     private float[] baked = new float[4 * 96];
     private static final float[] FULL_BRIGHT = {1, 1, 1, BakedLighting.VERTEX};
     private int vertices;
+    /**
+     * Each vertex's material row ({@link SurfaceEffects#row}), kept in sky light's place through
+     * every relight; null while no vertex has one. {@link #row} sets it for the vertices to come.
+     */
+    private int[] rows;
+    private int row;
     /** From {@link #index}: each vertex's slot among the distinct ones, and each distinct one's
      * first vertex. Null until indexed. */
     private int[] remap, firstOf;
@@ -43,23 +50,42 @@ final class PackedVertices {
 
     /** As above, with the vertex's baked light: four floats, see {@link BakedLighting}. */
     void add(float x, float y, float z, float u, float v, float nx, float ny, float nz, int packedLight, int tint, float[] light4) {
+        add(x, y, z, u, v, nx, ny, nz, packedLight, tint, light4, 0, 0, 0);
+    }
+
+    /**
+     * As above, with the surface attribute: the base texture's own coordinates ({@code textureU},
+     * {@code textureV}, unbounded, one per repeat) and a blended displacement's blend.
+     */
+    void add(float x, float y, float z, float u, float v, float nx, float ny, float nz, int packedLight, int tint, float[] light4,
+             float textureU, float textureV, float blend) {
         if (vertices == light.length) {
             light = Arrays.copyOf(light, vertices * 2);
             color = Arrays.copyOf(color, vertices * 2);
             data = Arrays.copyOf(data, vertices * 2 * FLOATS);
             baked = Arrays.copyOf(baked, vertices * 2 * 4);
+            if (rows != null) rows = Arrays.copyOf(rows, vertices * 2);
+        }
+        if (row != 0 && rows == null) rows = new int[light.length];
+        if (rows != null) {
+            rows[vertices] = row;
+            packedLight = withRow(packedLight, row);
         }
         System.arraycopy(light4, 0, baked, vertices * 4, 4);
         color[vertices] = tint;
         int at = vertices * FLOATS;
         data[at] = x; data[at + 1] = y; data[at + 2] = z; data[at + 3] = u; data[at + 4] = v;
         data[at + 5] = nx; data[at + 6] = ny; data[at + 7] = nz;
+        data[at + 8] = textureU; data[at + 9] = textureV; data[at + 10] = blend;
         light[vertices++] = packedLight;
         minX = Math.min(minX, x); minY = Math.min(minY, y); minZ = Math.min(minZ, z);
         maxX = Math.max(maxX, x); maxY = Math.max(maxY, y); maxZ = Math.max(maxZ, z);
     }
 
     int vertices() { return vertices; }
+
+    /** The material row of the vertices added from now on, {@link SurfaceEffects#row}; 0 for none. */
+    void row(int row) { this.row = row; }
 
     /** An independent copy, lights and all; indexing is not copied. */
     PackedVertices copy() {
@@ -94,7 +120,9 @@ final class PackedVertices {
     }
 
     /** Replaces one vertex's light; {@link #index} again before uploading indexed. */
-    void setLight(int vertex, int packedLight) { light[vertex] = packedLight; }
+    void setLight(int vertex, int packedLight) { light[vertex] = rows == null ? packedLight : withRow(packedLight, rows[vertex]); }
+
+    private static int withRow(int packedLight, int row) { return row == 0 ? packedLight : (packedLight & 0xFFFF) | row << 16; }
     int triangles() { return vertices / 3; }
     boolean isEmpty() { return vertices == 0; }
 
@@ -237,6 +265,7 @@ final class PackedVertices {
             int colorOffset = format.getOffset(com.mojang.blaze3d.vertex.VertexFormatElement.COLOR);
             int normalOffset = format.getOffset(com.mojang.blaze3d.vertex.VertexFormatElement.NORMAL);
             int bakedOffset = format.getOffset(BakedLighting.BAKED);
+            int surfaceOffset = format.getOffset(BakedLighting.SURFACE);
             for (int out = 0; out < written; out++) {
                 int i = written == vertices ? out : firstOf[out];
                 long at = target + (long) out * stride;
@@ -257,6 +286,7 @@ final class PackedVertices {
                 MemoryUtil.memPutByte(at + normalOffset + 1, normalByte(data[d + 6]));
                 MemoryUtil.memPutByte(at + normalOffset + 2, normalByte(data[d + 7]));
                 for (int k = 0; k < 4; k++) MemoryUtil.memPutFloat(at + bakedOffset + 4L * k, baked[i * 4 + k]);
+                for (int k = 0; k < 3; k++) MemoryUtil.memPutFloat(at + surfaceOffset + 4L * k, data[d + 8 + k]);
             }
             var buffer = new VertexBuffer(VertexBuffer.Usage.STATIC);
             LightPatch kept = keep ? keep(format, MemoryUtil.memByteBuffer(target, written * stride),

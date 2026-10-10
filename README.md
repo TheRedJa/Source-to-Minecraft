@@ -1,74 +1,121 @@
 # src2mc
 
-Convert Source Engine maps (`.bsp`) into Minecraft 1.21.1, so that recreating a
-game's geometry does not start with days of manual blocking-out.
+**Play Source Engine maps in Minecraft 1.21.1, looking, sounding and working
+the way they do in the original game.**
 
-Built for recreating the Half-Life 2 universe (Half-Life 2, **Entropy: Zero**
-and **Entropy: Zero 2**). Portal, Portal 2 and INFRA convert as well, and are
-the current in-game test maps.
+src2mc converts Source Engine maps (`.bsp`) into Minecraft. Its companion
+NeoForge mod draws each map's exact geometry with its real textures, real
+prop models and the light the map was compiled with, on top of ordinary,
+editable blocks. Source's own HDR look, sounds, particles and map logic come
+along too: buttons press, doors open, lifts carry you, voice lines play and
+the map's scripted sequences run.
+
+It was built for recreating the Half-Life 2 universe (Half-Life 2,
+**Entropy: Zero** and **Entropy: Zero 2**). **Portal**, **Portal 2** and
+**INFRA** maps are the everyday in-game test maps.
 
 There are two ways to get a map into Minecraft:
 
 - **The companion mod (current).** `src2mc mod export` writes one campaign
-  bundle plus one schematic per map, and the NeoForge mod in [`mod/`](mod/)
-  draws the map's exact Source geometry, real textures and real prop meshes on
-  top of ordinary, editable blocks. This is where development happens.
-- **Plain schematics (legacy).** `src2mc convert` and `batch` voxelize a map into
-  vanilla blocks, or into KubeJS-generated textured blocks, with no mod needed
-  beyond WorldEdit. Still working, documented further down, but no longer
-  extended.
+  bundle plus one schematic per map. The NeoForge mod in [`mod/`](mod/) loads
+  the bundle and draws everything described below. This is where development
+  happens.
+- **Plain schematics (legacy).** `src2mc convert` and `batch` voxelize a map
+  into vanilla blocks, or into KubeJS-generated textured blocks, with nothing
+  needed beyond WorldEdit. See [Plain schematics](#plain-schematics-legacy).
 
 ## The companion mod
 
-### What it does
+### Features
+
+**Geometry and building**
 
 - **Exact surfaces on editable blocks.** Every brush face is clipped into the
   block cell it lies in and drawn at its true Source position, so walls, door
   frames and low ceilings sit exactly where they do in the game instead of
-  snapping to half blocks. The blocks underneath stay ordinary blocks: break one
-  and the geometry it owns disappears with it, place blocks and build as usual.
-- **Real textures** on mod-owned 4096-pixel atlas pages with mip levels, kept
-  apart from Minecraft's block atlas. By default a texture keeps up to 16 texels
-  per block; `--quality full` keeps every texture at its original Source
-  resolution. Fences and grates stay see-through with distance, and `$nocull`
-  materials are drawn from both sides.
+  snapping to half blocks. The blocks underneath stay ordinary blocks: break
+  one and the geometry it owns goes with it; place blocks and build as usual.
+- **Sub-block collision** for map geometry and props, in sixteenths of a
+  block: you walk on the floor you see, under the ceiling you see and along
+  railings instead of invisible cubes.
+- **One-command placement.** `/src2mc place <map>` builds a map in the world,
+  tick-budgeted, at a fixed 32 Source units per block. Whole campaigns can be
+  placed side by side, and level changes take you to the next map, lined up
+  on its landmark.
+
+**The Source look**
+
+- **Real textures** at up to 16 texels per block by default, or every texture
+  at its original resolution with `--quality full`, on the mod's own mipmapped
+  atlas pages. Fences and grates stay see-through with distance; two-sided
+  materials draw from both sides.
+- **The map's own baked light.** Lightmaps exactly as vrad compiled them,
+  static props with their per-vertex light, and moving or animated things lit
+  by the map's ambient light samples where they stand. Torches and other
+  Minecraft lights still add their light on top. Players, mobs and items in a
+  map take on its light too.
+- **Source's surface shading.** Bump-mapped and self-shadowing (`$ssbump`)
+  lightmaps, `env_cubemap` reflections with their masks, tint, contrast and
+  Fresnel, detail textures in all of Source's blend modes, blended
+  displacement terrain (rock fading into dirt and moss), and glowing
+  self-illuminated signs, screens and indicator lights on surfaces and props.
+- **HDR, as the engine does it.** Auto exposure that adapts as you walk from
+  dark rooms into bright halls, bloom, the map's colour correction, vignette,
+  and Source's distance fog, all driven by the map's own settings and its
+  `env_tonemap_controller` and fog inputs.
+- **The sky.** The map's 2D skybox and its 3D skybox room (the scaled-down
+  city, mountains or smokestacks on the horizon) are drawn behind the map
+  exactly where Source draws them.
+- **Particles and effects.** The game's own `.pcf` particle systems run with
+  their sprite sheets and blend modes: fire, smoke, steam, sparks, ash.
+  Hits from Minecraft projectiles and TacZ
+  guns play the surface's own impact sound and effect and leave the game's
+  bullet holes, and `env_spark`s spark as they do in Source.
+
+**Props and animation**
+
 - **Every prop, as its real mesh**, at its exact Source origin and angle, with
-  its skin (the rusted or dirty variant the map chose), its colour tint
-  (`rendercolor`, such as Portal 2's orange and blue gel tubes) and every
-  material slot. Props are merged into per-section batches, so millions of
-  triangles cost a few hundred draw calls.
-- **Sub-block collision** for map geometry and props, in sixteenths of a block:
-  you walk on the floor you see, under the ceiling you see, and along railings
-  rather than invisible cubes.
-- **Lighting** from Minecraft's own light, sampled smoothly per vertex, with a
-  client-side sky-light bake and an occlusion mask so thin ceilings and walls
-  that hold no block still cast shade.
-- **Fast rendering.** Source's own visibility data (PVS), frustum culling, GPU
-  occlusion queries for props, indexed vertex buffers, nearest-first draw order,
-  and shadow-pass culling under shaderpacks. Meshes build on worker threads, so
-  a world with several large maps loads in a second or two.
-- **Shaderpacks** through Iris, tested with Complementary Reimagined: surfaces
-  and props land in the shadow map and the gbuffers like terrain does.
-- **The map's sound**: its soundscapes, picked the way Source picks them and
-  crossfaded as you walk between them, the ambient sounds that play from the
-  start (machines, fans, fire), and footsteps, hits and breaks that sound like
-  the surface's own material. Inside a map, Minecraft's own step, landing and
-  fall sounds are replaced: you hear Source's steps, a step when you jump, and
-  one on a hard landing. Source's sounds are re-encoded as Ogg Vorbis at
-  quality 7 and played through Minecraft's sound engine, so the volume sliders
-  apply and [Sound Physics Remastered](https://modrinth.com/mod/sound-physics-remastered),
-  if installed, adds its reverb and occlusion. Sounds the map's logic triggers
-  (button presses, voice lines, music) are exported too, along with the
-  entities that start them; they play only once that logic runs.
-- **The map's logic**: Source's entity I/O runs on the server by the SDK's
-  rules. Triggers fire as players walk through them, buttons and doors
-  answer the use key, relays, branches, counters, timers and cases pass the
-  chain along, and `ambient_generic`s, soundscapes, INFRA's music and
-  choreographed scenes play what it tells them, voice lines with Source-style
-  captions; inside a map, Minecraft's own music stays silent and the Music
-  slider sets the map's music. A level change moves you to the next map if it is placed,
-  lined up on the shared landmark. Doors and lifts do not move yet; their
-  outputs fire on time. VScript is not run.
+  its skin, its colour tint (such as Portal 2's orange and blue gel tubes) and
+  every material slot. Props are merged into per-section batches, so millions
+  of triangles cost a few hundred draw calls.
+- **Animated props.** Dynamic props play their model's animations: buttons
+  press in, levers flip, doors slide, clocks and windmills turn, with
+  collision following each pose. Lamps switch skins, and props retint, show,
+  hide and disappear as the map's logic tells them.
+
+**Sound**
+
+- **The map's soundscapes**, picked the way Source picks them and crossfaded
+  as you walk between them, its ambient sounds (machines, fans, fire), music
+  and voice lines with Source-style captions.
+- **Material sounds.** Footsteps, landings, hits and breaks sound like the
+  surface's own material, replacing Minecraft's step sounds inside a map.
+  Sound plays through Minecraft's sound engine, so the volume sliders apply,
+  and [Sound Physics Remastered](https://modrinth.com/mod/sound-physics-remastered),
+  if installed, adds reverb and occlusion.
+
+**Map logic and movement**
+
+- **Source's entity I/O runs on the server** by the SDK's rules: triggers fire
+  as players walk through them, buttons and doors answer the use key, relays,
+  branches, counters, timers and cases pass the chain along, and choreographed
+  scenes play.
+- **Moving brushes are real moving platforms.** Doors, buttons, lifts, track
+  trains and rotators, with the props attached to them, move as
+  [Sable](https://github.com/ryanhcode/sable) sub-levels: you collide with
+  them, ride lifts and trains and get pushed by closing doors. Children ride
+  their parents, and props can be re-parented at runtime.
+- **`point_template`s** spawn fresh copies as in Source, so a conveyor keeps
+  sending belt modules and debris along forever.
+- **Screen effects.** `game_text` messages, screen fades and shakes, and
+  INFRA's chapter titles appear as in the game.
+
+**Performance**
+
+- Source's own visibility data (PVS), frustum culling, GPU occlusion queries
+  for props, indexed vertex buffers and nearest-first draw order. Meshes build
+  on worker threads, so a world with several large maps loads in a second or
+  two.
 
 ### Usage
 
@@ -93,83 +140,62 @@ src2mc mod export --campaign infra -o out/ --no-audio maps/infra_c4_m2_furnace.b
 SRC2MC_TIMINGS=1 src2mc mod export ...
 ```
 
-In a NeoForge 1.21.1 instance with the mod installed:
+In a NeoForge 1.21.1 instance with the mod and [Sable](https://github.com/ryanhcode/sable)
+installed:
 
 1. Copy the `.src2mc` bundle into `config/src2mc/bundles/` and the `.schem`
    files into `config/src2mc/schematics/`. Bundles load in the background at
    startup; `/src2mc reload` picks up one that changed on disk.
 2. Stand where the map's anchor should go and run `/src2mc place <map>` (the
-   map id, e.g. `infra_c4_m2_furnace`). Placement is
-   mod-native and tick-budgeted rather than a WorldEdit paste, and fails loudly
-   if the map does not fit the world's build height. Tall maps need a dimension
-   type with more height (see [Scale and world height](#scale-and-world-height)).
+   map id, e.g. `infra_c4_m2_furnace`). Placement fails loudly if the map does
+   not fit the world's build height; tall maps need a dimension type with more
+   height (see [Scale and world height](#scale-and-world-height)).
+3. Run `/src2mc logic start` to start the map's logic as a new game.
 
-Useful client commands: `/src2mc_prop_overlay_toggle` (live render, GPU-time
-and culling counters), `/src2mc_render_status`, `/src2mc_debug_face`, and
-`/src2mc_cull pvs|frustum|shadow on|off`, `/src2mc_mipmaps on|off`,
+### Commands
+
+**Map logic.** `/src2mc logic start [map]` (from a player or a command block,
+acting on the placement holding or nearest the command's position) starts the
+logic as a new game, and `/src2mc logic stop [map]` discards it. It advances
+while a player is inside the map and the tick rate is not frozen (`/tick
+freeze` pauses it). `/src2mc logic status` shows the clock, the queue and
+every input no entity handled yet; `/src2mc logic list <filter>` shows
+entities and their state; `/src2mc logic trace on` prints every output as it
+fires; `/src2mc logic fire <target> <input> [parameter]` is Source's
+`ent_fire`. `/src2mc_logic_show triggers|usable|all|off [filter]` draws the
+map's brush entities as wireframes of their exact shapes (triggers orange,
+level changes red, usable buttons and doors green, the rest grey).
+`/src2mc place_chain <map> <count>` places a map and the maps its level
+changes lead to, side by side.
+
+**Look.** `/src2mc_look on|off` switches Source's post-processing, and
+`/src2mc_look bloom|exposure|correction|vignette|fog|reflections|detail|blend|selfillum|bump on|off`
+each part of it for comparison; `/src2mc_look status` shows the exposure and
+the luminance it measured, and `/src2mc_look scale <x>|auto` holds the
+exposure. `/src2mc_sky on|off|status` switches the sky, `/src2mc_particles`
+the particles, `/src2mc_light` the lighting settings.
+
+**Sound and screen.** `/src2mc_audio` reports which soundscape plays and what
+else is sounding; `/src2mc_audio soundscapes|ambient|surfaces on|off`
+switches each part, `/src2mc_audio steps <gain>` sets how loud footsteps play
+relative to Source's own levels (default 2), and `/src2mc_audio captions
+on|off` switches the captions. `/src2mc_screen status|clear` lists the texts
+and fades on screen and takes them off.
+
+**Moving things and props.** `/src2mc movers status` counts the moving
+platforms and `/src2mc movers respawn` rebuilds them; `/src2mc_logic_props
+status|draw on|off` and `/src2mc_anim status|draw on|off` count the props the
+logic changes and the animated ones, and switch their drawing for comparison.
+
+**Rendering diagnostics.** `/src2mc_prop_overlay_toggle` (live render, GPU
+time and culling counters), `/src2mc_render_status`, `/src2mc_debug_face`,
+and `/src2mc_cull pvs|frustum|shadow on|off`, `/src2mc_mipmaps on|off`,
 `/src2mc_indexed on|off` and `/src2mc_draw_order sorted|unsorted` for A/B
-comparisons. `/src2mc_audio` reports which soundscape plays and what else is
-sounding, and `/src2mc_audio soundscapes|ambient|surfaces on|off` switches each
-part of the sound; `/src2mc_audio steps <gain>` sets how loud footsteps play
-relative to Source's own levels (default 2).
-
-The map's logic does not run until it is started: `/src2mc logic start [map]`
-(from a player or a command block, acting on the placement holding or nearest
-the command's position) starts it as a new game, and `/src2mc logic stop [map]`
-discards it. It advances only while a player is inside the map and the tick
-rate is not frozen (`/tick freeze` pauses it). `/src2mc logic status` shows the
-clock, the queue and every input no entity handled yet; `/src2mc logic list
-<filter>` shows entities and their state; `/src2mc logic trace on` prints every
-output as it fires; `/src2mc logic fire <target> <input> [parameter]` is
-Source's `ent_fire`. `/src2mc_logic_show triggers|usable|all|off [filter]` draws
-the map's brush entities as wireframes of their exact shapes (triggers orange,
-level changes red, usable buttons and doors green, the rest grey), labelled
-with class, name and entity index up close. `/src2mc place_chain <map> <count>` places a map and the
-maps its level changes lead to, side by side, and `/src2mc_audio captions
-on|off` switches the captions.
-
-Doors, buttons, track trains, rotators and other moving brush entities, with
-the props attached to them, move as [Sable](https://github.com/ryanhcode/sable)
-sub-levels, which the mod requires: players collide with them where they are,
-ride lifts and trains and are pushed by closing doors. A child rides its parent
-(wheels on a train, a gate on a lift), `func_brush` shows and hides by the
-logic, and prop doors open with the use key. Every placed map gets them whether
-its logic runs or not; `/src2mc movers status` counts them and
-`/src2mc movers respawn` rebuilds them. `/src2mc_movers light vertex|single`
-and `shading turned|unturned` switch how they are lit, for comparison. They
-cannot be broken yet.
-
-Props the map's logic changes are drawn one by one instead of merged: a
-lamp's `Skin` switches, `Color` retints, `Enable`/`Disable` shows and hides a
-`prop_dynamic` (it stays solid, as in Source), and `Kill` removes a prop with
-its collision, and everything parented to it. `/src2mc_logic_props
-status|draw on|off` counts them and switches their drawing off for comparison.
-
-Dynamic props play their model's animations as in Source: buttons press in,
-levers and switches flip, doors slide open, clocks and windmills turn,
-`SetAnimation`, `DefaultAnim` and `OnAnimationDone` drive them by
-`CDynamicProp`'s rules, and their collision follows the pose each sequence
-leaves them in. `/src2mc_anim status|draw on|off` counts them and switches
-their drawing off for comparison.
-
-`point_template`s work as in Source: what they name leaves the map as it
-spawns, and each `ForceSpawn` makes fresh copies with Source's name fixup,
-so a conveyor keeps sending belt modules and debris along forever. Copies of
-movers get Sable sub-levels of their own, reused once a copy is gone;
-`SetParent` and `ClearParent` re-parent an entity where it stands, and moving
-trains, doors and brushes touch triggers that let everything through.
-
-The map's sky faces show its 2D skybox, as Source draws it behind the world,
-instead of Minecraft's sky and terrain. `/src2mc_sky on|off|status` switches
-it for comparison.
-
-The map's `game_text` messages, screen fades and screen shakes appear as in
-Source, and INFRA's chapter titles show where the game shows them.
-`/src2mc_screen status|clear` lists what is on screen and takes it off.
+comparisons.
 
 Building the mod and running its development client is described in
 [`mod/README.md`](mod/README.md). The bundle format is specified in
-[`docs/format.md`](docs/format.md), the design in
+[`docs/format.md`](docs/format.md), the design and every decision behind it in
 [`docs/decisions.md`](docs/decisions.md), and the current state of the work in
 [`SESSION_HANDOFF.md`](SESSION_HANDOFF.md).
 

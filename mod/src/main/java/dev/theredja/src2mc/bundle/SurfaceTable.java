@@ -4,7 +4,8 @@ import java.util.List;
 import java.util.Map;
 
 /** Immutable sparse map-local surface lookup retained by a validated generation. */
-public record SurfaceTable(List<UvRegion> uvRegions, Map<SectionPos, List<Face>> sections, List<LightRegion> lightRegions) {
+public record SurfaceTable(List<UvRegion> uvRegions, Map<SectionPos, List<Face>> sections, List<LightRegion> lightRegions,
+                           List<double[]> blendRegions) {
     /** Fragment vertex coordinates are in 1/4096 block within the owner cell. */
     public static final int CELL_UNITS = 4096;
     public static final int MAX_FRAGMENT_VERTICES = 64;
@@ -16,9 +17,21 @@ public record SurfaceTable(List<UvRegion> uvRegions, Map<SectionPos, List<Face>>
         this(uvRegions, sections, List.of());
     }
 
+    public SurfaceTable(List<UvRegion> uvRegions, Map<SectionPos, List<Face>> sections, List<LightRegion> lightRegions) {
+        this(uvRegions, sections, lightRegions, List.of());
+    }
+
+    /** A blended displacement fragment's blend at map-local {@code (x, y, z)}, 0 where it has none. */
+    public double blend(Face face, double x, double y, double z) {
+        if (face.blendRegionId() < 0 || face.blendRegionId() >= blendRegions.size()) return 0;
+        double[] b = blendRegions.get(face.blendRegionId());
+        return Math.max(0, Math.min(1, b[0] * x + b[1] * y + b[2] * z + b[3]));
+    }
+
     public SurfaceTable {
         uvRegions = List.copyOf(uvRegions);
         lightRegions = List.copyOf(lightRegions);
+        blendRegions = blendRegions.stream().map(double[]::clone).toList();
         sections = sections.entrySet().stream().collect(java.util.stream.Collectors.toUnmodifiableMap(
             Map.Entry::getKey, entry -> List.copyOf(entry.getValue())));
     }
@@ -41,11 +54,17 @@ public record SurfaceTable(List<UvRegion> uvRegions, Map<SectionPos, List<Face>>
      */
     public record Face(int localCell, boolean owned, int ownerDx, int ownerDy, int ownerDz, int provenance,
                        int materialId, int uvRegionId, long sourcePrimary, long sourceSecondary, short[] vertices,
-                       int lightRegionId) {
+                       int lightRegionId, int blendRegionId) {
         public Face(int localCell, boolean owned, int ownerDx, int ownerDy, int ownerDz, int provenance,
                     int materialId, int uvRegionId, long sourcePrimary, long sourceSecondary, short[] vertices) {
             this(localCell, owned, ownerDx, ownerDy, ownerDz, provenance, materialId, uvRegionId, sourcePrimary, sourceSecondary,
-                vertices, NO_LIGHT);
+                vertices, NO_LIGHT, NO_LIGHT);
+        }
+
+        public Face(int localCell, boolean owned, int ownerDx, int ownerDy, int ownerDz, int provenance,
+                    int materialId, int uvRegionId, long sourcePrimary, long sourceSecondary, short[] vertices, int lightRegionId) {
+            this(localCell, owned, ownerDx, ownerDy, ownerDz, provenance, materialId, uvRegionId, sourcePrimary, sourceSecondary,
+                vertices, lightRegionId, NO_LIGHT);
         }
 
         public Face {
@@ -92,15 +111,21 @@ public record SurfaceTable(List<UvRegion> uvRegions, Map<SectionPos, List<Face>>
     /**
      * Where a fragment's lightmap is (format.md section 5): light page {@code page}, and the affine
      * map from a map-local block position to page coordinates, 0 to 1 across: {@code s} from the
-     * first four values as UV regions are, {@code t} from the last four.
+     * first four values as UV regions are, {@code t} from the last four. {@code bump}: for a
+     * bump-mapped face, how far right of the flat lightmap each of its three bump lightmaps starts,
+     * as a fraction of the page width (bump lightmap k at {@code s + k * bump}); 0 for a flat face.
      */
-    public record LightRegion(int page, double[] values) {
+    public record LightRegion(int page, double[] values, double bump) {
         public LightRegion { values = values.clone(); }
+        public LightRegion(int page, double[] values) { this(page, values, 0); }
         @Override public double[] values() { return values.clone(); }
         public double s(double x, double y, double z) { return values[0] * x + values[1] * y + values[2] * z + values[3]; }
         public double t(double x, double y, double z) { return values[4] * x + values[5] * y + values[6] * z + values[7]; }
-        @Override public boolean equals(Object other) { return other instanceof LightRegion r && page == r.page && java.util.Arrays.equals(values, r.values); }
-        @Override public int hashCode() { return 31 * page + java.util.Arrays.hashCode(values); }
+        @Override public boolean equals(Object other) {
+            return other instanceof LightRegion r && page == r.page && java.util.Arrays.equals(values, r.values)
+                && Double.compare(bump, r.bump) == 0;
+        }
+        @Override public int hashCode() { return 31 * (31 * page + java.util.Arrays.hashCode(values)) + Double.hashCode(bump); }
     }
 
     public record UvRegion(double[] values) {

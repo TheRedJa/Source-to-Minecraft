@@ -8,7 +8,7 @@ use anyhow::{Result, ensure};
 use std::collections::{BTreeMap, HashMap};
 
 pub const MAGIC: [u8; 8] = *b"S2FACE\0\0";
-pub const VERSION: u32 = 3;
+pub const VERSION: u32 = 5;
 /// The light-region ID of a fragment with no lightmap.
 pub const NO_LIGHT: u32 = u32::MAX;
 
@@ -45,6 +45,9 @@ pub struct EncodedFace {
     /// Where the fragment's lightmap is on the map's light pages; `None`
     /// when it has none.
     pub light: Option<LightRegion>,
+    /// A blended displacement's blend, `a * x + b * y + c * z + d` in
+    /// map-local block space; `None` elsewhere.
+    pub blend: Option<[f64; 4]>,
     pub provenance: SourceProvenance,
     pub vertices: Vec<[u16; 3]>,
 }
@@ -55,6 +58,10 @@ pub struct EncodedFace {
 pub struct LightRegion {
     pub page: u32,
     pub st: BlockTexCoord,
+    /// For a bump-mapped face, how far right of the flat lightmap, as a
+    /// fraction of the page width, each of its three bump lightmaps starts:
+    /// bump lightmap `k` (1 to 3) is at `s + k * bump`. Zero for a flat face.
+    pub bump: f64,
 }
 
 impl EncodedFace {
@@ -65,6 +72,7 @@ impl EncodedFace {
             material,
             uv: fragment.source.uv,
             light: None,
+            blend: fragment.source.blend,
             provenance: fragment.source.provenance,
             vertices: fragment.vertices.clone(),
         }
@@ -75,14 +83,28 @@ impl EncodedFace {
 struct UvKey([u64; 8]);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-struct LightKey(u32, UvKey);
+struct LightKey(u32, UvKey, u64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct BlendKey([u64; 4]);
+
+fn blend_key(blend: [f64; 4]) -> Result<BlendKey> {
+    let mut out = [0u64; 4];
+    for (slot, value) in out.iter_mut().zip(blend) {
+        ensure!(value.is_finite(), "non-finite blend region");
+        *slot = (value + 0.0).to_bits();
+    }
+    Ok(BlendKey(out))
+}
 
 /// Encode fragments into sparse 16³ section buckets. Input order is
 /// deliberately irrelevant to the output bytes.
 pub fn encode(faces: impl IntoIterator<Item = EncodedFace>, limits: Limits) -> Result<Vec<u8>> {
-    let mut buckets: BTreeMap<IVec3, Vec<(EncodedFace, UvKey, Option<LightKey>)>> = BTreeMap::new();
+    #[allow(clippy::type_complexity)]
+    let mut buckets: BTreeMap<IVec3, Vec<(EncodedFace, UvKey, Option<LightKey>, Option<BlendKey>)>> = BTreeMap::new();
     let mut uv_keys = Vec::new();
     let mut light_keys = Vec::new();
+    let mut blend_keys = Vec::new();
     let mut face_count = 0u32;
 
     for face in faces {
@@ -90,15 +112,23 @@ pub fn encode(faces: impl IntoIterator<Item = EncodedFace>, limits: Limits) -> R
         let uv = uv_key(face.uv)?;
         let light = face
             .light
-            .map(|region| uv_key(region.st).map(|key| LightKey(region.page, key)))
+            .map(|region| {
+                ensure!(
+                    region.bump.is_finite() && region.bump >= 0.0,
+                    "bump lightmap stride must be finite and not negative"
+                );
+                uv_key(region.st).map(|key| LightKey(region.page, key, (region.bump + 0.0).to_bits()))
+            })
             .transpose()?;
+        let blend = face.blend.map(blend_key).transpose()?;
         validate_vertices(&face.vertices)?;
         uv_keys.push(uv);
         light_keys.extend(light);
+        blend_keys.extend(blend);
         buckets
             .entry(section_of(face.cell))
             .or_default()
-            .push((face, uv, light));
+            .push((face, uv, light, blend));
         face_count += 1;
     }
     ensure!(
@@ -131,11 +161,25 @@ pub fn encode(faces: impl IntoIterator<Item = EncodedFace>, limits: Limits) -> R
         .map(|(index, key)| (key, index as u32))
         .collect();
 
+    blend_keys.sort_unstable();
+    blend_keys.dedup();
+    ensure!(
+        blend_keys.len() <= limits.max_uv_regions as usize,
+        "blend-region limit exceeded"
+    );
+    let blend_ids: HashMap<_, _> = blend_keys
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(index, key)| (key, index as u32))
+        .collect();
+
     let mut out = Vec::new();
     out.extend_from_slice(&MAGIC);
     put_u32(&mut out, VERSION);
     put_u32(&mut out, uv_keys.len() as u32);
     put_u32(&mut out, light_keys.len() as u32);
+    put_u32(&mut out, blend_keys.len() as u32);
     put_u32(&mut out, buckets.len() as u32);
     put_u32(&mut out, face_count);
     for uv in &uv_keys {
@@ -143,15 +187,21 @@ pub fn encode(faces: impl IntoIterator<Item = EncodedFace>, limits: Limits) -> R
             out.extend_from_slice(&value.to_le_bytes());
         }
     }
-    for LightKey(page, st) in &light_keys {
+    for LightKey(page, st, bump) in &light_keys {
         put_u32(&mut out, *page);
         for value in st.0 {
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+        out.extend_from_slice(&bump.to_le_bytes());
+    }
+    for BlendKey(values) in &blend_keys {
+        for value in values {
             out.extend_from_slice(&value.to_le_bytes());
         }
     }
     for (section, mut records) in buckets {
         let mut keyed = Vec::with_capacity(records.len());
-        for (face, uv, light) in records.drain(..) {
+        for (face, uv, light, blend) in records.drain(..) {
             let (primary, secondary) = provenance_values(face.provenance)?;
             let key = (
                 local_index(face.cell),
@@ -159,9 +209,9 @@ pub fn encode(faces: impl IntoIterator<Item = EncodedFace>, limits: Limits) -> R
                 primary,
                 secondary,
             );
-            keyed.push((key, face, uv, light));
+            keyed.push((key, face, uv, light, blend));
         }
-        keyed.sort_by_key(|(key, _, _, _)| *key);
+        keyed.sort_by_key(|(key, _, _, _, _)| *key);
         for pair in keyed.windows(2) {
             ensure!(
                 pair[0].0 != pair[1].0,
@@ -173,13 +223,14 @@ pub fn encode(faces: impl IntoIterator<Item = EncodedFace>, limits: Limits) -> R
             put_i32(&mut out, coordinate);
         }
         put_u32(&mut out, keyed.len() as u32);
-        for ((local, tag, primary, secondary), face, uv, light) in keyed {
+        for ((local, tag, primary, secondary), face, uv, light, blend) in keyed {
             put_u16(&mut out, local);
             out.push(flags(face.owner)?);
             out.push(tag);
             put_u32(&mut out, face.material.0);
             put_u32(&mut out, uv_ids[&uv]);
             put_u32(&mut out, light.map_or(NO_LIGHT, |key| light_ids[&key]));
+            put_u32(&mut out, blend.map_or(NO_LIGHT, |key| blend_ids[&key]));
             put_u32(&mut out, primary);
             put_u32(&mut out, secondary);
             out.push(face.vertices.len() as u8);
@@ -288,6 +339,7 @@ mod tests {
                 v: [0.0, 0.0, 1.0, 0.0],
             },
             light: None,
+            blend: None,
             provenance: SourceProvenance::Face { face: 12, piece: 0 },
             vertices: vec![
                 [0, 4096, 0],
@@ -320,8 +372,8 @@ mod tests {
     #[test]
     fn a_record_is_its_fixed_part_then_its_vertices() {
         let bytes = encode([face([1, 2, 3], 0.0)], Limits::default()).unwrap();
-        // Header 28, one UV region 64, section coordinates 12 and count 4.
-        let record = &bytes[28 + 64 + 16..];
+        // Header 32, one UV region 64, section coordinates 12 and count 4.
+        let record = &bytes[32 + 64 + 16..];
         assert_eq!(
             u16::from_le_bytes([record[0], record[1]]),
             2 << 8 | 3 << 4 | 1
@@ -332,9 +384,13 @@ mod tests {
             u32::from_le_bytes(record[12..16].try_into().unwrap()),
             NO_LIGHT
         );
-        assert_eq!(record[24], 4);
-        assert_eq!(record.len(), 25 + 4 * 6);
-        assert_eq!(u16::from_le_bytes([record[27], record[28]]), 4096);
+        assert_eq!(
+            u32::from_le_bytes(record[16..20].try_into().unwrap()),
+            NO_LIGHT
+        );
+        assert_eq!(record[28], 4);
+        assert_eq!(record.len(), 29 + 4 * 6);
+        assert_eq!(u16::from_le_bytes([record[31], record[32]]), 4096);
     }
 
     #[test]
@@ -366,16 +422,33 @@ mod tests {
                 u: [0.5, 0.0, 0.0, 0.25],
                 v: [0.0, 0.0, 0.5, 0.75],
             },
+            bump: 0.125,
         });
         let mut same = lit.clone();
         same.cell = [1, 0, 0];
         let bytes = encode([lit, same, face([2, 0, 0], 0.0)], Limits::default()).unwrap();
         assert_eq!(u32::from_le_bytes(bytes[16..20].try_into().unwrap()), 1);
-        let region = &bytes[28 + 64..28 + 64 + 68];
+        let region = &bytes[32 + 64..32 + 64 + 76];
         assert_eq!(u32::from_le_bytes(region[0..4].try_into().unwrap()), 2);
         assert_eq!(f64::from_le_bytes(region[4..12].try_into().unwrap()), 0.5);
-        let first = &bytes[28 + 64 + 68 + 16..];
+        assert_eq!(f64::from_le_bytes(region[68..76].try_into().unwrap()), 0.125);
+        let first = &bytes[32 + 64 + 76 + 16..];
         assert_eq!(u32::from_le_bytes(first[12..16].try_into().unwrap()), 0);
+    }
+
+    #[test]
+    fn blend_regions_are_a_table_of_their_own() {
+        let mut blended = face([0, 0, 0], 0.0);
+        blended.blend = Some([0.25, 0.0, -0.5, 1.0]);
+        let bytes = encode([blended, face([1, 0, 0], 0.0)], Limits::default()).unwrap();
+        assert_eq!(u32::from_le_bytes(bytes[20..24].try_into().unwrap()), 1);
+        let region = &bytes[32 + 64..32 + 64 + 32];
+        assert_eq!(f64::from_le_bytes(region[0..8].try_into().unwrap()), 0.25);
+        assert_eq!(f64::from_le_bytes(region[16..24].try_into().unwrap()), -0.5);
+        let first = &bytes[32 + 64 + 32 + 16..];
+        assert_eq!(u32::from_le_bytes(first[16..20].try_into().unwrap()), 0);
+        let second = &first[29 + 4 * 6..];
+        assert_eq!(u32::from_le_bytes(second[16..20].try_into().unwrap()), NO_LIGHT);
     }
 
     #[test]

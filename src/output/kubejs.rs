@@ -697,6 +697,13 @@ mod tests {
 
     fn assets(alpha_test: bool, translucent: bool, prop: Option<&str>) -> MaterialAssets {
         MaterialAssets {
+            bump_map: None,
+            ssbump: false,
+            envmap: None,
+            base_texture2: None,
+            blend_modulate: None,
+            detail: None,
+            selfillum: None,
             base_texture: "x/y".into(),
             alpha_test,
             translucent,

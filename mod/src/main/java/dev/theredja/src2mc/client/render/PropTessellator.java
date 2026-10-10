@@ -85,7 +85,7 @@ final class PropTessellator {
         polygon = clip(polygon, 2, z, true); polygon = clip(polygon, 2, z + 16, false);
         if (polygon.size() < 3) return List.of();
         List<Triangle> result = new ArrayList<>(polygon.size() - 2);
-        for (int i = 1; i + 1 < polygon.size(); i++) result.add(new Triangle(triangle.page(), polygon.getFirst(), polygon.get(i), polygon.get(i + 1)));
+        for (int i = 1; i + 1 < polygon.size(); i++) result.add(new Triangle(triangle.page(), polygon.getFirst(), polygon.get(i), polygon.get(i + 1), triangle.row()));
         return result;
     }
 
@@ -155,7 +155,7 @@ final class PropTessellator {
         List<Triangle> result = new ArrayList<>(triangles.size() * 2);
         for (Triangle triangle : triangles) {
             result.add(triangle);
-            result.add(new Triangle(triangle.page(), flipped(triangle.a()), flipped(triangle.c()), flipped(triangle.b())));
+            result.add(new Triangle(triangle.page(), flipped(triangle.a()), flipped(triangle.c()), flipped(triangle.b()), triangle.row()));
         }
         return result;
     }
@@ -165,7 +165,18 @@ final class PropTessellator {
             vertex.r(), vertex.g(), vertex.b());
     }
 
-    record Triangle(int page, Vertex a, Vertex b, Vertex c) {}
+    /** {@code row}: the material's row for its surface effects, {@link SurfaceEffects#row}; 0 for none. */
+    record Triangle(int page, Vertex a, Vertex b, Vertex c, int row) {
+        Triangle(int page, Vertex a, Vertex b, Vertex c) { this(page, a, b, c, 0); }
+    }
+
+    /** The triangles, carrying a material row. */
+    static List<Triangle> withRow(List<Triangle> triangles, int row) {
+        if (row == 0) return triangles;
+        List<Triangle> result = new ArrayList<>(triangles.size());
+        for (Triangle t : triangles) result.add(new Triangle(t.page(), t.a(), t.b(), t.c(), row));
+        return result;
+    }
     /** {@code r, g, b}: the vertex's baked light, linear; negative for none. */
     record Vertex(double x, double y, double z, double nx, double ny, double nz, double u, double v, double r, double g, double b) {
         Vertex(double x, double y, double z, double nx, double ny, double nz, double u, double v) { this(x, y, z, nx, ny, nz, u, v, -1, -1, -1); }

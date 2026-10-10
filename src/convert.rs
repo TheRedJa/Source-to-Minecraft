@@ -520,6 +520,7 @@ fn voxelize_displacement(
                 uv: texcoord.in_block_space(transform, Vec3::ZERO),
                 // Voxel-face candidates; the drawn terrain is lit through its polygons.
                 light: None,
+                blend: None,
             }),
             _ => None,
         };
@@ -932,6 +933,7 @@ fn voxelize_solids(
                                 .in_block_space(transform, origin),
                             // A brush side is not a BSP face, and has no lightmap.
                             light: None,
+                            blend: None,
                         })
                     })
                     .collect();
@@ -1368,6 +1370,7 @@ fn exact_polygons(
                     material,
                     uv,
                     light: face_light(map, face_index, info, transform, origin),
+                    blend: None,
                 },
                 transform.transform_direction(source_normal),
                 points
@@ -1437,6 +1440,12 @@ fn exact_polygons(
                     luxel: crate::bsp::texcoord::BlockTexCoord::fit([a, b, c], corners)?,
                 })
             });
+            // The blend alpha is linear over each triangle, as Source
+            // interpolates it between the displacement's vertices.
+            let blend = surface.alpha.get(triangle).and_then(|alpha| {
+                let fit = crate::bsp::texcoord::BlockTexCoord::fit([a, b, c], alpha.map(|v| [v, 0.0]))?;
+                Some(fit.u)
+            });
             polygons.push(Polygon::new(
                 FaceSource {
                     provenance: SourceProvenance::Displacement {
@@ -1446,6 +1455,7 @@ fn exact_polygons(
                     material,
                     uv,
                     light,
+                    blend,
                 },
                 normal.normalized(),
                 vec![a, b, c],

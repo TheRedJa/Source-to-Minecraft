@@ -344,6 +344,28 @@ public final class MapSurfaceRenderer {
         if (atlasMipmaps) Minecraft.getInstance().getTextureManager().getTexture(texture).setFilter(false, true);
     }
 
+    /** Binds the page's bump layer to sampler 4 for the baked shader, or a flat normal without one. */
+    static void bindBumpLayer(long generation, dev.theredja.src2mc.bundle.BundleManifest bundle, AtlasIndex atlas, int page, long frame) {
+        ResourceLocation bump = PAGES.requestBump(generation, bundle, atlas, page, frame).orElse(null);
+        if (bump == null) {
+            RenderSystem.setShaderTexture(4, PAGES.flatBumpTexture());
+            return;
+        }
+        RenderSystem.setShaderTexture(4, bump);
+        applyAtlasFilter(bump);
+    }
+
+    /** Binds the page's blend layer to sampler 7, or the flat texture without one (nothing reads it then). */
+    static void bindBlendLayer(long generation, dev.theredja.src2mc.bundle.BundleManifest bundle, AtlasIndex atlas, int page, long frame) {
+        ResourceLocation blend = PAGES.requestBlend(generation, bundle, atlas, page, frame).orElse(null);
+        if (blend == null) {
+            RenderSystem.setShaderTexture(7, PAGES.flatBumpTexture());
+            return;
+        }
+        RenderSystem.setShaderTexture(7, blend);
+        applyAtlasFilter(blend);
+    }
+
     /** Rebuilds everything, since the layout is chosen when a mesh is uploaded. */
     private static int setIndexedMeshes(net.minecraft.commands.CommandSourceStack source, boolean value) {
         indexedMeshes = value;
@@ -414,7 +436,7 @@ public final class MapSurfaceRenderer {
      * Unlike {@code /src2mc reload} this changes nothing else -- same generation, same bake, same
      * atlas residency -- which is what makes it a usable experiment.
      */
-    private static int rebuildMeshes(net.minecraft.commands.CommandSourceStack source) {
+    public static int rebuildMeshes(net.minecraft.commands.CommandSourceStack source) {
         int meshes = MESHES.size();
         dropMeshes();
         stillLoading = true;
@@ -975,6 +997,8 @@ public final class MapSurfaceRenderer {
                     : key.renderClass == BundleMaterial.RenderClass.SOLID ? RenderType.entitySolid(texture) : RenderType.entityCutout(texture);
                 activeType.setupRenderState();
                 applyAtlasFilter(texture);
+                bindBumpLayer(generation.sequence(), mesh.bundle, mesh.atlas, key.page, frame);
+                bindBlendLayer(generation.sequence(), mesh.bundle, mesh.atlas, key.page, frame);
                 // entityTranslucent writes depth, so the nearest translucent surface drawn first would
                 // hide translucent geometry behind it; keep the depth test but skip the write.
                 if (suppressDepthWrite) RenderSystem.depthMask(false);
@@ -1020,6 +1044,8 @@ public final class MapSurfaceRenderer {
             Mesh mesh = item.getValue();
             if (mesh.lastVisibleFrame == frame) {
                 PAGES.request(generation.sequence(), mesh.bundle, mesh.atlas, item.getKey().page, frame);
+                PAGES.requestBump(generation.sequence(), mesh.bundle, mesh.atlas, item.getKey().page, frame);
+                PAGES.requestBlend(generation.sequence(), mesh.bundle, mesh.atlas, item.getKey().page, frame);
             }
         }
     }
@@ -1046,6 +1072,7 @@ public final class MapSurfaceRenderer {
      */
     private static BuildResult buildRegion(BuildInput in) {
         BundleMap map = in.map;
+        SurfaceEffects.register(map);
         BuildResult result = new BuildResult();
         SurfaceOcclusion occlusion = in.occlude
             ? new SurfaceOcclusion(map.surfaces(), in.placement.translation().getX(), in.placement.translation().getY(),
@@ -1095,21 +1122,27 @@ public final class MapSurfaceRenderer {
                     float length = (float) Math.sqrt(tx * tx + ty * ty + tz * tz);
                     if (length > 0) { tx /= length; ty /= length; tz /= length; }
                     for (SurfaceTessellator.Vertex vertex : List.of(triangle.a(), triangle.b(), triangle.c())) {
-                        int light = sampleVertexLight(in, result, vertex, nx, ny, nz, lightCache, occlusion);
-                        BakedLighting.surfaceLight(map.light(), map.surfaces(), face, vertex.x(), vertex.y(), vertex.z(), nx, ny, nz, baked);
+                        int light = SurfaceEffects.withEnvmap(sampleVertexLight(in, result, vertex, nx, ny, nz, lightCache, occlusion),
+                            face.materialId(), material);
+                        BakedLighting.surfaceLight(map.light(), map.surfaces(), face, material.bump(), vertex.x(), vertex.y(), vertex.z(), nx, ny, nz, baked);
                         out.add((float) (vertex.x() - baseX), (float) (vertex.y() - baseY), (float) (vertex.z() - baseZ),
-                            (float) vertex.u(), (float) vertex.v(), tx, ty, tz, light, 0xFFFFFF, baked);
+                            (float) vertex.u(), (float) vertex.v(), tx, ty, tz, light, 0xFFFFFF, baked,
+                            (float) vertex.textureU(), (float) vertex.textureV(),
+                            (float) map.surfaces().blend(face, vertex.x(), vertex.y(), vertex.z()));
                     }
                     // $nocull: the back is its own triangle, wound the other way and lit from the
                     // side it faces, rather than a render state that would draw it with the
                     // front's light and normal.
                     if (material.doubleSided()) {
                         for (SurfaceTessellator.Vertex vertex : List.of(triangle.a(), triangle.c(), triangle.b())) {
-                            int light = sampleVertexLight(in, result, vertex, -nx, -ny, -nz, lightCache, occlusion);
+                            int light = SurfaceEffects.withEnvmap(sampleVertexLight(in, result, vertex, -nx, -ny, -nz, lightCache, occlusion),
+                                face.materialId(), material);
                             // One lightmap for both sides, as Source lights a $nocull face.
-                            BakedLighting.surfaceLight(map.light(), map.surfaces(), face, vertex.x(), vertex.y(), vertex.z(), -nx, -ny, -nz, baked);
+                            BakedLighting.surfaceLight(map.light(), map.surfaces(), face, material.bump(), vertex.x(), vertex.y(), vertex.z(), -nx, -ny, -nz, baked);
                             out.add((float) (vertex.x() - baseX), (float) (vertex.y() - baseY), (float) (vertex.z() - baseZ),
-                                (float) vertex.u(), (float) vertex.v(), -tx, -ty, -tz, light, 0xFFFFFF, baked);
+                                (float) vertex.u(), (float) vertex.v(), -tx, -ty, -tz, light, 0xFFFFFF, baked,
+                                (float) vertex.textureU(), (float) vertex.textureV(),
+                                (float) map.surfaces().blend(face, vertex.x(), vertex.y(), vertex.z()));
                         }
                     }
                 }

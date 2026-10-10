@@ -457,6 +457,11 @@ public final class PropRenderer {
             // $nocull: the back is its own triangle, wound the other way with the normal turned
             // round, so it is culled, lit and shaded from the side it faces.
             if (material.doubleSided()) tessellated = PropTessellator.withBackFaces(tessellated);
+            int row = SurfaceEffects.row(materialId, material);
+            if (row != 0) {
+                SurfaceEffects.register(map);
+                tessellated = PropTessellator.withRow(tessellated, row);
+            }
             for (PropTessellator.Triangle triangle : tessellated) {
                 for (Section section : coveredSections(triangle)) {
                     for (PropTessellator.Triangle clipped : PropTessellator.clipSection(triangle, section.x << 4, section.y << 4, section.z << 4)) {
@@ -552,6 +557,7 @@ public final class PropRenderer {
                 if (!batch.getKey().section().equals(at)) continue;
                 PackedVertices out = result.computeIfAbsent(new PageClass(batch.getKey().page(), batch.getKey().renderClass()), ignored -> new PackedVertices());
                 for (PropTessellator.Triangle triangle : batch.getValue()) {
+                    out.row(triangle.row());
                     for (PropTessellator.Vertex vertex : List.of(triangle.a(), triangle.b(), triangle.c())) {
                         int light = sampleVertexLight(in, section.placement(), vertex, lightCache);
                         if (vertex.lit()) {

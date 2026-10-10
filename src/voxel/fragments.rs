@@ -282,6 +282,7 @@ mod tests {
                 v: [0.0, 0.0, 1.0, 0.0],
             },
             light: None,
+            blend: None,
         }
     }
 

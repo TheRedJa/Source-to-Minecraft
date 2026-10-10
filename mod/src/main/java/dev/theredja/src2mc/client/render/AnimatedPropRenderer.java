@@ -466,6 +466,8 @@ public final class AnimatedPropRenderer {
             if (!material.textured() || material.renderClass() == BundleMaterial.RenderClass.FALLBACK) continue;
             AtlasIndex.Texture texture = map.atlas().textures().get(material.texture().contentId());
             if (texture == null) continue;
+            int row = SurfaceEffects.row(materialId, material);
+            if (row != 0) SurfaceEffects.register(map);
             for (int first = submesh.firstIndex(); first < submesh.firstIndex() + submesh.indexCount(); first += 3) {
                 int a = indices[first], b = indices[first + 1], c = indices[first + 2];
                 int bone = animation == null ? 0 : rigidBone(animation, a, b, c);
@@ -478,9 +480,11 @@ public final class AnimatedPropRenderer {
                     Part part = new Part(bone, piece.page(), material.renderClass());
                     if (bone >= 0) {
                         PackedVertices out = rigid.computeIfAbsent(part, ignored -> new PackedVertices());
+                        out.row(row);
                         for (PropTessellator.Vertex vertex : List.of(piece.a(), piece.b(), piece.c())) add(out, vertex, color);
                     } else {
                         Blended out = blended.computeIfAbsent(part, ignored -> new Blended());
+                        out.vertices.row(row);
                         for (PropTessellator.Vertex vertex : List.of(piece.a(), piece.b(), piece.c())) {
                             float[] w = barycentric(vertices, a, b, c, vertex);
                             out.add(a, b, c, w[0], w[1], w[2], back);

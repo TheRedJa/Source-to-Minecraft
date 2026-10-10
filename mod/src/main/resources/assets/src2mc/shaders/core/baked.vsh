@@ -3,13 +3,15 @@
 // A surface of the map lit as Source lit it (format section 22). Baked holds the light: page
 // coordinates on the map's lightmap texture (w 0), linear light per vertex (w 1), or, w 2, the
 // ambient cube in the Ambient uniforms evaluated for the vertex normal turned by NormalTurn. UV2's
-// block light adds Minecraft's light sources on top; its sky light is not used.
+// block light adds Minecraft's light sources on top; its sky light is not used, and a surface
+// that reflects a cubemap holds its material row there instead, negated.
 in vec3 Position;
 in vec4 Color;
 in vec2 UV0;
 in ivec2 UV2;
 in vec3 Normal;
 in vec4 Baked;
+in vec3 Surface;
 
 uniform sampler2D Sampler2;
 
@@ -28,6 +30,12 @@ out float viewDepth;
 out vec4 vertexColor;
 out vec2 texCoord0;
 out vec4 bakedLight;
+// The vertex relative to the camera and its normal, in world axes; the reflecting material's row
+// in the reflection settings, 0 for none.
+out vec3 worldOffset;
+out vec3 worldNormal;
+flat out int envRow;
+out vec3 surface;
 out vec3 blockLight;
 
 vec3 toLinear(vec3 color) {
@@ -39,6 +47,10 @@ void main() {
     gl_Position = ProjMat * view;
     vertexDistance = length(view.xyz);
     viewDepth = -view.z;
+    worldOffset = transpose(mat3(ModelViewMat)) * view.xyz;
+    worldNormal = NormalTurn * Normal;
+    envRow = UV2.y < 0 ? -UV2.y : 0;
+    surface = Surface;
     vertexColor = Color;
     texCoord0 = UV0;
     if (Baked.w > 1.5) {

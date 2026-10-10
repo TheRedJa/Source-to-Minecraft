@@ -1,11 +1,14 @@
 # src2mc NeoForge mod
 
-The companion mod that draws converted Source maps: bundle loading and
-validation, mod-native placement (`/src2mc place <map>`), exact per-cell surface
-rendering on mod-owned paged textures, static prop rendering, sub-block
-collision for map geometry and props, smooth lighting with a client sky-light
-bake, Source PVS, frustum, GPU-occlusion and shadow-pass culling, and the
-map's sound: soundscapes, ambient sounds and per-surface footsteps and impacts.
+The companion mod that plays converted Source maps: bundle loading and
+validation, mod-native placement (`/src2mc place <map>`), exact per-cell
+surface rendering on mod-owned paged textures, every prop as its real mesh,
+sub-block collision, the map's baked Source light with bump-mapped lightmaps,
+cubemap reflections, detail textures, blended displacements and
+self-illumination, Source's HDR post-processing (auto exposure, bloom, colour
+correction, vignette, fog), the 2D and 3D skybox, `.pcf` particles, impacts and
+sparks, the map's sound, and its logic running on the server, with moving brush
+entities as Sable sub-levels.
 What it does and how to use it is in the [root README](../README.md#the-companion-mod).
 
 The mod registers fixed generic world content plus `/src2mc status`, `validate`,
@@ -13,9 +16,10 @@ The mod registers fixed generic world content plus `/src2mc status`, `validate`,
 `/src2mc_render_status`, `/src2mc_prop_status`,
 `/src2mc_prop_overlay_toggle` and `/src2mc_audio`; the map's logic is started with `/src2mc logic start` (see the main README). Bundles load by themselves in the background
 during game startup, so `/src2mc reload` is only needed for a bundle that
-changed on disk — see [`docs/bundle-loading.md`](docs/bundle-loading.md). What
-a shaderpack does to the buffers the mod uploads is in
-[`docs/iris-compat.md`](docs/iris-compat.md).
+changed on disk — see [`docs/bundle-loading.md`](docs/bundle-loading.md). The map
+is drawn with the mod's own core shaders, which Iris shader packs do not run,
+so play maps without a shader pack active (decision D28); what a shaderpack does
+to the buffers the mod uploads is in [`docs/iris-compat.md`](docs/iris-compat.md).
 
 The current implementation state, test paths, verified behavior, known defects,
 and next work are recorded in [`../SESSION_HANDOFF.md`](../SESSION_HANDOFF.md).

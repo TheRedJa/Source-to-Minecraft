@@ -80,9 +80,10 @@ The payload begins with this fixed little-endian header:
 | Field | Type | Value |
 | --- | --- | --- |
 | magic | 8 bytes | `S2FACE\0\0` |
-| version | `u32` | 3 |
+| version | `u32` | 5 |
 | UV-region count | `u32` | number of following UV records |
 | light-region count | `u32` | number of following light-region records |
+| blend-region count | `u32` | number of following blend-region records |
 | section count | `u32` | number of following section buckets |
 | fragment count | `u32` | total fragment records in all buckets |
 
@@ -94,11 +95,21 @@ canonicalized to positive zero before deduplication and writing.
 
 Light regions follow the UV regions, sorted by page, then by the canonical
 bit patterns of their values, and unique. Each is a `u32` page index into the
-map's light file (section 22) and eight finite `f64`: the same affine form,
+map's light file (section 22), eight finite `f64`: the same affine form,
 giving the fragment's lightmap coordinates `s` and `t` as fractions of that
-page's width and height. A coordinate lands on the centre of the luxel vrad
-computed for that point of the face. A version 2 table, which has no light
-regions and no light-region ID, is rejected.
+page's width and height, and one finite `f64` bump stride, at least 0 and
+below 1. A coordinate lands on the centre of the luxel vrad computed for that
+point of the face. For a face vrad lit with bump lightmaps (`SURF_BUMPLIGHT`)
+the stride is how far right of the flat lightmap, as a fraction of the page
+width, each of its three bump lightmaps starts: bump lightmap `k` (1 to 3) is
+at `s + k * stride`. It is 0 for a flat face. Version 2 to 4 tables, without
+light regions, the stride or blend regions, are rejected.
+
+Blend regions follow the light regions, sorted by their canonical bit
+patterns and unique: four finite `f64`, `a * x + b * y + c * z + d` in
+map-local block coordinates, a blended displacement triangle's blend between
+its material's two textures, fitted through its corners' alpha (0 to 255 in
+the BSP, here 0 to 1); readers clamp it to 0..1.
 
 Each non-empty 16x16x16 map-local section then contains its signed `i32` X, Y,
 and Z section coordinates, a `u32` fragment count, and that many
@@ -112,6 +123,7 @@ variable-length fragment records:
 | material ID | `u32` | index into the map's material-reference table |
 | UV-region ID | `u32` | index into this file's UV table |
 | light-region ID | `u32` | index into this file's light-region table, or `0xFFFFFFFF` for none |
+| blend-region ID | `u32` | index into this file's blend-region table, or `0xFFFFFFFF` for none |
 | provenance primary | `u32` | brush, displacement or BSP face index |
 | provenance secondary | `u32` | side, triangle, or piece index within the face |
 | vertex count | `u8` | 3–64 |
@@ -194,6 +206,7 @@ fields in order:
 | `light` | optional canonical `maps/<map-id>/light.s2light` path (section 22) |
 | `particles` | optional canonical `maps/<map-id>/particles.json` path (section 23) |
 | `look` | optional canonical `maps/<map-id>/look.s2look` path (section 24) |
+| `cubemaps` | optional canonical `maps/<map-id>/cubemaps.s2cube` path (section 25); absent when no material reflects a cubemap |
 | `diagnostics` | canonical `maps/<map-id>/diagnostics.json` path |
 
 Surface-table material IDs index `materials` directly. This array therefore
@@ -201,8 +214,50 @@ retains the converter/BSP material order and is not sorted during encoding.
 Each material record contains the normalized diagnostic `source_material`, an
 optional differing `source_material_raw`, `render_class` (`solid`, `cutout`,
 `translucent`, or `fallback`), an optional texture reference, optional Source
-`surface_prop`, three finite reflectivity values, and `double_sided`, present
-only as `true`, when the Source material sets `$nocull`. A double-sided
+`surface_prop`, three finite reflectivity values, `double_sided`, present
+only as `true`, when the Source material sets `$nocull`, and an optional
+`bump`, present only with a texture: `normal` or `ssbump`. It says the
+texture's atlas regions carry a bump layer, the material's `$bumpmap` at the
+texture's output size: a tangent-space normal map, or with `$ssbump` each bump
+basis direction's share of the light. Only `LightmappedGeneric` and
+`WorldVertexTransition` materials without `$nodiffusebumplighting` have one.
+A texture with a bump layer is a different logical texture from the same
+image without one; its content ID hashes the base PNG encoding followed by
+the layer's raw RGBA bytes. The layer's alpha is the material's reflection
+mask: the bump map's alpha with `$normalmapalphaenvmapmask`, the mean of an
+`$envmapmask` texture's colour channels, or one minus the base texture's alpha
+with `$basealphaenvmapmask`; 255 otherwise. A reflecting material without a
+bump map but with a mask has a layer of flat normals carrying it.
+
+A material may have `envmap`, its `$envmap` reflection: `cubemap`, an index
+into the map's cubemap file (section 25); `tint`, three finite numbers
+(`$envmaptint`, default 1); `contrast` (`$envmapcontrast`, default 0);
+`saturation`, three finite numbers (`$envmapsaturation`, default 1); and
+`fresnel` (`$fresnelreflection`, default 1). Only `LightmappedGeneric` and
+`WorldVertexTransition` materials have one. The material read is the
+compiler's patch when the BSP names one, so `env_cubemap` names the cubemap
+vbsp assigned the face; left unpatched it is the map's `cubemapdefault`.
+
+Lightmapped materials may further have: `blend`, present only as `true`, for
+a `WorldVertexTransition` material with `$basetexture2`, which its texture's
+atlas regions carry as a blend layer; `blend_modulate`, the content ID of its
+`$blendmodulatetexture` as `details/<id>.png`; `detail`, its `$detail`:
+`texture` (content ID of `details/<id>.png`), `scale` (`$detailscale`, two
+numbers, repeats per base texture repeat, default 4), `blend_factor`
+(default 1), `blend_mode` (`$detailblendmode`, 0 to 11; 10 and 11 when the
+detail VTF is flagged `SSBUMP`, on a bump-mapped and a flat surface) and
+`tint` (`$detailtint`); and `selfillum`, the `$selfillumtint` of a
+`$selfillum` LightmappedGeneric, WorldVertexTransition or VertexLitGeneric
+material (a model's without `$selfillummask` or `$selfillumfresnel`) whose base
+VTF has an alpha channel, the base texture
+keeping its alpha. A `details/` PNG is
+RGBA, each side a power of two up to 512; the mod repeats it over the base
+texture's own coordinates.
+
+A VMT is read as the material system reads it on a DX9 system with HDR on, at
+the highest GPU level: its top-level keys, the conditional blocks that hold
+(`hdr`, `>=dx90`, `GPU>=1`, ...), then the one fallback block
+`<shader>_HDR_DX9`, else `<shader>_DX9`; other blocks are skipped. A double-sided
 surface is drawn from both sides; the mod adds each triangle's mirror, wound
 the other way and lit from the side it faces. Cutout takes precedence
 when Source declares both alpha-test and translucency, matching Source's hard
@@ -215,9 +270,14 @@ The optional campaign `atlas` field is exactly `atlas.json`; it is required when
 any material has a texture. The logical ID is retained in `atlas.json`, while
 pixels live only in content-addressed `atlas/<page-mip-content-id>.png` pages.
 Thus the bundle does not duplicate a logical image as both standalone and atlas
-payloads. `atlas.json` records the fixed 4096 page size, mip levels 0 through 4,
-16-pixel base gutter, every page mip and its dimensions, and every logical
-texture's lossless source-to-page rectangles. A model reference
+payloads. `atlas.json` (version 3) records the fixed 4096 page size, mip levels 0
+through 4, 16-pixel base gutter, every page mip and its dimensions, and every
+logical texture's lossless source-to-page rectangles. A page holding a texture
+with a bump layer also has `bump_mips`, a complete mip chain of the same
+layout with each such texture's bump layer at its place, gutter included, and
+the flat normal `(128, 128, 255, 255)` everywhere else. A page holding a
+texture with a blend layer has `blend_mips` the same way, transparent black
+elsewhere. A model reference
 similarly contains its content ID, diagnostic normalized Source model path,
 a `materials` array mapping mesh material slots to map-local material IDs, an
 optional `color`, an optional `animation`, and an optional lowercase
@@ -1011,7 +1071,10 @@ light of its static props. Map metadata references it through the optional
   lightmap (the first style's first lightmap, `LUMP_FACES_HDR` and
   `LUMP_LIGHTING_HDR` when the map has HDR light) is copied in with a
   one-luxel border repeating its edge, so filtering never reads a neighbour.
-  Pages are a power of two wide and at most 4,096 by 4,096.
+  Pages are a power of two wide and at most 4,096 by 4,096. A bump-mapped
+  face's three bump lightmaps of its first style, which follow its flat one
+  in the lighting lump, are copied in to its right, each with its own border,
+  one bordered lightmap width apart (section 5's bump stride).
 - `u32` node count and `i32` root, then per node four `f32`, the map-local
   plane `normal · point = distance`, and two `i32` children: a node index, or
   `-1 - leaf`. This is the world model's tree; a point on or in front of a
@@ -1134,4 +1197,19 @@ Little-endian, after the magic `S2LOOK\0\0` and `u32` version 1:
 
 A map without HDR light, colour correction or vignette still has the file;
 its flags say so.
+
+## 25. Cubemaps
+
+`maps/<map-id>/cubemaps.s2cube` holds the cubemaps the map's materials reflect
+(section 6, `envmap`). Map metadata references it through the optional
+`cubemaps` field, after `look`. Little-endian, after the magic `S2CUBE\0\0`
+and `u32` version 1: `u32` count, at least 1, then per cubemap `u32` face side,
+1 to 512, and six faces in Direct3D order, +X, -X, +Y, -Y, +Z, -Z in Source
+axes, each row by row from the top, three half floats per texel: linear RGB.
+
+A cubemap is its VTF's largest mip. A map with HDR light reads
+`<name>.hdr.vtf` when it exists, as the material system does with HDR on;
+its `RGBA16161616F` texels are written as they are. 8-bit cubemaps are gamma
+encoded and are decoded with exponent 2.2. A cubemap that does not decode is
+written black, one texel a side.
 

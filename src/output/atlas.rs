@@ -122,12 +122,53 @@ pub struct Layout {
 pub struct ImageAsset {
     pub content_id: String,
     pub image: RgbaImage,
+    /// The texture's bump layer, the same size: written at the same place on
+    /// the page's bump page.
+    pub bump: Option<RgbaImage>,
+    /// Its blend layer (a blended displacement's second texture), the same
+    /// size: written at the same place on the page's blend page.
+    pub blend: Option<RgbaImage>,
 }
 
 #[derive(Debug)]
 pub struct PageImages {
     /// One complete page image per mip level, largest first.
     pub mips: Vec<RgbaImage>,
+    /// The page's bump layer, when a texture on it has one: the same layout,
+    /// flat normals (`128, 128, 255`) where no bump map is.
+    pub bump_mips: Option<Vec<RgbaImage>>,
+    /// The page's blend layer, when a texture on it has one: the same layout,
+    /// transparent black elsewhere.
+    pub blend_mips: Option<Vec<RgbaImage>>,
+}
+
+/// A tangent-space normal pointing straight out of the surface.
+const FLAT_NORMAL: Rgba<u8> = Rgba([128, 128, 255, 255]);
+
+/// Copies `source`'s `region` to its allocation on `page`, with the gutter
+/// repeating the texture as it tiles.
+fn blit(page: &mut RgbaImage, source: &RgbaImage, region: &Region) {
+    for dy in -(GUTTER as i64)..i64::from(region.source.height + GUTTER) {
+        for dx in -(GUTTER as i64)..i64::from(region.source.width + GUTTER) {
+            let source_x = (i64::from(region.source.x) + dx).rem_euclid(i64::from(source.width())) as u32;
+            let source_y = (i64::from(region.source.y) + dy).rem_euclid(i64::from(source.height())) as u32;
+            let page_x = (i64::from(region.allocation.x) + dx) as u32;
+            let page_y = (i64::from(region.allocation.y) + dy) as u32;
+            page.put_pixel(page_x, page_y, *source.get_pixel(source_x, source_y));
+        }
+    }
+}
+
+/// Every smaller mip of a full-size page.
+fn smaller_mips(page: &RgbaImage) -> Vec<RgbaImage> {
+    use rayon::prelude::*;
+    (1..=MAX_MIP_LEVEL)
+        .into_par_iter()
+        .map(|level| {
+            let size = PAGE_SIZE >> level;
+            image::imageops::resize(page, size, size, FilterType::Triangle)
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone)]
@@ -228,6 +269,26 @@ pub fn build_pages(layout: &Layout, assets: &[ImageAsset]) -> Result<Vec<PageIma
         .iter()
         .map(|asset| (asset.content_id.as_str(), &asset.image))
         .collect();
+    let bumps: BTreeMap<_, _> = assets
+        .iter()
+        .filter_map(|asset| Some((asset.content_id.as_str(), asset.bump.as_ref()?)))
+        .collect();
+    let blends: BTreeMap<_, _> = assets
+        .iter()
+        .filter_map(|asset| Some((asset.content_id.as_str(), asset.blend.as_ref()?)))
+        .collect();
+    for (id, blend) in &blends {
+        ensure!(
+            blend.dimensions() == by_id[id].dimensions(),
+            "blend layer size differs from its texture"
+        );
+    }
+    for (id, bump) in &bumps {
+        ensure!(
+            bump.dimensions() == by_id[id].dimensions(),
+            "bump layer size differs from its texture"
+        );
+    }
     ensure!(
         by_id.len() == assets.len(),
         "duplicate texture image content ID"
@@ -253,29 +314,34 @@ pub fn build_pages(layout: &Layout, assets: &[ImageAsset]) -> Result<Vec<PageIma
         .into_par_iter()
         .map(|page_index| {
             let mut page = RgbaImage::from_pixel(PAGE_SIZE, PAGE_SIZE, Rgba([0, 0, 0, 0]));
+            let mut bump_page: Option<RgbaImage> = None;
+            let mut blend_page: Option<RgbaImage> = None;
             for region in layout.regions.iter().filter(|r| r.page == page_index) {
-                let source = by_id[region.content_id.as_str()];
-                for dy in -(GUTTER as i64)..i64::from(region.source.height + GUTTER) {
-                    for dx in -(GUTTER as i64)..i64::from(region.source.width + GUTTER) {
-                        let source_x = (i64::from(region.source.x) + dx)
-                            .rem_euclid(i64::from(source.width()))
-                            as u32;
-                        let source_y = (i64::from(region.source.y) + dy)
-                            .rem_euclid(i64::from(source.height()))
-                            as u32;
-                        let page_x = (i64::from(region.allocation.x) + dx) as u32;
-                        let page_y = (i64::from(region.allocation.y) + dy) as u32;
-                        page.put_pixel(page_x, page_y, *source.get_pixel(source_x, source_y));
-                    }
+                blit(&mut page, by_id[region.content_id.as_str()], region);
+                if let Some(bump) = bumps.get(region.content_id.as_str()) {
+                    let bump_page = bump_page
+                        .get_or_insert_with(|| RgbaImage::from_pixel(PAGE_SIZE, PAGE_SIZE, FLAT_NORMAL));
+                    blit(bump_page, bump, region);
+                }
+                if let Some(blend) = blends.get(region.content_id.as_str()) {
+                    let blend_page = blend_page
+                        .get_or_insert_with(|| RgbaImage::from_pixel(PAGE_SIZE, PAGE_SIZE, Rgba([0, 0, 0, 0])));
+                    blit(blend_page, blend, region);
                 }
             }
-            let mut smaller: Vec<RgbaImage> = (1..=MAX_MIP_LEVEL)
-                .into_par_iter()
-                .map(|level| {
-                    let size = PAGE_SIZE >> level;
-                    image::imageops::resize(&page, size, size, FilterType::Triangle)
-                })
-                .collect();
+            let bump_mips = bump_page.map(|bump_page| {
+                let mut mips = vec![bump_page];
+                let smaller = smaller_mips(&mips[0]);
+                mips.extend(smaller);
+                mips
+            });
+            let blend_mips = blend_page.map(|blend_page| {
+                let mut mips = vec![blend_page];
+                let smaller = smaller_mips(&mips[0]);
+                mips.extend(smaller);
+                mips
+            });
+            let mut smaller = smaller_mips(&page);
             for region in layout.regions.iter().filter(|r| r.page == page_index) {
                 if let Some(coverage) = cutout_coverage(by_id[region.content_id.as_str()], region) {
                     for (index, mip) in smaller.iter_mut().enumerate() {
@@ -285,7 +351,11 @@ pub fn build_pages(layout: &Layout, assets: &[ImageAsset]) -> Result<Vec<PageIma
             }
             let mut mips = vec![page];
             mips.extend(smaller);
-            PageImages { mips }
+            PageImages {
+                mips,
+                bump_mips,
+                blend_mips,
+            }
         })
         .collect())
 }
@@ -539,10 +609,52 @@ mod tests {
             &[ImageAsset {
                 content_id: "t".into(),
                 image,
+                bump: None,
+                blend: None,
             }],
         )
         .unwrap();
         (layout, pages)
+    }
+
+    #[test]
+    fn a_bump_layer_lands_where_its_texture_does() {
+        let layout = pack(&[texture("a", 8, 8), texture("b", 8, 8)]).unwrap();
+        let bump = RgbaImage::from_pixel(8, 8, Rgba([10, 20, 30, 40]));
+        let pages = build_pages(
+            &layout,
+            &[
+                ImageAsset {
+                    content_id: "a".into(),
+                    image: RgbaImage::from_pixel(8, 8, Rgba([1, 1, 1, 255])),
+                    bump: Some(bump),
+                    blend: None,
+                },
+                ImageAsset {
+                    content_id: "b".into(),
+                    image: RgbaImage::from_pixel(8, 8, Rgba([2, 2, 2, 255])),
+                    bump: None,
+                    blend: None,
+                },
+            ],
+        )
+        .unwrap();
+        let bump_mips = pages[0].bump_mips.as_ref().unwrap();
+        assert_eq!(bump_mips.len(), pages[0].mips.len());
+        for region in &layout.regions {
+            let at = bump_mips[0].get_pixel(region.allocation.x, region.allocation.y).0;
+            if region.content_id == "a" {
+                assert_eq!(at, [10, 20, 30, 40]);
+            } else {
+                assert_eq!(at, [128, 128, 255, 255]);
+            }
+        }
+    }
+
+    #[test]
+    fn a_page_without_bump_maps_has_no_bump_layer() {
+        let (_, pages) = page_mips(RgbaImage::from_pixel(8, 8, Rgba([1, 1, 1, 255])));
+        assert!(pages[0].bump_mips.is_none());
     }
 
     fn region_alphas(layout: &Layout, mip: &RgbaImage, level: u32) -> Vec<u8> {

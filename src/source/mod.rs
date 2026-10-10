@@ -7,6 +7,7 @@
 
 pub mod anim;
 pub mod captions;
+pub mod cubemap;
 pub mod extract;
 pub mod infra;
 pub mod keyvalues;

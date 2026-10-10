@@ -4,7 +4,11 @@
     "samplers": [
         { "name": "Sampler0" },
         { "name": "Sampler2" },
-        { "name": "Sampler3" }
+        { "name": "Sampler3" },
+        { "name": "Sampler4" },
+        { "name": "Sampler5" },
+        { "name": "Sampler6" },
+        { "name": "Sampler7" }
     ],
     "uniforms": [
         { "name": "ModelViewMat", "type": "matrix4x4", "count": 16, "values": [ 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0 ] },
@@ -15,6 +19,8 @@
         { "name": "FogColor", "type": "float", "count": 4, "values": [ 0.0, 0.0, 0.0, 0.0 ] },
         { "name": "SourceFog", "type": "float", "count": 4, "values": [ 0.0, 1.0, 1.0, 0.0 ] },
         { "name": "SourceFogColor", "type": "float", "count": 3, "values": [ 0.0, 0.0, 0.0 ] },
+        { "name": "DetailArray", "type": "int", "count": 1, "values": [ 15 ] },
+        { "name": "SurfaceToggles", "type": "float", "count": 4, "values": [ 1.0, 1.0, 1.0, 1.0 ] },
         { "name": "Exposure", "type": "float", "count": 1, "values": [ 1.0 ] },
         { "name": "Cutout", "type": "float", "count": 1, "values": [ -1.0 ] },
         { "name": "NormalTurn", "type": "matrix3x3", "count": 9, "values": [ 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0 ] },

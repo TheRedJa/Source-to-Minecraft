@@ -82,6 +82,10 @@ pub struct FaceSource {
     pub uv: BlockTexCoord,
     /// The baked light the face wears; `None` when it has no lightmap.
     pub light: Option<FaceLight>,
+    /// A blended displacement's blend between its two textures, affine in
+    /// block space: `a * x + b * y + c * z + d`, 0 the first texture, 1 the
+    /// second. `None` elsewhere.
+    pub blend: Option<[f64; 4]>,
 }
 
 /// A face's place in vrad's lightmaps: the BSP face whose lightmap it wears,
@@ -308,6 +312,7 @@ mod tests {
                 v: [0.0, material as f64, 0.0, brush as f64],
             },
             light: None,
+            blend: None,
         }
     }
     #[test]

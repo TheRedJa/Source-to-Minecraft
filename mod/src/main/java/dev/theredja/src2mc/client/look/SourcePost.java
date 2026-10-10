@@ -79,10 +79,12 @@ public final class SourcePost {
             histogram.append(i == 0 ? "" : " ").append(buckets[i].valid() && total > 0 ? Math.round(100f * buckets[i].pixels / total) : -1);
         }
         return String.format(java.util.Locale.ROOT, "scale %.3f (target %.3f%s), bloom amount %.3f, %d frame(s), %d histogram quer(ies), %d lookup texture(s)%s"
-                + "\nhistogram %%, dark to bright: %s; 2%% brightest at %.4f, half at %.4f (%s)",
+                + "\nhistogram %%, dark to bright: %s; 2%% brightest at %.4f, half at %.4f (%s)"
+                + "\nSource's mat_show_histogram AvgLum: %.2f%%",
             current, lastTarget, forcedScale > 0 ? ", held at " + forcedScale : "", bloomAmount, frames, queries, LOOKUP_TEXTURES.size(),
             failed ? "; the post shaders failed to load, see the log" : "", histogram,
-            locationOfPercentBright(PERCENT_BRIGHT, -1), locationOfPercentBright(50, -1), measureLinear ? "linear" : "gamma");
+            locationOfPercentBright(PERCENT_BRIGHT, -1), locationOfPercentBright(50, -1), measureLinear ? "linear" : "gamma",
+            100 * Math.max(0, measureLinear ? locationOfPercentBright(50, -1) : (float) Math.pow(Math.max(0, locationOfPercentBright(50, -1)), 2.2)));
     }
 
     /** Holds the scale at {@code value}, or with 0 lets the auto exposure move it again. */

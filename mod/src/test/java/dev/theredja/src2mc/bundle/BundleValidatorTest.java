@@ -225,7 +225,7 @@ final class BundleValidatorTest {
         assertSurfacesRejected(BundleErrorCode.UNSUPPORTED_VERSION, "version 1", version1);
 
         byte[] overCounted = surfaces(fragment(0, UNOWNED, 0, 0, 0, 0, 0, triangle));
-        overCounted[24] = 2; // header fragment count 2, one record written
+        overCounted[28] = 2; // header fragment count 2, one record written
         assertSurfacesRejected(BundleErrorCode.INVALID_SCHEMA, "fragment count", overCounted);
     }
 
@@ -295,13 +295,13 @@ final class BundleValidatorTest {
         return payloads;
     }
 
-    /** A v3 surface table: one UV region, no light region, and every fragment in section (0, 0, 0). */
+    /** A v5 surface table: one UV region, no light or blend region, and every fragment in section (0, 0, 0). */
     private static byte[] surfaces(byte[]... fragments) {
-        int size = 8 + 20 + 64 + 16;
+        int size = 8 + 24 + 64 + 16;
         for (byte[] fragment : fragments) size += fragment.length;
         ByteBuffer output = ByteBuffer.allocate(size).order(ByteOrder.LITTLE_ENDIAN);
         output.put("S2FACE\0\0".getBytes(StandardCharsets.ISO_8859_1));
-        output.putInt(3).putInt(1).putInt(0).putInt(1).putInt(fragments.length);
+        output.putInt(5).putInt(1).putInt(0).putInt(0).putInt(1).putInt(fragments.length);
         for (double value : new double[]{1, 0, 0, 0, 0, 1, 0, 0}) output.putDouble(value);
         output.putInt(0).putInt(0).putInt(0).putInt(fragments.length);
         for (byte[] fragment : fragments) output.put(fragment);
@@ -309,9 +309,9 @@ final class BundleValidatorTest {
     }
 
     private static byte[] fragment(int cell, int flags, int kind, int material, int uv, int primary, int secondary, int... coords) {
-        ByteBuffer output = ByteBuffer.allocate(25 + coords.length * 2).order(ByteOrder.LITTLE_ENDIAN);
+        ByteBuffer output = ByteBuffer.allocate(29 + coords.length * 2).order(ByteOrder.LITTLE_ENDIAN);
         output.putShort((short) cell).put((byte) flags).put((byte) kind)
-            .putInt(material).putInt(uv).putInt(-1).putInt(primary).putInt(secondary).put((byte) (coords.length / 3));
+            .putInt(material).putInt(uv).putInt(-1).putInt(-1).putInt(primary).putInt(secondary).put((byte) (coords.length / 3));
         for (int coord : coords) output.putShort((short) coord);
         return output.array();
     }
@@ -380,7 +380,7 @@ final class BundleValidatorTest {
             + "\"props\":\"maps/d1_01/props.s2props\",\"diagnostics\":\"maps/d1_01/diagnostics.json\"}\n").getBytes(StandardCharsets.UTF_8));
         payloads.put("maps/d1_01/diagnostics.json", "{\"format\":\"src2mc-diagnostics\",\"version\":1,\"messages\":[]}\n".getBytes(StandardCharsets.UTF_8));
         payloads.put("maps/d1_01/props.s2props", binaryHeader("S2PROP\0\0", 1, 0));
-        payloads.put("maps/d1_01/surfaces.s2faces", binaryHeader("S2FACE\0\0", 3, 0, 0, 0, 0));
+        payloads.put("maps/d1_01/surfaces.s2faces", binaryHeader("S2FACE\0\0", 5, 0, 0, 0, 0, 0));
         return payloads;
     }
 

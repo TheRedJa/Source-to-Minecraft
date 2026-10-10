@@ -2,6 +2,7 @@
 
 use crate::geom::Vec3;
 use crate::output::{atlas, bundle, metadata, placement, schem, surface};
+use crate::source::vmt::EnvmapMask;
 use crate::voxel::grid::{IVec3, Palette};
 use anyhow::{Context, Result, ensure};
 use sha2::{Digest, Sha256};
@@ -25,10 +26,23 @@ pub struct ModelAsset {
 /// animation.
 pub type ModelKey = (String, String, Vec<u32>, [u8; 3], Option<String>);
 
+/// Logical textures by content ID: the bytes they are named by, the image,
+/// and their bump and blend layers.
+type TextureAssets = BTreeMap<
+    String,
+    (Vec<u8>, image::RgbaImage, Option<image::RgbaImage>, Option<image::RgbaImage>),
+>;
+
 pub struct TextureAsset {
     pub content_id: String,
     pub bytes: Vec<u8>,
     pub image: image::RgbaImage,
+    /// The bump layer drawn with it: a normal or self-shadowed bump map at
+    /// the same size, packed at the same atlas place on the bump pages.
+    pub bump: Option<image::RgbaImage>,
+    /// The blend layer: a blended displacement material's `$basetexture2`
+    /// at the same size, at the same atlas place on the blend pages.
+    pub blend: Option<image::RgbaImage>,
     /// Only the 3D skybox room draws it: packed after every texture the map
     /// draws, so the room never spreads the map's textures over more pages.
     pub room_only: bool,
@@ -46,6 +60,52 @@ struct ExtractedMaterials {
     room_material_ids: BTreeMap<String, u32>,
     /// The material ID each particle material draws with.
     effect_material_ids: BTreeMap<String, u32>,
+    /// The cubemap files the materials reflect, by `envmap.cubemap`.
+    cubemap_files: Vec<String>,
+    /// Those cubemaps decoded; black where a file does not decode.
+    cubemaps: Vec<crate::source::cubemap::Cubemap>,
+    /// Detail and blend modulation textures by content ID: their PNG.
+    details: BTreeMap<String, Vec<u8>>,
+}
+
+/// The material's reflection, its cubemap added to `cubemaps`; `None` when
+/// the cubemap file is missing. `env_cubemap` left unpatched by vbsp, as on a
+/// map built without cubemaps, reflects the map's default cubemap; a map with
+/// HDR light reads the `.hdr.vtf`, as the material system does with HDR on.
+fn cubemap_reference(
+    envmap: &crate::source::vmt::Envmap,
+    map: &crate::bsp::Map,
+    resolver: &crate::source::vmt::Materials,
+    cubemaps: &mut Vec<String>,
+) -> Option<metadata::EnvmapReference> {
+    let texture = if envmap.texture.eq_ignore_ascii_case("env_cubemap") {
+        let stem = map.path.file_stem()?.to_string_lossy().to_ascii_lowercase();
+        format!("maps/{stem}/cubemapdefault")
+    } else {
+        envmap.texture.to_ascii_lowercase().trim_end_matches(".vtf").to_string()
+    };
+    let candidates = [
+        map.light.hdr.then(|| format!("materials/{texture}.hdr.vtf")),
+        Some(format!("materials/{texture}.vtf")),
+    ];
+    let file = candidates.into_iter().flatten().find(|path| {
+        cubemaps.contains(path) || resolver.read(path).is_some()
+    })?;
+    let index = match cubemaps.iter().position(|known| *known == file) {
+        Some(index) => index,
+        None => {
+            cubemaps.push(file);
+            cubemaps.len() - 1
+        }
+    };
+    let f = |v: f32| f64::from(v);
+    Some(metadata::EnvmapReference {
+        cubemap: index as u32,
+        tint: envmap.tint.map(f),
+        contrast: f(envmap.contrast),
+        saturation: envmap.saturation.map(f),
+        fresnel: f(envmap.fresnel),
+    })
 }
 
 pub struct Prop {
@@ -135,6 +195,10 @@ pub struct MapExport {
     pub particles: Option<crate::output::particles::ParticleTable>,
     /// The map's HDR flag and colour lookups (format section 24).
     pub look: crate::output::look::LookTable,
+    /// The cubemaps the map's materials reflect (format section 25).
+    pub cubemaps: Vec<crate::source::cubemap::Cubemap>,
+    /// Detail and blend modulation textures by content ID: their PNG.
+    pub details: BTreeMap<String, Vec<u8>>,
     pub diagnostics: metadata::Diagnostics,
 }
 
@@ -319,10 +383,12 @@ pub fn from_conversion(
     // Model UVs are normalized sheet coordinates. Preserve enough pixels for
     // the largest world-space use of each sheet; otherwise model-only
     // materials never enter the atlas and every prop silently becomes a
-    // fallback material.
+    // fallback material. A prop the logic reskins needs every skin family's
+    // materials, not just the one it starts with.
     let mut prop_texture_spans = BTreeMap::<String, f64>::new();
     for item in extracted.iter().chain(riding.values().flatten()) {
-        for part in &item.model.parts {
+        let models = std::iter::once(&item.model).chain(&item.skins);
+        for part in models.flat_map(|model| &model.parts) {
             if part.uv_per_unit.is_finite() && part.uv_per_unit > 0.0 {
                 let blocks = 1.0 / (part.uv_per_unit * UNITS_PER_BLOCK);
                 prop_texture_spans
@@ -390,6 +456,9 @@ pub fn from_conversion(
         prop_bucket_ids,
         room_material_ids: skybox_material_ids,
         effect_material_ids,
+        cubemaps,
+        details,
+        ..
     } = extract_materials(
         map,
         config,
@@ -507,6 +576,12 @@ pub fn from_conversion(
                     surface_prop: None,
                     reflectivity: [0.0; 3],
                     double_sided: false,
+                    bump: None,
+                    envmap: None,
+                    blend: false,
+                    blend_modulate: None,
+                    detail: None,
+                    selfillum: None,
                 });
                 id
             })
@@ -1023,6 +1098,8 @@ pub fn from_conversion(
         }),
         particles,
         look,
+        cubemaps,
+        details,
         diagnostics: metadata::Diagnostics::new(diagnostics)?,
     })
 }
@@ -1430,7 +1507,7 @@ fn extract_materials(
             (request, image)
         })
         .collect();
-    assign_materials(
+    let mut extracted = assign_materials(
         map,
         prop_texture_spans,
         room_texture_spans,
@@ -1440,7 +1517,27 @@ fn extract_materials(
         &mut decoder,
         quality,
         &mut |request| produced.get(&request).cloned().flatten(),
-    )
+    );
+    extracted.cubemaps = extracted
+        .cubemap_files
+        .iter()
+        .map(|file| {
+            resolver
+                .read(file)
+                .and_then(|bytes| crate::source::cubemap::decode(&bytes).ok())
+                .unwrap_or(crate::source::cubemap::Cubemap {
+                    size: 1,
+                    faces: Default::default(),
+                })
+        })
+        .map(|mut cube| {
+            for face in &mut cube.faces {
+                face.resize((cube.size * cube.size) as usize, [0.0; 3]);
+            }
+            cube
+        })
+        .collect();
+    extracted
 }
 
 /// One texture as a material needs it: the file, the size, and how its alpha
@@ -1477,6 +1574,8 @@ fn assign_materials(
         }
     }
     let mut face_material_ids: Vec<u32> = vec![0; surfaces.len()];
+    let mut cubemaps: Vec<String> = Vec::new();
+    let mut details: BTreeMap<String, Vec<u8>> = BTreeMap::new();
     let mut prop_bucket_ids: BTreeMap<String, u32> = BTreeMap::new();
     let mut materials: Vec<metadata::MaterialReference> = Vec::new();
 
@@ -1490,9 +1589,16 @@ fn assign_materials(
             surface_prop: None,
             reflectivity: material.reflectivity,
             double_sided: false,
+            bump: None,
+            envmap: None,
+            blend: false,
+            blend_modulate: None,
+            detail: None,
+            selfillum: None,
         };
         let face_indices = &faces_by_material[index];
-        let Some(material_assets) = resolver.assets(&material.name, Some(&material.raw_name))
+        let Some(mut material_assets) =
+            resolver.assets(&material.name, Some(&material.raw_name))
         else {
             materials.push(base_reference);
             assign_material(
@@ -1502,6 +1608,7 @@ fn assign_materials(
             );
             continue;
         };
+        base_alpha_rules(&mut material_assets, decoder);
         let mut reference_template = base_reference;
         reference_template.render_class = if material_assets.alpha_test {
             metadata::RenderClass::Cutout
@@ -1546,19 +1653,154 @@ fn assign_materials(
         let mut assigned: BTreeSet<usize> = BTreeSet::new();
         let mut first_bucket_material_index: Option<u32> = None;
         for (output, contribs) in buckets {
+            // The bump map at the base texture's size, so it shares its atlas
+            // place; the pair is one logical texture, named by both. Asked for
+            // first: the request pass gets nothing back for the base texture.
+            let bump = material_assets.bump_map.as_ref().and_then(|bump_map| {
+                produce(TextureRequest {
+                    texture: bump_map.clone(),
+                    output,
+                    alpha_test: false,
+                    opaque: false,
+                })
+            });
+            // The reflection's mask, kept in the layer's alpha (asked for before the
+            // base texture, as the bump map is): LightmappedGeneric
+            // reads it from the bump map's alpha, an $envmapmask texture, or one
+            // minus the base texture's alpha.
+            let mask = match material_assets.envmap.as_ref().map(|e| &e.mask) {
+                Some(EnvmapMask::Texture(mask)) => produce(TextureRequest {
+                    texture: mask.clone(),
+                    output,
+                    alpha_test: false,
+                    opaque: false,
+                })
+                .map(|(_, mask)| {
+                    mask.pixels()
+                        .map(|p| ((u16::from(p[0]) + u16::from(p[1]) + u16::from(p[2])) / 3) as u8)
+                        .collect::<Vec<u8>>()
+                }),
+                Some(EnvmapMask::BaseAlpha) => produce(TextureRequest {
+                    texture: material_assets.base_texture.clone(),
+                    output,
+                    alpha_test: false,
+                    opaque: false,
+                })
+                .map(|(_, base)| base.pixels().map(|p| 255 - p[3]).collect::<Vec<u8>>()),
+                _ => None,
+            };
+            // A blended displacement's second texture at the base texture's size.
+            let blend_image = material_assets.base_texture2.as_ref().and_then(|texture| {
+                produce(TextureRequest {
+                    texture: texture.clone(),
+                    output,
+                    alpha_test: false,
+                    opaque: false,
+                })
+                .map(|(_, image)| image)
+            });
+            // Detail and blend modulation textures repeat on their own; a
+            // power of two at most 512 a side, mipmapped by the mod.
+            let detail_ssbump = material_assets
+                .detail
+                .as_ref()
+                .and_then(|detail| decoder.header(&detail.texture))
+                .is_some_and(|h| h.flags & crate::source::vtf::FLAG_SSBUMP != 0);
+            let mut repeating = |texture: &str| -> Option<String> {
+                let header = decoder.header(texture)?;
+                let side = |n: u32| 1u32 << (n.clamp(1, 512).ilog2());
+                let (bytes, _) = produce(TextureRequest {
+                    texture: texture.to_string(),
+                    output: [side(header.size[0]), side(header.size[1])],
+                    alpha_test: false,
+                    opaque: false,
+                })?;
+                let id = bundle::content_id(&bytes);
+                details.entry(id.clone()).or_insert(bytes);
+                Some(id)
+            };
+            let detail = material_assets.detail.as_ref().and_then(|detail| {
+                let texture = repeating(&detail.texture)?;
+                let blend_mode = match (detail_ssbump, material_assets.bump_map.is_some()) {
+                    (true, true) => 10,
+                    (true, false) => 11,
+                    _ => detail.blend_mode,
+                };
+                let f = |v: f32| f64::from(v);
+                Some(metadata::DetailReference {
+                    texture,
+                    scale: detail.scale.map(f),
+                    blend_factor: f(detail.blend_factor),
+                    blend_mode,
+                    tint: detail.tint.map(f),
+                })
+            });
+            let blend_modulate = material_assets
+                .blend_modulate
+                .as_deref()
+                .and_then(&mut repeating);
+            // $selfillum glows by the base texture's alpha, which an opaque
+            // texture otherwise drops.
             let Some((bytes, image)) = produce(TextureRequest {
                 texture: material_assets.base_texture.clone(),
                 output,
                 alpha_test: material_assets.alpha_test,
-                opaque: !material_assets.alpha_test && !material_assets.translucent,
+                opaque: !material_assets.alpha_test
+                    && !material_assets.translucent
+                    && material_assets.selfillum.is_none(),
             }) else {
                 continue;
             };
+            let normal_alpha = matches!(
+                material_assets.envmap.as_ref().map(|e| &e.mask),
+                Some(EnvmapMask::NormalAlpha)
+            );
+            let bump_kind = bump.as_ref().map(|_| {
+                if material_assets.ssbump {
+                    metadata::BumpKind::Ssbump
+                } else {
+                    metadata::BumpKind::Normal
+                }
+            });
+            let layer = match (bump, mask) {
+                (Some((_, mut layer)), mask) => {
+                    if !normal_alpha {
+                        for (index, pixel) in layer.pixels_mut().enumerate() {
+                            pixel[3] = mask.as_ref().map_or(255, |m| m[index]);
+                        }
+                    }
+                    Some(layer)
+                }
+                (None, Some(mask)) => {
+                    let mut layer = image::RgbaImage::new(output[0], output[1]);
+                    for (pixel, alpha) in layer.pixels_mut().zip(mask) {
+                        *pixel = image::Rgba([128, 128, 255, alpha]);
+                    }
+                    Some(layer)
+                }
+                (None, None) => None,
+            };
+            // With layers the texture is one logical texture, named by all.
+            let mut bytes = bytes;
+            for extra in [&layer, &blend_image].into_iter().flatten() {
+                bytes.extend_from_slice(extra.as_raw());
+            }
+            let bump_image = layer;
+            let blend = blend_image.is_some();
             let content_id = bundle::content_id(&bytes);
             assets_by_id
                 .entry(content_id.clone())
-                .or_insert((bytes, image));
+                .or_insert((bytes, image, bump_image, blend_image));
             let mut reference = reference_template.clone();
+            reference.bump = bump_kind;
+            reference.blend = blend;
+            reference.blend_modulate = blend_modulate;
+            reference.detail = detail;
+            reference.selfillum = material_assets.selfillum.map(|t| t.map(f64::from));
+            reference.envmap = material_assets
+                .envmap
+                .as_ref()
+                .and_then(|envmap| cubemap_reference(envmap, map, resolver, &mut cubemaps));
             reference.texture = Some(metadata::TextureReference {
                 content_id,
                 original_width: header.size[0],
@@ -1658,11 +1900,13 @@ fn assign_materials(
     }
     let textures = assets_by_id
         .into_iter()
-        .map(|(content_id, (bytes, image))| TextureAsset {
+        .map(|(content_id, (bytes, image, bump, blend))| TextureAsset {
             room_only: !drawn_by_map.contains(&content_id),
             content_id,
             bytes,
             image,
+            bump,
+            blend,
         })
         .collect();
     ExtractedMaterials {
@@ -1672,12 +1916,43 @@ fn assign_materials(
         prop_bucket_ids,
         room_material_ids,
         effect_material_ids,
+        cubemap_files: cubemaps,
+        cubemaps: Vec::new(),
+        details,
     }
 }
 
 /// A projection span large enough that a particle texture keeps every texel
 /// it has.
 const EFFECT_SPAN: f64 = 1.0e6;
+
+/// LightmappedGeneric and VertexLitGeneric drop `$selfillum` and
+/// `$basealphaenvmapmask` when the base texture has no alpha channel, and
+/// alpha test no texture whose alpha means either.
+fn base_alpha_rules(
+    material_assets: &mut crate::source::vmt::MaterialAssets,
+    decoder: &mut crate::source::vtf::Textures,
+) {
+    let base_alpha = decoder
+        .header(&material_assets.base_texture)
+        .is_some_and(|h| h.flags & crate::source::vtf::FLAG_ALPHA != 0);
+    if !base_alpha {
+        material_assets.selfillum = None;
+        if let Some(envmap) = &mut material_assets.envmap
+            && envmap.mask == EnvmapMask::BaseAlpha
+        {
+            envmap.mask = EnvmapMask::None;
+        }
+    }
+    if material_assets.selfillum.is_some()
+        || material_assets
+            .envmap
+            .as_ref()
+            .is_some_and(|envmap| envmap.mask == EnvmapMask::BaseAlpha)
+    {
+        material_assets.alpha_test = false;
+    }
+}
 
 /// A material drawn outside the map's faces, by props or the 3D skybox room,
 /// with one texture of the detail `blocks_spanned` asks; without a texture
@@ -1691,7 +1966,7 @@ fn standalone_material(
     decoder: &mut crate::source::vtf::Textures,
     quality: atlas::TextureQuality,
     produce: &mut dyn FnMut(TextureRequest) -> Option<(Vec<u8>, image::RgbaImage)>,
-    assets_by_id: &mut BTreeMap<String, (Vec<u8>, image::RgbaImage)>,
+    assets_by_id: &mut TextureAssets,
 ) -> metadata::MaterialReference {
     let mut reference = metadata::MaterialReference {
         source_material: name.to_string(),
@@ -1701,10 +1976,20 @@ fn standalone_material(
         surface_prop: None,
         reflectivity: [0.0; 3],
         double_sided: false,
+        bump: None,
+        envmap: None,
+        blend: false,
+        blend_modulate: None,
+        detail: None,
+        selfillum: None,
     };
-    let Some(material_assets) = resolver.assets(name, None) else {
+    let Some(mut material_assets) = resolver.assets(name, None) else {
         return reference;
     };
+    if effect {
+        material_assets.selfillum = None;
+    }
+    base_alpha_rules(&mut material_assets, decoder);
     reference.render_class = if effect {
         metadata::RenderClass::Translucent
     } else if material_assets.alpha_test {
@@ -1734,14 +2019,19 @@ fn standalone_material(
         texture: material_assets.base_texture.clone(),
         output: decision.output,
         alpha_test: material_assets.alpha_test && !effect,
-        opaque: !effect && !material_assets.alpha_test && !material_assets.translucent,
+        // $selfillum glows by the base texture's alpha.
+        opaque: !effect
+            && !material_assets.alpha_test
+            && !material_assets.translucent
+            && material_assets.selfillum.is_none(),
     }) else {
         return reference;
     };
+    reference.selfillum = material_assets.selfillum.map(|t| t.map(f64::from));
     let content_id = bundle::content_id(&bytes);
     assets_by_id
         .entry(content_id.clone())
-        .or_insert((bytes, image));
+        .or_insert((bytes, image, None, None));
     reference.texture = Some(metadata::TextureReference {
         content_id,
         original_width: decision.original[0],
@@ -1838,11 +2128,12 @@ pub fn write_campaign(
             // Room-only when no map of the bundle draws it.
             let room_only = atlas_assets
                 .get(&texture.content_id)
-                .is_none_or(|(_, room_only)| *room_only)
+                .is_none_or(|(_, _, _, room_only)| *room_only)
                 && texture.room_only;
-            if let Some((old, _)) =
-                atlas_assets.insert(texture.content_id.clone(), (texture.image, room_only))
-            {
+            if let Some((old, _, _, _)) = atlas_assets.insert(
+                texture.content_id.clone(),
+                (texture.image, texture.bump, texture.blend, room_only),
+            ) {
                 ensure!(
                     old.as_raw() == atlas_assets[&texture.content_id].0.as_raw(),
                     "shared logical texture differs"
@@ -1855,7 +2146,7 @@ pub fn write_campaign(
     if atlas_path.is_some() {
         let logical = atlas_assets
             .iter()
-            .map(|(content_id, (image, room_only))| atlas::LogicalTexture {
+            .map(|(content_id, (image, _, _, room_only))| atlas::LogicalTexture {
                 content_id: content_id.clone(),
                 width: image.width(),
                 height: image.height(),
@@ -1865,30 +2156,45 @@ pub fn write_campaign(
         let layout = atlas::pack(&logical)?;
         let images = atlas_assets
             .into_iter()
-            .map(|(content_id, (image, _))| atlas::ImageAsset { content_id, image })
+            .map(|(content_id, (image, bump, blend, _))| atlas::ImageAsset {
+                content_id,
+                image,
+                bump,
+                blend,
+            })
             .collect::<Vec<_>>();
         let pages = atlas::build_pages(&layout, &images)?;
         crate::timing::mark("  write: pack atlas pages");
         // Encoded in parallel, added in page and level order.
         use rayon::prelude::*;
-        let encoded: Vec<Vec<Result<(u32, u32, Vec<u8>)>>> = pages
+        let encode_mips = |mips: &Vec<image::RgbaImage>| -> Vec<Result<(u32, u32, Vec<u8>)>> {
+            mips.par_iter()
+                .map(|image| {
+                    Ok((
+                        image.width(),
+                        image.height(),
+                        crate::source::vtf::to_png(image)?,
+                    ))
+                })
+                .collect()
+        };
+        #[allow(clippy::type_complexity)]
+        let encoded: Vec<(
+            Vec<Result<(u32, u32, Vec<u8>)>>,
+            Option<Vec<Result<(u32, u32, Vec<u8>)>>>,
+            Option<Vec<Result<(u32, u32, Vec<u8>)>>>,
+        )> = pages
             .par_iter()
             .map(|images| {
-                images
-                    .mips
-                    .par_iter()
-                    .map(|image| {
-                        Ok((
-                            image.width(),
-                            image.height(),
-                            crate::source::vtf::to_png(image)?,
-                        ))
-                    })
-                    .collect()
+                (
+                    encode_mips(&images.mips),
+                    images.bump_mips.as_ref().map(encode_mips),
+                    images.blend_mips.as_ref().map(encode_mips),
+                )
             })
             .collect();
         let mut page_meta = Vec::with_capacity(encoded.len());
-        for (page, images) in encoded.into_iter().enumerate() {
+        let mut add_mips = |images: Vec<Result<(u32, u32, Vec<u8>)>>| -> Result<Vec<metadata::AtlasMip>> {
             let mut mips = Vec::with_capacity(images.len());
             for (level, image) in images.into_iter().enumerate() {
                 let (width, height, png) = image?;
@@ -1900,9 +2206,17 @@ pub fn write_campaign(
                     height,
                 });
             }
+            Ok(mips)
+        };
+        for (page, (images, bump, blend)) in encoded.into_iter().enumerate() {
+            let mips = add_mips(images)?;
+            let bump_mips = bump.map(&mut add_mips).transpose()?;
+            let blend_mips = blend.map(&mut add_mips).transpose()?;
             page_meta.push(metadata::AtlasPage {
                 page: page as u32,
                 mips,
+                bump_mips,
+                blend_mips,
             });
         }
         let textures = logical
@@ -1932,7 +2246,7 @@ pub fn write_campaign(
             "atlas.json",
             metadata::AtlasMetadata {
                 format: "src2mc-atlas",
-                version: 1,
+                version: 3,
                 page_size: atlas::PAGE_SIZE,
                 max_mip_level: atlas::MAX_MIP_LEVEL,
                 gutter: atlas::GUTTER,
@@ -2105,6 +2419,16 @@ pub fn write_campaign(
             archive.add(format!("{prefix}/particles.json"), particles.encode()?)?;
         }
         archive.add(format!("{prefix}/look.s2look"), map.look.encode())?;
+        for (id, png) in &map.details {
+            let added = archive.add_content("details", "png", png.clone())?;
+            ensure!(added == *id, "detail texture content ID changed");
+        }
+        if !map.cubemaps.is_empty() {
+            archive.add(
+                format!("{prefix}/cubemaps.s2cube"),
+                crate::output::cubemaps::encode(&map.cubemaps)?,
+            )?;
+        }
         let has_movers = !map.movers.is_empty();
         if has_movers {
             use crate::output::movers;
@@ -2290,6 +2614,7 @@ pub fn write_campaign(
             light: has_light.then(|| format!("{prefix}/light.s2light")),
             particles: has_particles.then(|| format!("{prefix}/particles.json")),
             look: Some(format!("{prefix}/look.s2look")),
+            cubemaps: (!map.cubemaps.is_empty()).then(|| format!("{prefix}/cubemaps.s2cube")),
             diagnostics: format!("{prefix}/diagnostics.json"),
         };
         archive.add(&metadata_path, meta.encode()?)?;
@@ -2413,6 +2738,12 @@ mod tests {
             surface_prop: None,
             reflectivity: [0.25, 0.5, 0.75],
             double_sided: false,
+            bump: None,
+            envmap: None,
+            blend: false,
+            blend_modulate: None,
+            detail: None,
+            selfillum: None,
         };
         let content_id = bundle::content_id(&mesh_bytes);
         MapExport {
@@ -2432,6 +2763,7 @@ mod tests {
                     v: [0.0, 0.0, 1.0, 0.0],
                 },
                 light: None,
+                blend: None,
                 provenance: SourceProvenance::Face { face: 0, piece: 0 },
                 vertices: vec![
                     [0, 4096, 0],
@@ -2462,6 +2794,8 @@ mod tests {
             light: None,
             particles: None,
             look: crate::output::look::LookTable { hdr: false, post: Default::default(), lookups: Default::default() },
+            cubemaps: Vec::new(),
+            details: BTreeMap::new(),
             props: vec![Prop {
                 source_ordinal: 0,
                 source_model: source_model.into(),
@@ -2493,6 +2827,7 @@ mod tests {
                 material,
                 uv: BlockTexCoord { u, v },
                 light: None,
+                blend: None,
             },
             normal: Vec3::new(0.0, 1.0, 0.0),
             vertices: vec![
@@ -2673,6 +3008,12 @@ mod tests {
             surface_prop: None,
             reflectivity: [0.0; 3],
             double_sided: false,
+            bump: None,
+            envmap: None,
+            blend: false,
+            blend_modulate: None,
+            detail: None,
+            selfillum: None,
         });
         map.models.push(ModelAsset {
             source_model: "models/b.mdl".into(),

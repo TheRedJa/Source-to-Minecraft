@@ -379,6 +379,7 @@ public final class MoverRenderer {
         List<dev.theredja.src2mc.world.PropStates.State> propStates = propStates(level, resolved);
         int light = 0;
         BundleMap map = resolved.map();
+        SurfaceEffects.register(map);
         MoverTable.Mover mover = resolved.mover();
         Map<PageClass, PackedVertices> meshes = new HashMap<>();
         if (mover.surfaces() != null && map.atlas() != null) {
@@ -395,8 +396,9 @@ public final class MoverRenderer {
                     for (var triangle : SurfaceTessellator.tessellate(x, y, z, face,
                         mover.surfaces().uvRegions().get(face.uvRegionId()), material.texture(), texture, map.atlas().pageSize())) {
                         PackedVertices out = meshes.computeIfAbsent(new PageClass(triangle.page(), material.renderClass()), ignored -> new PackedVertices());
-                        addSurface(out, triangle, light, false, map, mover.surfaces(), face);
-                        if (material.doubleSided()) addSurface(out, triangle, light, true, map, mover.surfaces(), face);
+                        int lit = SurfaceEffects.withEnvmap(light, face.materialId(), material);
+                        addSurface(out, triangle, lit, false, map, mover.surfaces(), face, material.bump());
+                        if (material.doubleSided()) addSurface(out, triangle, lit, true, map, mover.surfaces(), face, material.bump());
                     }
                 }
             }
@@ -430,8 +432,10 @@ public final class MoverRenderer {
                 if (texture == null) continue;
                 List<PropTessellator.Triangle> tessellated = PropTessellator.tessellate(mesh, submesh, prop, material.texture(), texture, map.atlas().pageSize());
                 if (material.doubleSided()) tessellated = PropTessellator.withBackFaces(tessellated);
+                int row = SurfaceEffects.row(materialId, material);
                 for (PropTessellator.Triangle triangle : tessellated) {
                     PackedVertices out = meshes.computeIfAbsent(new PageClass(triangle.page(), material.renderClass()), ignored -> new PackedVertices());
+                    out.row(row);
                     for (PropTessellator.Vertex vertex : List.of(triangle.a(), triangle.b(), triangle.c())) {
                         // Lit by the ambient cube where the mover is, set for each draw.
                         out.add((float) vertex.x(), (float) vertex.y(), (float) vertex.z(), (float) vertex.u(), (float) vertex.v(),
@@ -459,7 +463,7 @@ public final class MoverRenderer {
     private static final float[] AMBIENT_LIT = {0, 0, 0, BakedLighting.AMBIENT};
 
     private static void addSurface(PackedVertices out, SurfaceTessellator.Triangle triangle, int light, boolean back,
-                                   BundleMap map, SurfaceTable surfaces, SurfaceTable.Face face) {
+                                   BundleMap map, SurfaceTable surfaces, SurfaceTable.Face face, BundleMaterial.Bump bump) {
         var a = triangle.a();
         var b = back ? triangle.c() : triangle.b();
         var c = back ? triangle.b() : triangle.c();
@@ -471,8 +475,9 @@ public final class MoverRenderer {
         float[] baked = new float[4];
         for (SurfaceTessellator.Vertex vertex : List.of(a, b, c)) {
             // Its own lightmap, which moves with it as Source's does: mover-local light regions.
-            BakedLighting.surfaceLight(map.light(), surfaces, face, vertex.x(), vertex.y(), vertex.z(), nx, ny, nz, baked);
-            out.add((float) vertex.x(), (float) vertex.y(), (float) vertex.z(), (float) vertex.u(), (float) vertex.v(), nx, ny, nz, light, 0xFFFFFF, baked);
+            BakedLighting.surfaceLight(map.light(), surfaces, face, bump, vertex.x(), vertex.y(), vertex.z(), nx, ny, nz, baked);
+            out.add((float) vertex.x(), (float) vertex.y(), (float) vertex.z(), (float) vertex.u(), (float) vertex.v(), nx, ny, nz, light, 0xFFFFFF, baked,
+                (float) vertex.textureU(), (float) vertex.textureV(), (float) surfaces.blend(face, vertex.x(), vertex.y(), vertex.z()));
         }
     }
 
@@ -538,6 +543,8 @@ public final class MoverRenderer {
                     : key.renderClass() == BundleMaterial.RenderClass.SOLID ? RenderType.entitySolid(texture) : RenderType.entityCutout(texture);
                 type.setupRenderState();
                 MapSurfaceRenderer.applyAtlasFilter(texture);
+                MapSurfaceRenderer.bindBumpLayer(generation.sequence(), built.bundle, built.atlas, key.page(), frame);
+                MapSurfaceRenderer.bindBlendLayer(generation.sequence(), built.bundle, built.atlas, key.page(), frame);
                 if (suppressDepthWrite) RenderSystem.depthMask(false);
                 if (faded) RenderSystem.setShaderColor(1, 1, 1, blend);
                 buffer.getValue().bind();

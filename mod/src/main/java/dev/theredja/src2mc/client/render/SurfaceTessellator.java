@@ -52,9 +52,10 @@ final class SurfaceTessellator {
                     polygon = clip(polygon, false, top, true);
                     polygon = clip(polygon, false, top + source[3], false);
                     if (polygon.size() < 3) continue;
-                    List<Vertex> mapped = polygon.stream().map(vertex -> vertex.withUv(
+                    List<Vertex> mapped = polygon.stream().map(vertex -> new Vertex(vertex.x, vertex.y, vertex.z,
                         (allocation[0] + vertex.u - left) / pageSize,
-                        (allocation[1] + vertex.v - top) / pageSize
+                        (allocation[1] + vertex.v - top) / pageSize,
+                        vertex.u / texture.width(), vertex.v / texture.height()
                     )).toList();
                     for (int i = 1; i + 1 < mapped.size(); i++) {
                         result.add(new Triangle(region.page(), mapped.getFirst(), mapped.get(i), mapped.get(i + 1)));
@@ -94,7 +95,7 @@ final class SurfaceTessellator {
     private static Vertex[] corners(int x, int y, int z, SurfaceTable.Face face) {
         Vertex[] result = new Vertex[face.vertexCount()];
         for (int i = 0; i < result.length; i++) {
-            result[i] = new Vertex(x + face.coordinate(i, 0), y + face.coordinate(i, 1), z + face.coordinate(i, 2), 0, 0);
+            result[i] = new Vertex(x + face.coordinate(i, 0), y + face.coordinate(i, 1), z + face.coordinate(i, 2), 0, 0, 0, 0);
         }
         return result;
     }
@@ -109,11 +110,17 @@ final class SurfaceTessellator {
     }
 
     record Triangle(int page, Vertex a, Vertex b, Vertex c) {}
-    record Vertex(double x, double y, double z, double u, double v) {
-        Vertex withUv(double nextU, double nextV) { return new Vertex(x, y, z, nextU, nextV); }
+    /**
+     * {@code u}, {@code v}: while clipping, output texels along the texture; once mapped, atlas
+     * page coordinates. {@code textureU}, {@code textureV}: once mapped, the texture's own
+     * coordinates, one per repeat and unbounded.
+     */
+    record Vertex(double x, double y, double z, double u, double v, double textureU, double textureV) {
+        Vertex withUv(double nextU, double nextV) { return new Vertex(x, y, z, nextU, nextV, textureU, textureV); }
         Vertex interpolate(Vertex other, double t) {
             return new Vertex(x + (other.x - x) * t, y + (other.y - y) * t, z + (other.z - z) * t,
-                u + (other.u - u) * t, v + (other.v - v) * t);
+                u + (other.u - u) * t, v + (other.v - v) * t,
+                textureU + (other.textureU - textureU) * t, textureV + (other.textureV - textureV) * t);
         }
     }
 }

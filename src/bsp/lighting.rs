@@ -15,6 +15,11 @@ const LUMP_LIGHTING: usize = 8;
 const LUMP_FACES: usize = 7;
 const LUMP_LIGHTING_HDR: usize = 53;
 const LUMP_FACES_HDR: usize = 58;
+const LUMP_TEXINFO: usize = 6;
+/// `texinfo_t`: two 4x2 float vector pairs, flags, texdata.
+const TEXINFO_BYTES: usize = 72;
+/// `SURF_BUMPLIGHT`: vrad wrote three more lightmaps per style, one per bump basis direction.
+const SURF_BUMPLIGHT: i32 = 0x800;
 const FACE_BYTES: usize = 56;
 
 /// Where one face's lightmap is, as its face record says.
@@ -24,6 +29,9 @@ pub struct FaceLight {
     pub mins: [i32; 2],
     pub size: [i32; 2],
     pub styles: [u8; 4],
+    /// The face's texinfo has `SURF_BUMPLIGHT`: each style holds four lightmaps,
+    /// the flat one and one per bump basis direction.
+    pub bumped: bool,
 }
 
 /// One face's static lightmap, row by row, linear light.
@@ -67,13 +75,22 @@ impl BakedLight {
         } else {
             (lump(LUMP_LIGHTING)?, lump(LUMP_FACES)?)
         };
+        let texinfo = lump(LUMP_TEXINFO)?;
+        let texinfo_flags = |index: i16| -> i32 {
+            usize::try_from(index)
+                .ok()
+                .and_then(|i| texinfo.get(i * TEXINFO_BYTES + 64..i * TEXINFO_BYTES + 68))
+                .map_or(0, |b| i32::from_le_bytes(b.try_into().unwrap()))
+        };
         let faces = faces
             .as_chunks::<FACE_BYTES>()
             .0
             .iter()
             .map(|face| {
                 let i32_at = |at: usize| i32::from_le_bytes(face[at..at + 4].try_into().unwrap());
+                let texinfo_index = i16::from_le_bytes(face[10..12].try_into().unwrap());
                 FaceLight {
+                    bumped: texinfo_flags(texinfo_index) & SURF_BUMPLIGHT != 0,
                     styles: face[16..20].try_into().unwrap(),
                     offset: i32_at(20),
                     mins: [i32_at(28), i32_at(32)],
@@ -153,6 +170,21 @@ impl BakedLight {
             height,
             luxels,
         })
+    }
+
+    /// The three bump lightmaps of a bump-mapped face's first style, which
+    /// follow its flat one (`R_BuildLightMap` steps by four maps per style);
+    /// `None` for a flat face, or when the lump is too short for them.
+    pub fn raw_bump_lightmaps(&self, face: usize) -> Option<[&[u8]; 3]> {
+        let light = self.face(face)?;
+        if !light.bumped {
+            return None;
+        }
+        let flat = self.raw_lightmap(face)?;
+        let size = flat.width * flat.height * 4;
+        let start = usize::try_from(light.offset).ok()? + size;
+        let all = self.data.get(start..start + 3 * size)?;
+        Some([&all[..size], &all[size..2 * size], &all[2 * size..]])
     }
 }
 

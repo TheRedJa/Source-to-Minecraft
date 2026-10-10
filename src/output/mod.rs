@@ -14,6 +14,7 @@ pub mod layout;
 pub mod light;
 pub mod limits;
 pub mod logic;
+pub mod cubemaps;
 pub mod look;
 pub mod logic_props;
 pub mod mesh;

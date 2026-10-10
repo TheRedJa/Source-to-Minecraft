@@ -6,7 +6,14 @@ import java.util.Map;
 /** Immutable lookup for validated mod-owned atlas pages and logical textures. */
 public record AtlasIndex(int pageSize, int maxMipLevel, int gutter, List<Page> pages, Map<String, Texture> textures) {
     public AtlasIndex { pages = List.copyOf(pages); textures = Map.copyOf(textures); }
-    public record Page(int page, List<Mip> mips) { public Page { mips = List.copyOf(mips); } }
+    /** {@code bumpMips}: the page's bump layer, the same layout as {@code mips}; empty when no texture on it has one. */
+    /** {@code blendMips}: the blend layer (blended displacements' second texture), the same layout; empty without one. */
+    public record Page(int page, List<Mip> mips, List<Mip> bumpMips, List<Mip> blendMips) {
+        public Page { mips = List.copyOf(mips); bumpMips = List.copyOf(bumpMips); blendMips = List.copyOf(blendMips); }
+        public Page(int page, List<Mip> mips) { this(page, mips, List.of(), List.of()); }
+        public boolean bumped() { return !bumpMips.isEmpty(); }
+        public boolean blended() { return !blendMips.isEmpty(); }
+    }
     public record Mip(int level, String path, int width, int height) {}
     public record Texture(String contentId, int width, int height, List<Region> regions) {
         public Texture { regions = List.copyOf(regions); }

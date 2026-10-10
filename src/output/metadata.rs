@@ -32,6 +32,12 @@ pub struct AtlasMetadata {
 pub struct AtlasPage {
     pub page: u32,
     pub mips: Vec<AtlasMip>,
+    /// The page's bump layer, when a texture on it has one (version 2).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bump_mips: Option<Vec<AtlasMip>>,
+    /// The page's blend layer, when a texture on it has one (version 3).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blend_mips: Option<Vec<AtlasMip>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -119,6 +125,10 @@ pub struct MapMetadata {
     /// Optional HDR flag and colour lookups (section 24).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub look: Option<String>,
+    /// Canonical `maps/<map-id>/cubemaps.s2cube` path (section 25); absent
+    /// when no material reflects a cubemap.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cubemaps: Option<String>,
     pub diagnostics: String,
 }
 
@@ -138,6 +148,59 @@ pub struct MaterialReference {
     /// Source's `$nocull`: drawn from both sides. Written only when set.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub double_sided: bool,
+    /// The texture's atlas regions carry a bump layer (format section 5 and
+    /// the atlas's bump pages): `normal`, a tangent-space normal map, or
+    /// `ssbump`, each bump basis direction's share of the light.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bump: Option<BumpKind>,
+    /// The material's cubemap reflection (format section 25).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub envmap: Option<EnvmapReference>,
+    /// A blended displacement material: the texture's atlas regions carry a
+    /// blend layer, its `$basetexture2`. Written only when set.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub blend: bool,
+    /// `$blendmodulatetexture`: content ID of its `details/<id>.png`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blend_modulate: Option<String>,
+    /// `$detail` as LightmappedGeneric combines it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<DetailReference>,
+    /// `$selfillumtint` of a `$selfillum` material, which glows by its base
+    /// texture's alpha.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selfillum: Option<[f64; 3]>,
+}
+
+/// A detail texture: content ID of its `details/<id>.png`, repeats per base
+/// texture repeat, blend factor, `TCOMBINE_*` mode (10 and 11 for a `$ssbump`
+/// detail on a bump-mapped and a flat surface) and tint.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct DetailReference {
+    pub texture: String,
+    pub scale: [f64; 2],
+    pub blend_factor: f64,
+    pub blend_mode: u8,
+    pub tint: [f64; 3],
+}
+
+/// `$envmap` as LightmappedGeneric draws it: the cubemap, by index into the
+/// map's cubemap file, and how the reflection is coloured. Its mask is the
+/// alpha of the texture's bump layer.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct EnvmapReference {
+    pub cubemap: u32,
+    pub tint: [f64; 3],
+    pub contrast: f64,
+    pub saturation: [f64; 3],
+    pub fresnel: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BumpKind {
+    Normal,
+    Ssbump,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -259,7 +322,7 @@ impl Campaign {
 impl AtlasMetadata {
     pub fn encode(&self) -> Result<Vec<u8>> {
         ensure!(
-            self.format == "src2mc-atlas" && self.version == 1,
+            self.format == "src2mc-atlas" && self.version == 3,
             "invalid atlas schema"
         );
         ensure!(
@@ -286,7 +349,19 @@ impl AtlasMetadata {
                 page.mips.len() == usize::from(self.max_mip_level) + 1,
                 "atlas mip chain is incomplete"
             );
-            for (level, mip) in page.mips.iter().enumerate() {
+            for layer in [&page.bump_mips, &page.blend_mips].into_iter().flatten() {
+                ensure!(
+                    layer.len() == page.mips.len(),
+                    "atlas layer mip chain is incomplete"
+                );
+            }
+            for (level, mip) in page
+                .mips
+                .iter()
+                .enumerate()
+                .chain(page.bump_mips.iter().flatten().enumerate())
+                .chain(page.blend_mips.iter().flatten().enumerate())
+            {
                 validate_content_id(&mip.content_id)?;
                 ensure!(
                     mip.level as usize == level
@@ -428,6 +503,39 @@ impl MaterialReference {
         );
         if self.source_material_raw.as_deref() == Some(&self.source_material) {
             self.source_material_raw = None;
+        }
+        ensure!(
+            self.bump.is_none() || self.texture.is_some(),
+            "a bump layer needs the texture it is drawn with"
+        );
+        if let Some(detail) = &mut self.detail {
+            validate_content_id(&detail.texture)?;
+            for value in detail.scale.iter_mut().chain(detail.tint.iter_mut()).chain([&mut detail.blend_factor]) {
+                *value = canonical_f64(*value)?;
+            }
+            ensure!(detail.blend_mode <= 11, "unknown detail blend mode");
+        }
+        if let Some(texture) = &self.blend_modulate {
+            validate_content_id(texture)?;
+        }
+        if let Some(tint) = &mut self.selfillum {
+            for value in tint.iter_mut() {
+                *value = canonical_f64(*value)?;
+            }
+        }
+        ensure!(
+            !self.blend || self.texture.is_some(),
+            "a blend layer needs the texture it is drawn with"
+        );
+        if let Some(envmap) = &mut self.envmap {
+            for value in envmap
+                .tint
+                .iter_mut()
+                .chain(envmap.saturation.iter_mut())
+                .chain([&mut envmap.contrast, &mut envmap.fresnel])
+            {
+                *value = canonical_f64(*value)?;
+            }
         }
         for value in &mut self.reflectivity {
             *value = canonical_f64(*value)?;
@@ -585,6 +693,12 @@ mod tests {
                 surface_prop: Some("brick".into()),
                 reflectivity: [-0.0, 0.5, 1.0],
                 double_sided: false,
+                bump: None,
+                envmap: None,
+                blend: false,
+                blend_modulate: None,
+                detail: None,
+                selfillum: None,
             }],
             models: vec![
                 ModelReference {
@@ -617,6 +731,7 @@ mod tests {
             light: None,
             particles: None,
             look: None,
+            cubemaps: None,
             diagnostics: "maps/d1_01/diagnostics.json".into(),
         };
         let value: serde_json::Value =

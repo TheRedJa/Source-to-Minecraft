@@ -1013,8 +1013,9 @@ light instead, accepting that shader packs no longer draw the map (user,
   looks amazing"), 7 ms facing the whole map from above, 3 to 8 ms at
   gameplay spots, steady.
 - **Not done.** Direct light from Source's lights on moving things (the
-  engine adds up to four world lights to the ambient cube); light styles;
-  bump-mapped lightmaps; auto exposure; `env_cubemap` reflections. The
+  engine adds up to four world lights to the ambient cube); light styles.
+  Bump-mapped lightmaps and `env_cubemap` reflections followed in D31, auto
+  exposure in D30. The
   converter still writes the occlusion mask, which nothing reads.
 
 ## D29 — Particles run the game's own `.pcf` systems; impacts and decals as the game draws them
@@ -1156,4 +1157,63 @@ converter records which one the game is (format section 24).
   `CViewRender::RenderView` runs `DoEnginePostProcessing` after the view
   models. A shader pack skips it. `/src2mc_look` switches each part off and
   shows what the camera's map makes of its view.
+
+
+## D31 — World surfaces are shaded as LightmappedGeneric shades them
+
+Stage 2 of the Source look (D30): the surfaces. Rules from the public SDK 2013
+`lightmappedgeneric_ps2_3_x.h` and vrad's `GetBumpNormals`.
+
+- **Bump maps.** vrad lights a face whose material has `$bumpmap` three more
+  times, once per bump basis direction (`SURF_BUMPLIGHT`). The converter keeps
+  those three lightmaps beside the flat one on the light page, and the
+  material's normal map at its texture's place on a second set of atlas pages,
+  so one texture coordinate reads both. The shader weights the three lightmaps
+  by the normal's squared clamped dot with each basis direction over their
+  sum; a `$ssbump` map holds the three weights directly. The basis is in the
+  face's own tangent space, the same one vrad used, so no tangent frame is
+  needed for diffuse light. `/src2mc_look bump off` draws the flat lightmaps
+  for comparison.
+- **Cubemaps.** A material with `$envmap` adds LightmappedGeneric's cubemap
+  term: the eye reflected about the bumped normal, read from its cubemap, times
+  its mask, tint, contrast, saturation and Fresnel factor, then the tone map
+  scale. With integer HDR the shader multiplies the cubemap by 16
+  (`ENV_MAP_SCALE`, read from INFRA's `shaderapidx9`), which undoes the 1/16
+  the material system stores HDR textures at, so the cubemap's float value is
+  used as it is. The face each brush side reflects is the one vbsp patched
+  into its material. The mod keeps every cubemap of a map on one texture and
+  picks the face in the shader; a surface vertex names its material in UV2's
+  sky-light half (negated, so props keep theirs). The tangent frame for the
+  normal comes from screen derivatives of position and texture coordinates,
+  which on a planar face is exact. `/src2mc_look reflections off` hides them.
+
+- **Material blocks.** A VMT is read as the material system reads it on a
+  DX9 system with HDR on, at the highest GPU level: top-level keys, then the
+  conditional blocks that hold (`hdr`, `>=dx90`, `GPU>=1`, ...), then the one
+  fallback block `<shader>_HDR_DX9`, else `<shader>_DX9`; lower-level blocks
+  and `Proxies` are skipped. Flattening every block let Portal's `_DX8`
+  blocks undo its DX9 bump maps and reflection masks.
+- **Blended displacements, detail, self-illumination.** A `WorldVertexTransition`
+  displacement fades to its `$basetexture2` by its vertices' alpha, shaped by
+  `$blendmodulatetexture` (`smoothstep(g - r, g + r, alpha)`); the second
+  texture rides a third atlas layer at the base texture's place, the alpha a
+  blend region per fragment. Detail textures combine as `TextureCombine` does,
+  read raw except in additive mode, and mode 10 scales the bump lightmaps
+  (the later branch's rule, which INFRA and Portal 2 use). They and the
+  modulation textures repeat over the base texture's own coordinates, which
+  every surface vertex now carries, from a per-map array texture, one layer
+  each, a smaller texture repeated to fill the largest's square, so each
+  repeats and mipmaps to one texel as its VTF does. (A first atlas of tiles
+  with 8-texel wrapped borders stopped at mip 3, so detail kept its near
+  contrast from about 12 blocks on and read too strong.) `$selfillum` mixes
+  towards the tinted texture by the base alpha before the tone map scale,
+  and like `$basealphaenvmapmask` it only counts when the base VTF has an
+  alpha channel (`ONEBITALPHA`/`EIGHTBITALPHA`), as LightmappedGeneric clears
+  both otherwise: Portal's DXT1 ceiling light panels are lit by their
+  lightmap alone, which a full-strength self-illumination dimmed.
+  VertexLitGeneric models glow the same way (`$selfillummask` and
+  `$selfillumfresnel` wait for stage 3): a prop triangle carries its
+  material's row, which its vertices keep in sky light's place through every
+  relight, so INFRA's indicator lights read in the dark.
+  `/src2mc_look detail|blend|selfillum off` switch each off.
 

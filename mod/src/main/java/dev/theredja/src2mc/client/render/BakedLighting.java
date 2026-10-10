@@ -50,11 +50,25 @@ public final class BakedLighting {
     static final float VERTEX = 1f;
     /** {@code Baked.w}: the ambient cube of the draw, for the vertex normal. */
     static final float AMBIENT = 2f;
+    /**
+     * {@code Baked.w}: page coordinates of a bump-mapped face's flat lightmap, its three bump
+     * lightmaps {@code Baked.z} further right each, weighted by the normal map on the bump page.
+     */
+    static final float LIGHTMAP_BUMP = -1f;
+    /** {@code Baked.w}: as {@link #LIGHTMAP_BUMP}, weighted by a self-shadowed bump map ({@code $ssbump}). */
+    static final float LIGHTMAP_SSBUMP = -2f;
 
     /** Four floats: the light, as above. */
     static final VertexFormatElement BAKED = VertexFormatElement.register(VertexFormatElement.findNextId(), 0,
         VertexFormatElement.Type.FLOAT, VertexFormatElement.Usage.GENERIC, 4);
-    /** Position, colour (tint), atlas UV, Minecraft light, normal, baked light: 48 bytes. */
+    /**
+     * Three floats: the base texture's own coordinates, one unit per repeat and unbounded, which
+     * detail textures and blend modulation tile by; and a blended displacement's blend between
+     * its two textures. Zero where unused.
+     */
+    static final VertexFormatElement SURFACE = VertexFormatElement.register(VertexFormatElement.findNextId(), 0,
+        VertexFormatElement.Type.FLOAT, VertexFormatElement.Usage.GENERIC, 3);
+    /** Position, colour (tint), atlas UV, Minecraft light, normal, baked light, surface: 60 bytes. */
     static final VertexFormat FORMAT = VertexFormat.builder()
         .add("Position", VertexFormatElement.POSITION)
         .add("Color", VertexFormatElement.COLOR)
@@ -63,9 +77,12 @@ public final class BakedLighting {
         .add("Normal", VertexFormatElement.NORMAL)
         .padding(1)
         .add("Baked", BAKED)
+        .add("Surface", SURFACE)
         .build();
 
     private static ShaderInstance shader;
+    /** {@code /src2mc_look bump off}: every face takes its flat lightmap; meshes rebuild to show it. */
+    public static volatile boolean bumpEnabled = true;
     /** The map's lightmap pages, one texture each map, stacked; keyed by identity. */
     private static final Map<LightTable, Integer> TEXTURES = new IdentityHashMap<>();
     private static int white = -1;
@@ -109,13 +126,22 @@ public final class BakedLighting {
         return new float[] {(float) (s * own.width() / width), (float) ((t * own.height() + top) / height)};
     }
 
-    /** The baked attribute of a fragment vertex at map-local {@code (x, y, z)}. */
-    static void surfaceLight(LightTable table, SurfaceTable surfaces, SurfaceTable.Face face, double x, double y, double z,
-                             double nx, double ny, double nz, float[] out) {
+    /**
+     * The baked attribute of a fragment vertex at map-local {@code (x, y, z)}. A face with bump
+     * lightmaps drawn with a bump layer ({@code bump}) is lit through them, as LightmappedGeneric
+     * lights a {@code $bumpmap} surface; without one it takes its flat lightmap.
+     */
+    static void surfaceLight(LightTable table, SurfaceTable surfaces, SurfaceTable.Face face, BundleMaterial.Bump bump,
+                             double x, double y, double z, double nx, double ny, double nz, float[] out) {
         if (table != null && face.lightRegionId() != SurfaceTable.NO_LIGHT && face.lightRegionId() < surfaces.lightRegions().size()) {
             SurfaceTable.LightRegion region = surfaces.lightRegions().get(face.lightRegionId());
             float[] uv = textureCoordinates(table, region.page(), region.s(x, y, z), region.t(x, y, z));
             out[0] = uv[0]; out[1] = uv[1]; out[2] = 0; out[3] = LIGHTMAP;
+            if (region.bump() > 0 && bump != BundleMaterial.Bump.NONE && bumpEnabled) {
+                float[] next = textureCoordinates(table, region.page(), region.s(x, y, z) + region.bump(), region.t(x, y, z));
+                out[2] = next[0] - uv[0];
+                out[3] = bump == BundleMaterial.Bump.SSBUMP ? LIGHTMAP_SSBUMP : LIGHTMAP_BUMP;
+            }
         } else if (face.provenance() == 2 || table == null) {
             // A BSP face vrad gave no lightmap is one Source draws unlit: full bright.
             out[0] = 1; out[1] = 1; out[2] = 1; out[3] = VERTEX;
@@ -178,6 +204,7 @@ public final class BakedLighting {
      */
     static ShaderInstance prepare(LightTable table, BundleMaterial.RenderClass renderClass, float[] cube, Matrix3f normalTurn) {
         RenderSystem.setShaderTexture(3, table == null ? white() : texture(table));
+        SurfaceEffects.bind(table, shader);
         shader.safeGetUniform("Exposure").set(exposure());
         dev.theredja.src2mc.client.look.LookClient.applyFog(shader);
         // Vanilla's entity cut-out and translucent shaders cut below 0.1; solid cuts nothing.
@@ -275,6 +302,7 @@ public final class BakedLighting {
     static void clear() {
         for (int id : TEXTURES.values()) if (id != white) GL11.glDeleteTextures(id);
         TEXTURES.clear();
+        SurfaceEffects.clear();
     }
 
     @SubscribeEvent

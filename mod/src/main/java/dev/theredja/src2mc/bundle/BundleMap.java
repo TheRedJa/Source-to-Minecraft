@@ -38,8 +38,34 @@ public record BundleMap(
     // The map's particle systems; null when it has none.
     ParticleTable particles,
     // The map's HDR flag and colour lookups; null when it was exported without them.
-    LookTable look
+    LookTable look,
+    // The cubemaps its materials reflect; null when none does.
+    CubemapTable cubemaps,
+    // Its materials' detail and blend modulation textures; null when none has one.
+    DetailImages details
 ) {
+    public BundleMap(String mapId, String sourceName, int[] cellMin, int[] cellMax, int[] anchorCell,
+                     java.util.List<BundleMaterial> materials, java.util.List<BundleModel> models,
+                     java.util.List<BundleProp> props, boolean exceedsVanillaBuildHeight, SurfaceTable surfaces,
+                     java.util.Set<String> modelContentIds, AtlasIndex atlas, PropVisibility pvs,
+                     OcclusionTable occlusion, CollisionTable collision, AudioTable audio, LogicTable logic, MoverTable movers,
+                     LogicPropTable logicProps, SkyTable sky, SkyboxTable skybox, LightTable light, ParticleTable particles,
+                     LookTable look, CubemapTable cubemaps) {
+        this(mapId, sourceName, cellMin, cellMax, anchorCell, materials, models, props, exceedsVanillaBuildHeight,
+            surfaces, modelContentIds, atlas, pvs, occlusion, collision, audio, logic, movers, logicProps, sky, skybox, light, particles, look, cubemaps, null);
+    }
+
+    public BundleMap(String mapId, String sourceName, int[] cellMin, int[] cellMax, int[] anchorCell,
+                     java.util.List<BundleMaterial> materials, java.util.List<BundleModel> models,
+                     java.util.List<BundleProp> props, boolean exceedsVanillaBuildHeight, SurfaceTable surfaces,
+                     java.util.Set<String> modelContentIds, AtlasIndex atlas, PropVisibility pvs,
+                     OcclusionTable occlusion, CollisionTable collision, AudioTable audio, LogicTable logic, MoverTable movers,
+                     LogicPropTable logicProps, SkyTable sky, SkyboxTable skybox, LightTable light, ParticleTable particles,
+                     LookTable look) {
+        this(mapId, sourceName, cellMin, cellMax, anchorCell, materials, models, props, exceedsVanillaBuildHeight,
+            surfaces, modelContentIds, atlas, pvs, occlusion, collision, audio, logic, movers, logicProps, sky, skybox, light, particles, look, null, null);
+    }
+
     public BundleMap(String mapId, String sourceName, int[] cellMin, int[] cellMax, int[] anchorCell,
                      java.util.List<BundleMaterial> materials, java.util.List<BundleModel> models,
                      java.util.List<BundleProp> props, boolean exceedsVanillaBuildHeight, SurfaceTable surfaces,
@@ -47,7 +73,7 @@ public record BundleMap(
                      OcclusionTable occlusion, CollisionTable collision, AudioTable audio, LogicTable logic, MoverTable movers,
                      LogicPropTable logicProps, SkyTable sky, SkyboxTable skybox, LightTable light, ParticleTable particles) {
         this(mapId, sourceName, cellMin, cellMax, anchorCell, materials, models, props, exceedsVanillaBuildHeight,
-            surfaces, modelContentIds, atlas, pvs, occlusion, collision, audio, logic, movers, logicProps, sky, skybox, light, particles, null);
+            surfaces, modelContentIds, atlas, pvs, occlusion, collision, audio, logic, movers, logicProps, sky, skybox, light, particles, null, null, null);
     }
 
     public BundleMap(String mapId, String sourceName, int[] cellMin, int[] cellMax, int[] anchorCell,

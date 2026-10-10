@@ -30,7 +30,7 @@ final class BundleSchemaValidator {
     private static final byte[] PVS_MAGIC = {'S','2','P','V','I','S',0,0};
     private static final byte[] OCCLUSION_MAGIC = {'S','2','O','C','C','L',0,0};
     /** Fragment record bytes before the vertex array: cell, flags, kind, four u32s, vertex count. */
-    private static final int FRAGMENT_FIXED_BYTES = 25;
+    private static final int FRAGMENT_FIXED_BYTES = 29;
     /** The only flag byte an unowned fragment may carry: not owned, zero offset on every axis. */
     private static final int UNOWNED_FLAGS = 0x2A;
     private static final byte[] PNG_SIGNATURE = {(byte)137,80,78,71,13,10,26,10};
@@ -102,6 +102,7 @@ final class BundleSchemaValidator {
         if (map.has("light")) expected.add("light");
         if (map.has("particles")) expected.add("particles");
         if (map.has("look")) expected.add("look");
+        if (map.has("cubemaps")) expected.add("cubemaps");
         expected.add("diagnostics");
         keys(map, expected.toArray(String[]::new));
         format(map, "src2mc-map", path);
@@ -239,6 +240,17 @@ final class BundleSchemaValidator {
             referenced.add(lookPath);
             look = validateLook(zip, required(entries, lookPath));
         }
+        CubemapTable cubemaps = null;
+        if (map.has("cubemaps")) {
+            String cubemapsPath = exactPath(map, "cubemaps", prefix + "cubemaps.s2cube");
+            referenced.add(cubemapsPath);
+            cubemaps = validateCubemaps(zip, required(entries, cubemapsPath));
+        }
+        int cubemapCount = cubemaps == null ? 0 : cubemaps.cubes().size();
+        for (BundleMaterial material : loadedMaterials) {
+            if (material.envmap() != null && material.envmap().cubemap() >= cubemapCount)
+                fail(BundleErrorCode.INVALID_REFERENCE, "material reflects a cubemap the map does not have");
+        }
         validateDiagnostics(json(zip, required(entries, diagnostics), diagnostics));
 
         // A map's meshes are the bulk of its validation and each is walked on
@@ -295,7 +307,7 @@ final class BundleSchemaValidator {
         long mapHeight = (long) max[1] - min[1] + 1;
         return new BundleMap(mapId, sourceName, min, max, anchor, loadedMaterials, modelRefs, propRecords, mapHeight > 384,
             surfaceTable, modelRefs.stream().map(BundleModel::contentId).collect(java.util.stream.Collectors.toUnmodifiableSet()), atlas, pvs, occlusion, collision, audio, logic, movers,
-            logicProps, sky, skybox, light, particles, look);
+            logicProps, sky, skybox, light, particles, look, cubemaps, validateDetails(zip, entries, hashes, loadedMaterials, referenced));
     }
 
     /** Format section 23. */
@@ -460,6 +472,59 @@ final class BundleSchemaValidator {
 
     /** Format section 22. */
     private static final byte[] LOOK_MAGIC = {'S','2','L','O','O','K',0,0};
+
+    /** Decodes every detail and blend modulation texture the materials name. */
+    private static DetailImages validateDetails(ZipFile zip, Map<String, ZipEntry> entries, Map<String, String> hashes,
+                                                List<BundleMaterial> materials, Set<String> referenced) throws IOException {
+        java.util.TreeSet<String> ids = new java.util.TreeSet<>();
+        for (BundleMaterial material : materials) {
+            if (material.detail() != null) ids.add(material.detail().texture());
+            if (material.blendModulate() != null) ids.add(material.blendModulate());
+        }
+        if (ids.isEmpty()) return null;
+        Map<String, DetailImages.Image> images = new java.util.HashMap<>();
+        for (String id : ids) {
+            String path = "details/" + id + ".png";
+            referenced.add(path);
+            contentHash(hashes, path, id);
+            ZipEntry entry = required(entries, path);
+            limit(entry.getSize(), 4L * DetailImages.MAX_SIDE * DetailImages.MAX_SIDE + 4096, "detail texture size");
+            java.awt.image.BufferedImage image;
+            try (InputStream in = zip.getInputStream(entry)) { image = javax.imageio.ImageIO.read(in); }
+            if (image == null) fail(BundleErrorCode.INVALID_SCHEMA, "detail texture is not a PNG");
+            int w = image.getWidth(), h = image.getHeight();
+            if (w > DetailImages.MAX_SIDE || h > DetailImages.MAX_SIDE || Integer.bitCount(w) != 1 || Integer.bitCount(h) != 1)
+                fail(BundleErrorCode.INVALID_SCHEMA, "detail texture sides must be powers of two up to 512");
+            byte[] rgba = new byte[w * h * 4];
+            for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) {
+                int argb = image.getRGB(x, y), at = (y * w + x) * 4;
+                rgba[at] = (byte) (argb >> 16); rgba[at + 1] = (byte) (argb >> 8); rgba[at + 2] = (byte) argb; rgba[at + 3] = (byte) (argb >>> 24);
+            }
+            images.put(id, new DetailImages.Image(w, h, rgba));
+        }
+        return new DetailImages(images);
+    }
+
+    private static final byte[] CUBE_MAGIC = "S2CUBE\0\0".getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+
+    /** Parses and validates the cubemap file (format.md section 25). */
+    private static CubemapTable validateCubemaps(ZipFile zip, ZipEntry entry) throws IOException {
+        limit(entry.getSize(), 16L + (long) CubemapTable.MAX_CUBES * (4 + 36L * 64 * 64), "cubemap file size");
+        try (Binary in = new Binary(zip.getInputStream(entry), entry.getSize())) {
+            in.magic(CUBE_MAGIC);
+            in.version();
+            long count = in.count(CubemapTable.MAX_CUBES, "cubemap");
+            List<CubemapTable.Cube> cubes = new ArrayList<>((int) count);
+            for (long i = 0; i < count; i++) {
+                int size = (int) in.count(CubemapTable.MAX_SIZE, "cubemap face side");
+                if (size == 0) fail(BundleErrorCode.INVALID_SCHEMA, "empty cubemap");
+                cubes.add(new CubemapTable.Cube(size, in.bytes(36 * size * size)));
+            }
+            in.end();
+            if (cubes.isEmpty()) fail(BundleErrorCode.INVALID_SCHEMA, "an empty cubemap file must be omitted");
+            return new CubemapTable(cubes);
+        }
+    }
 
     private static LookTable validateLook(ZipFile zip, ZipEntry entry) throws IOException {
         limit(entry.getSize(), 28L + 4096L * 4096 + (long) BundleLimits.MAX_LOOK_LOOKUPS * (4 + BundleLimits.MAX_LOOK_NAME_BYTES + LookTable.LOOKUP_BYTES), "look size");
@@ -842,7 +907,7 @@ final class BundleSchemaValidator {
         referenced.add(path);
         JsonObject root = json(zip, required(entries, path), path);
         keys(root, "format", "version", "page_size", "max_mip_level", "gutter", "pages", "textures");
-        format(root, "src2mc-atlas", path);
+        format(root, "src2mc-atlas", path, 3);
         int pageSize = uintIndex(root.get("page_size"), "page_size");
         int maxMip = uintIndex(root.get("max_mip_level"), "max_mip_level");
         int gutter = uintIndex(root.get("gutter"), "gutter");
@@ -850,22 +915,17 @@ final class BundleSchemaValidator {
         List<AtlasIndex.Page> pages = new ArrayList<>();
         JsonArray pageArray = array(root, "pages");
         for (int p = 0; p < pageArray.size(); p++) {
-            JsonObject page = object(pageArray.get(p), "atlas page"); keys(page, "page", "mips");
+            JsonObject page = object(pageArray.get(p), "atlas page");
+            boolean bumped = page.has("bump_mips"), blended = page.has("blend_mips");
+            List<String> pageKeys = new ArrayList<>(List.of("page", "mips"));
+            if (bumped) pageKeys.add("bump_mips");
+            if (blended) pageKeys.add("blend_mips");
+            keys(page, pageKeys.toArray(String[]::new));
             if (uintIndex(page.get("page"), "page") != p) fail(BundleErrorCode.INVALID_SCHEMA, "atlas pages are not ordered");
-            JsonArray mipArray = array(page, "mips");
-            if (mipArray.size() != maxMip + 1) fail(BundleErrorCode.INVALID_SCHEMA, "incomplete atlas mip chain");
-            List<AtlasIndex.Mip> mips = new ArrayList<>();
-            for (int level = 0; level < mipArray.size(); level++) {
-                JsonObject mip = object(mipArray.get(level), "atlas mip"); keys(mip, "level", "content_id", "width", "height");
-                if (uintIndex(mip.get("level"), "level") != level) fail(BundleErrorCode.INVALID_SCHEMA, "atlas mips are not ordered");
-                String id = digest(string(mip, "content_id"), "atlas page content ID");
-                int width = dimension(mip, "width", pageSize), height = dimension(mip, "height", pageSize);
-                if (width != pageSize >> level || height != pageSize >> level) fail(BundleErrorCode.INVALID_SCHEMA, "invalid atlas mip dimensions");
-                String png = "atlas/" + id + ".png"; referenced.add(png); contentHash(hashes, png, id);
-                validatePng(zip, required(entries, png), new int[]{width, height});
-                mips.add(new AtlasIndex.Mip(level, png, width, height));
-            }
-            pages.add(new AtlasIndex.Page(p, mips));
+            List<AtlasIndex.Mip> mips = atlasMips(zip, entries, hashes, array(page, "mips"), pageSize, maxMip, referenced);
+            List<AtlasIndex.Mip> bumpMips = bumped ? atlasMips(zip, entries, hashes, array(page, "bump_mips"), pageSize, maxMip, referenced) : List.of();
+            List<AtlasIndex.Mip> blendMips = blended ? atlasMips(zip, entries, hashes, array(page, "blend_mips"), pageSize, maxMip, referenced) : List.of();
+            pages.add(new AtlasIndex.Page(p, mips, bumpMips, blendMips));
         }
         Map<String, AtlasIndex.Texture> textures = new java.util.LinkedHashMap<>();
         List<AtlasIndex.Region> allRegions = new ArrayList<>();
@@ -909,8 +969,27 @@ final class BundleSchemaValidator {
         }
     }
 
+    /** One atlas page's mip chain, every level checked and its PNG referenced. */
+    private static List<AtlasIndex.Mip> atlasMips(ZipFile zip, Map<String, ZipEntry> entries, Map<String, String> hashes, JsonArray mipArray,
+                                                  int pageSize, int maxMip, Set<String> referenced) throws IOException {
+        if (mipArray.size() != maxMip + 1) fail(BundleErrorCode.INVALID_SCHEMA, "incomplete atlas mip chain");
+        List<AtlasIndex.Mip> mips = new ArrayList<>();
+        for (int level = 0; level < mipArray.size(); level++) {
+            JsonObject mip = object(mipArray.get(level), "atlas mip"); keys(mip, "level", "content_id", "width", "height");
+            if (uintIndex(mip.get("level"), "level") != level) fail(BundleErrorCode.INVALID_SCHEMA, "atlas mips are not ordered");
+            String id = digest(string(mip, "content_id"), "atlas page content ID");
+            int width = dimension(mip, "width", pageSize), height = dimension(mip, "height", pageSize);
+            if (width != pageSize >> level || height != pageSize >> level) fail(BundleErrorCode.INVALID_SCHEMA, "invalid atlas mip dimensions");
+            String png = "atlas/" + id + ".png"; referenced.add(png); contentHash(hashes, png, id);
+            validatePng(zip, required(entries, png), new int[]{width, height});
+            mips.add(new AtlasIndex.Mip(level, png, width, height));
+        }
+        return mips;
+    }
+
     private static BundleMaterial validateMaterial(JsonObject material, Map<String, int[]> textures) throws BundleValidationException {
-        Set<String> allowed = Set.of("source_material", "source_material_raw", "render_class", "texture", "surface_prop", "reflectivity", "double_sided");
+        Set<String> allowed = Set.of("source_material", "source_material_raw", "render_class", "texture", "surface_prop", "reflectivity", "double_sided", "bump", "envmap",
+            "blend", "blend_modulate", "detail", "selfillum");
         if (!allowed.containsAll(material.keySet()) || !material.has("source_material") || !material.has("render_class") || !material.has("reflectivity")) fail(BundleErrorCode.INVALID_SCHEMA, "invalid material fields");
         String source = string(material, "source_material");
         if (source.isEmpty()) fail(BundleErrorCode.INVALID_SCHEMA, "empty source material");
@@ -921,6 +1000,51 @@ final class BundleSchemaValidator {
         if (material.has("double_sided") && !(material.get("double_sided").isJsonPrimitive()
             && material.get("double_sided").getAsJsonPrimitive().isBoolean() && material.get("double_sided").getAsBoolean())) {
             fail(BundleErrorCode.INVALID_SCHEMA, "double_sided must be true when present");
+        }
+        BundleMaterial.Bump bump = BundleMaterial.Bump.NONE;
+        if (material.has("bump")) {
+            bump = switch (string(material, "bump")) {
+                case "normal" -> BundleMaterial.Bump.NORMAL;
+                case "ssbump" -> BundleMaterial.Bump.SSBUMP;
+                default -> { fail(BundleErrorCode.INVALID_SCHEMA, "invalid bump kind"); yield BundleMaterial.Bump.NONE; }
+            };
+            if (!material.has("texture")) fail(BundleErrorCode.INVALID_SCHEMA, "a bump layer needs a texture");
+        }
+        BundleMaterial.Envmap envmap = null;
+        if (material.has("envmap")) {
+            JsonObject e = object(material.get("envmap"), "envmap");
+            keys(e, "cubemap", "tint", "contrast", "saturation", "fresnel");
+            int cubemap = uintIndex(e.get("cubemap"), "cubemap");
+            JsonArray tint = array(e, "tint"), saturation = array(e, "saturation");
+            if (tint.size() != 3 || saturation.size() != 3) fail(BundleErrorCode.INVALID_SCHEMA, "envmap colours must have three values");
+            float[] t = new float[3], sat = new float[3];
+            for (int i = 0; i < 3; i++) { t[i] = (float) finiteNumber(tint.get(i), "envmap tint"); sat[i] = (float) finiteNumber(saturation.get(i), "envmap saturation"); }
+            envmap = new BundleMaterial.Envmap(cubemap, t, (float) finiteNumber(e.get("contrast"), "envmap contrast"), sat,
+                (float) finiteNumber(e.get("fresnel"), "envmap fresnel"));
+        }
+        if (material.has("blend") && !(material.get("blend").isJsonPrimitive() && material.get("blend").getAsJsonPrimitive().isBoolean()
+            && material.get("blend").getAsBoolean())) fail(BundleErrorCode.INVALID_SCHEMA, "blend must be true when present");
+        if (material.has("blend") && !material.has("texture")) fail(BundleErrorCode.INVALID_SCHEMA, "a blend layer needs a texture");
+        String blendModulate = material.has("blend_modulate") ? digest(string(material, "blend_modulate"), "blend modulation texture") : null;
+        BundleMaterial.Detail detail = null;
+        if (material.has("detail")) {
+            JsonObject d = object(material.get("detail"), "detail");
+            keys(d, "texture", "scale", "blend_factor", "blend_mode", "tint");
+            JsonArray scale = array(d, "scale"), tint = array(d, "tint");
+            if (scale.size() != 2 || tint.size() != 3) fail(BundleErrorCode.INVALID_SCHEMA, "invalid detail vectors");
+            int mode = uintIndex(d.get("blend_mode"), "detail blend mode");
+            if (mode > 11) fail(BundleErrorCode.INVALID_SCHEMA, "unknown detail blend mode");
+            float[] t = new float[3];
+            for (int i = 0; i < 3; i++) t[i] = (float) finiteNumber(tint.get(i), "detail tint");
+            detail = new BundleMaterial.Detail(digest(string(d, "texture"), "detail texture"), (float) finiteNumber(scale.get(0), "detail scale"),
+                (float) finiteNumber(scale.get(1), "detail scale"), (float) finiteNumber(d.get("blend_factor"), "detail blend factor"), mode, t);
+        }
+        float[] selfillum = null;
+        if (material.has("selfillum")) {
+            JsonArray tint = array(material, "selfillum");
+            if (tint.size() != 3) fail(BundleErrorCode.INVALID_SCHEMA, "selfillum must have three values");
+            selfillum = new float[3];
+            for (int i = 0; i < 3; i++) selfillum[i] = (float) finiteNumber(tint.get(i), "selfillum tint");
         }
         JsonArray reflectivity = array(material, "reflectivity");
         if (reflectivity.size() != 3) fail(BundleErrorCode.INVALID_SCHEMA, "reflectivity must have three values");
@@ -945,7 +1069,7 @@ final class BundleSchemaValidator {
             case "translucent" -> BundleMaterial.RenderClass.TRANSLUCENT;
             default -> BundleMaterial.RenderClass.FALLBACK;
         }, loadedTexture, material.has("double_sided"), material.has("surface_prop") ? string(material, "surface_prop") : null,
-            averageColor[0], averageColor[1], averageColor[2]);
+            averageColor[0], averageColor[1], averageColor[2], bump, envmap, material.has("blend"), blendModulate, detail, selfillum);
     }
 
     private static final byte[] OGG_MAGIC = {'O','g','g','S'};
@@ -1322,12 +1446,13 @@ final class BundleSchemaValidator {
 
     private static SurfaceTable validateFaces(ZipFile zip, ZipEntry entry, int materialCount) throws IOException {
         try (Binary in = new Binary(zip.getInputStream(entry), entry.getSize())) {
-            in.magic(FACE_MAGIC); in.version(3);
+            in.magic(FACE_MAGIC); in.version(5);
             long uvCount = in.count(BundleLimits.MAX_UV_REGIONS_PER_MAP, "UV region");
             long lightCount = in.count(BundleLimits.MAX_UV_REGIONS_PER_MAP, "light region");
+            long blendCount = in.count(BundleLimits.MAX_UV_REGIONS_PER_MAP, "blend region");
             long sectionCount = in.count(BundleLimits.MAX_SECTIONS_PER_MAP, "section");
             long faceCount = in.count(BundleLimits.MAX_FACES_PER_MAP, "fragment");
-            in.requireRemaining(Math.addExact(Math.addExact(Math.addExact(Math.multiplyExact(uvCount, 64), Math.multiplyExact(lightCount, 68)),
+            in.requireRemaining(Math.addExact(Math.addExact(Math.addExact(Math.multiplyExact(uvCount, 64), Math.addExact(Math.multiplyExact(lightCount, 76), Math.multiplyExact(blendCount, 32))),
                 Math.multiplyExact(sectionCount, 16)), Math.multiplyExact(faceCount, FRAGMENT_FIXED_BYTES + 3L * 6)), "surface header counts");
             long[] priorUv = null;
             List<SurfaceTable.UvRegion> uvRegions = new ArrayList<>((int) uvCount);
@@ -1343,15 +1468,28 @@ final class BundleSchemaValidator {
             long[] priorLight = null;
             List<SurfaceTable.LightRegion> lightRegions = new ArrayList<>((int) lightCount);
             for (long i = 0; i < lightCount; i++) {
-                long[] key = new long[9];
+                long[] key = new long[10];
                 key[0] = in.u32();
                 if (key[0] >= BundleLimits.MAX_LIGHT_PAGES) fail(BundleErrorCode.INVALID_REFERENCE, "light region page out of range");
-                for (int n = 1; n < 9; n++) key[n] = in.canonicalF64Bits("light region");
+                for (int n = 1; n < 10; n++) key[n] = in.canonicalF64Bits("light region");
                 if (priorLight != null && compareUnsigned(priorLight, key) >= 0) fail(BundleErrorCode.INVALID_SCHEMA, "light regions are not uniquely sorted");
                 priorLight = key;
                 double[] values = new double[8];
                 for (int n = 0; n < 8; n++) values[n] = Double.longBitsToDouble(key[n + 1]);
-                lightRegions.add(new SurfaceTable.LightRegion((int) key[0], values));
+                double bump = Double.longBitsToDouble(key[9]);
+                if (!(bump >= 0 && bump < 1)) fail(BundleErrorCode.INVALID_SCHEMA, "bump lightmap stride out of range");
+                lightRegions.add(new SurfaceTable.LightRegion((int) key[0], values, bump));
+            }
+            long[] priorBlend = null;
+            List<double[]> blendRegions = new ArrayList<>((int) blendCount);
+            for (long i = 0; i < blendCount; i++) {
+                long[] key = new long[4];
+                for (int n = 0; n < 4; n++) key[n] = in.canonicalF64Bits("blend region");
+                if (priorBlend != null && compareUnsigned(priorBlend, key) >= 0) fail(BundleErrorCode.INVALID_SCHEMA, "blend regions are not uniquely sorted");
+                priorBlend = key;
+                double[] values = new double[4];
+                for (int n = 0; n < 4; n++) values[n] = Double.longBitsToDouble(key[n]);
+                blendRegions.add(values);
             }
             int[] priorSection = null; long seenFaces = 0;
             Map<SurfaceTable.SectionPos, List<SurfaceTable.Face>> sections = new java.util.HashMap<>();
@@ -1367,17 +1505,18 @@ final class BundleSchemaValidator {
                 FaceOrder prior = null;
                 for (long f = 0; f < count; f++) {
                     byte[] record = in.bytes(FRAGMENT_FIXED_BYTES);
-                    int local = u16(record, 0), flags = record[2] & 255, provenance = record[3] & 255, vertexCount = record[24] & 255;
+                    int local = u16(record, 0), flags = record[2] & 255, provenance = record[3] & 255, vertexCount = record[28] & 255;
                     // Flags: bit 0 owned; bits 1-2, 3-4, 5-6 owner offset X, Y, Z plus one; bit 7 zero.
                     int ownerDx = (flags >>> 1 & 3) - 1, ownerDy = (flags >>> 3 & 3) - 1, ownerDz = (flags >>> 5 & 3) - 1;
                     boolean owned = (flags & 1) != 0;
                     if ((local & 0xf000) != 0 || (flags & 0x80) != 0 || ownerDx > 1 || ownerDy > 1 || ownerDz > 1
                         || (!owned && flags != UNOWNED_FLAGS) || provenance > 2) fail(BundleErrorCode.INVALID_SCHEMA, "invalid fragment record bits");
                     if (vertexCount < 3 || vertexCount > SurfaceTable.MAX_FRAGMENT_VERTICES) fail(BundleErrorCode.INVALID_SCHEMA, "invalid fragment vertex count");
-                    long light = u32(record, 12);
+                    long light = u32(record, 12), blend = u32(record, 16);
                     if (u32(record, 4) >= Integer.toUnsignedLong(materialCount) || u32(record, 8) >= uvCount
-                        || (light != 0xFFFFFFFFL && light >= lightCount)) fail(BundleErrorCode.INVALID_REFERENCE, "surface reference out of range");
-                    FaceOrder order = new FaceOrder(local, provenance, u32(record,16), u32(record,20));
+                        || (light != 0xFFFFFFFFL && light >= lightCount) || (blend != 0xFFFFFFFFL && blend >= blendCount))
+                        fail(BundleErrorCode.INVALID_REFERENCE, "surface reference out of range");
+                    FaceOrder order = new FaceOrder(local, provenance, u32(record,20), u32(record,24));
                     if (prior != null && prior.compareTo(order) >= 0) fail(BundleErrorCode.INVALID_SCHEMA, "fragments are not uniquely sorted");
                     prior = order;
                     byte[] coords = in.bytes(vertexCount * 6);
@@ -1387,14 +1526,14 @@ final class BundleSchemaValidator {
                         if (value > SurfaceTable.CELL_UNITS) fail(BundleErrorCode.INVALID_SCHEMA, "fragment vertex outside its cell");
                         vertices[n] = (short) value;
                     }
-                    faces.add(new SurfaceTable.Face(local, owned, ownerDx, ownerDy, ownerDz, provenance, (int)u32(record,4), (int)u32(record,8), u32(record,16), u32(record,20), vertices,
-                        light == 0xFFFFFFFFL ? SurfaceTable.NO_LIGHT : (int) light));
+                    faces.add(new SurfaceTable.Face(local, owned, ownerDx, ownerDy, ownerDz, provenance, (int)u32(record,4), (int)u32(record,8), u32(record,20), u32(record,24), vertices,
+                        light == 0xFFFFFFFFL ? SurfaceTable.NO_LIGHT : (int) light, blend == 0xFFFFFFFFL ? SurfaceTable.NO_LIGHT : (int) blend));
                 }
                 sections.put(new SurfaceTable.SectionPos(section[0], section[1], section[2]), faces);
             }
             if (seenFaces != faceCount) fail(BundleErrorCode.INVALID_SCHEMA, "surface fragment count differs");
             in.end();
-            return new SurfaceTable(uvRegions, sections, lightRegions);
+            return new SurfaceTable(uvRegions, sections, lightRegions, blendRegions);
         }
     }
 

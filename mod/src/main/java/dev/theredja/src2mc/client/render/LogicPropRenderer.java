@@ -217,6 +217,7 @@ public final class LogicPropRenderer {
         for (var batch : PropRenderer.tessellate(bundle, map, placement, worn, mesh).entrySet()) {
             PackedVertices out = meshes.computeIfAbsent(new PageClass(batch.getKey().page(), batch.getKey().renderClass()), ignored -> new PackedVertices());
             for (PropTessellator.Triangle triangle : batch.getValue()) {
+                out.row(triangle.row());
                 for (PropTessellator.Vertex vertex : List.of(triangle.a(), triangle.b(), triangle.c())) {
                     dev.theredja.src2mc.bundle.LightTable.evaluate(cube, vertex.nx(), vertex.ny(), vertex.nz(), rgb);
                     baked[0] = rgb[0]; baked[1] = rgb[1]; baked[2] = rgb[2]; baked[3] = BakedLighting.VERTEX;
