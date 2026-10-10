@@ -14,6 +14,36 @@ It was built for recreating the Half-Life 2 universe (Half-Life 2,
 **Entropy: Zero** and **Entropy: Zero 2**). **Portal**, **Portal 2** and
 **INFRA** maps are the everyday in-game test maps.
 
+**At a glance** -- a Rust converter plus a NeoForge companion mod that give you:
+
+| | |
+|---|---|
+| **Geometry** | Exact Source surfaces drawn on ordinary, editable blocks; sub-block (1/16) collision; displacement terrain |
+| **Looks** | Real Source textures (own atlas, mipmaps), every prop as its real mesh with skins and tints, the map's baked Source light, bump maps, cubemap reflections, detail textures, blended terrain, self-illumination |
+| **HDR** | Source's auto exposure, bloom, colour correction, vignette and fog; the 2D and 3D skybox |
+| **Effects** | The game's own `.pcf` particles, impact effects, bullet holes and sparks |
+| **Performance** | Source's PVS, frustum and GPU occlusion culling, batched props, threaded mesh building |
+| **Sound** | Soundscapes, ambient sounds, music, voice lines and per-material footsteps, re-encoded to Ogg; captions |
+| **Logic** | Source's entity I/O on the server: triggers, buttons, doors, relays, timers, level changes, `point_template`, scripted text and screen effects |
+| **Motion** | Doors, lifts, trains and conveyors as Sable sub-levels you can ride; animated props |
+| **Input** | BSP v19/20/21/22, loose files or inside VPKs; in-game tested on Portal, Portal 2 and INFRA maps |
+| **Scale** | ~80k lines (Rust converter, Java mod), 600+ Rust tests, campaigns of many maps in one bundle |
+
+### How it can look:
+<img width="3440" height="1440" alt="Screenshot_20261006_234201" src="https://github.com/user-attachments/assets/1858758d-abe2-4419-92bd-0215d2c37b53" />
+
+Running at 3440x1440p on an rtx 3060 with 290fps<br>
+<br>
+map: infra_c4_m2_furnace
+
+#
+
+
+
+
+
+
+
 There are two ways to get a map into Minecraft:
 
 - **The companion mod (current).** `src2mc mod export` writes one campaign
