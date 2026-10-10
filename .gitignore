@@ -5,3 +5,10 @@
 # machine-local.
 /AGENTS.md
 /AGENT.md
+
+# Eclipse JDT language server (jdtls) project files
+/mod/.classpath
+/mod/.project
+/mod/.settings/
+/mod/.eclipse/
+/mod/bin/
