@@ -158,13 +158,10 @@ final class SkyboxScene implements AutoCloseable {
         ShortBuffer luxels = MemoryUtil.memAllocShort(table.page().length);
         try {
             luxels.put(table.page()).flip();
-            GL11.glPixelStorei(GL11.GL_UNPACK_ALIGNMENT, 2);
-            GL11.glPixelStorei(GL11.GL_UNPACK_ROW_LENGTH, 0);
-            GL11.glPixelStorei(GL11.GL_UNPACK_SKIP_ROWS, 0);
-            GL11.glPixelStorei(GL11.GL_UNPACK_SKIP_PIXELS, 0);
+            int unpack = UnpackState.begin(2);
             GL11.glTexImage2D(GL11.GL_TEXTURE_2D, 0, GL30.GL_RGB16, table.pageWidth(), table.pageHeight(), 0, GL11.GL_RGB,
                 GL11.GL_UNSIGNED_SHORT, luxels);
-            GL11.glPixelStorei(GL11.GL_UNPACK_ALIGNMENT, 4);
+            UnpackState.end(unpack);
         } finally {
             MemoryUtil.memFree(luxels);
         }

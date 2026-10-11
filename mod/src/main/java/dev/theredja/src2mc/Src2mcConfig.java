@@ -41,7 +41,7 @@ public final class Src2mcConfig {
         return FMLPaths.GAMEDIR.get().resolve(BUNDLE_DIRECTORY.get()).normalize();
     }
 
-    static Path schematicDirectory() {
+    public static Path schematicDirectory() {
         return FMLPaths.GAMEDIR.get().resolve(SCHEMATIC_DIRECTORY.get()).normalize();
     }
 

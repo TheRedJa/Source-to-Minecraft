@@ -6,7 +6,8 @@
     "client": [
         "EntityRendererLightMixin",
         "GameRendererLookMixin",
-        "LivingEntityRendererTintMixin"
+        "LivingEntityRendererTintMixin",
+        "WorldOpenFlowsWarningMixin"
     ],
     "injectors": {
         "defaultRequire": 1

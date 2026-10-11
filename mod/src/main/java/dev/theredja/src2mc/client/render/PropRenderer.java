@@ -129,6 +129,17 @@ public final class PropRenderer {
         }));
     }
 
+    /**
+     * Prop registrations, section builds, dirty batches, unbuilt nearby props and meshes still decoding, plus animated
+     * prop geometry cuts; -1 while no render pass with placements has run for {@code clientLevel} long enough for every
+     * root to have been scanned once. Read-only; used by the level-change loading screen.
+     */
+    public static int pendingLoads(ClientLevel clientLevel) {
+        if (level != clientLevel || frame <= ROOT_RECHECK_FRAMES + 1 || generationSequence <= 0 || placementSnapshot.isEmpty()) return -1;
+        return REGISTERING.size() + SECTION_BUILDS.size() + AGGREGATES.dirtyCount() + nearbyUnbuilt
+            + (int) RUNTIME_MESHES.stats().pending() + AnimatedPropRenderer.pendingLoads();
+    }
+
     static List<Component> statusLines() {
         long active = ROOT_STATUS.values().stream().filter(status -> status == RootStatus.ACTIVE).count();
         long unloaded = ROOT_STATUS.values().stream().filter(status -> status == RootStatus.UNLOADED).count();

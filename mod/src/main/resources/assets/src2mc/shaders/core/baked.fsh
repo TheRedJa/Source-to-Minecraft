@@ -19,6 +19,8 @@ uniform sampler2D Sampler7;
 uniform sampler2DArray DetailArray;
 // Reflections, detail textures, displacement blending, self-illumination: 1 on, 0 off.
 uniform vec4 SurfaceToggles;
+// Debug: x light only (grey albedo), y dither every path; 1 on, 0 off.
+uniform vec4 DebugToggles;
 
 uniform vec4 ColorModulator;
 uniform float FogStart;
@@ -195,6 +197,7 @@ void main() {
 
     vec4 layer = (bakedLight.w < -0.5 || effects) ? texture(Sampler4, texCoord0) : vec4(0.5, 0.5, 1.0, 1.0);
     vec3 light = bakedLight.w < 0.5 ? lightmap(layer.xyz, detailWeights) : bakedLight.rgb;
+    if (DebugToggles.x > 0.5) base = vec3(0.5);
     vec3 diffuse = base * light;
     if (effects && SurfaceToggles.w > 0.5) {
         // $selfillum: towards the tinted texture itself by the base alpha.
@@ -222,6 +225,6 @@ void main() {
         if (SourceFog.w < 1.5) color = mix(color, SourceFogColor * Exposure, source_fog(viewDepth));
         fragColor = vec4(pow(max(color, vec3(0.0)), vec3(1.0 / 2.2)) + dither(), alpha);
     } else {
-        fragColor = linear_fog(vec4(pow(max(color, vec3(0.0)), vec3(1.0 / 2.2)), alpha), vertexDistance, FogStart, FogEnd, FogColor);
+        fragColor = linear_fog(vec4(pow(max(color, vec3(0.0)), vec3(1.0 / 2.2)) + (DebugToggles.y > 0.5 ? dither() : 0.0), alpha), vertexDistance, FogStart, FogEnd, FogColor);
     }
 }

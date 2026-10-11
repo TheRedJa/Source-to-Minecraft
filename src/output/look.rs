@@ -32,20 +32,26 @@ pub const LOOKUP_SIZE: usize = 32;
 pub const LOOKUP_BYTES: usize = LOOKUP_SIZE * LOOKUP_SIZE * LOOKUP_SIZE * 3;
 
 const MAGIC: &[u8; 8] = b"S2LOOK\0\0";
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 /// Flag bit: the map carries HDR light.
 const FLAG_HDR: u8 = 1;
 /// Flag bit: the game's bloom is the Alien Swarm branch's.
 const FLAG_LATER_BLOOM: u8 = 2;
 /// Flag bit: a vignette texture follows.
 const FLAG_VIGNETTE: u8 = 4;
+/// Flag bit: the game's film grain is on and its noise texture follows.
+const FLAG_GRAIN: u8 = 8;
+/// Side of `dev/noise_post`, the only grain texture size the format carries.
+pub const GRAIN_SIZE: u32 = 64;
+/// Highest `gpu_level_N_pc.txt` looked for.
+const MAX_GPU_LEVEL: u32 = 9;
 /// Largest Gaussian `BlurFilter` knows.
 const MAX_KERNEL: u8 = 4;
 
 /// Entities that name a lookup through `filename`.
 const LOOKUP_CLASSES: &[&str] = &["color_correction", "color_correction_volume"];
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct LookTable {
     pub hdr: bool,
     pub post: Post,
@@ -54,7 +60,7 @@ pub struct LookTable {
 }
 
 /// How the game's post-processing materials set its bloom and vignette up.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Post {
     /// `$bloomtype` of `dev/downsample_non_hdr`; None for the 2013 shader, which has none.
     pub bloom_type: Option<u8>,
@@ -63,6 +69,16 @@ pub struct Post {
     pub kernel_y: u8,
     /// The red channel of `engine_post`'s vignette texture where it is on: width, height, texels.
     pub vignette: Option<(u32, u32, Vec<u8>)>,
+    /// Film grain where the game turns it on: absent otherwise.
+    pub grain: Option<Grain>,
+}
+
+/// Engine_Post's film grain: `$noiseScale` (or the video setting's override)
+/// and the green channel of `$noiseTexture`, `GRAIN_SIZE` squared texels.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Grain {
+    pub scale: f32,
+    pub texels: Vec<u8>,
 }
 
 /// The name a lookup is keyed by: as the entity wrote it, lowercased, with
@@ -178,7 +194,72 @@ fn post(read: impl Fn(&str) -> Option<Vec<u8>>) -> (Post, Vec<Diagnostic>) {
             }
         }
     }
+    post.grain = grain(&read, &mut diagnostics);
     (post, diagnostics)
+}
+
+/// Every value `key` has in a script, at any depth, the last winning.
+fn setting(block: &Block, key: &str) -> Option<String> {
+    let mut found = None;
+    for (name, value) in block {
+        match value {
+            Value::Text(text) if name.eq_ignore_ascii_case(key) => found = Some(text.trim().to_string()),
+            Value::Block(inner) => found = setting(inner, key).or(found),
+            Value::Text(_) => {}
+        }
+    }
+    found
+}
+
+/// A setting read as a number; None when absent or not one.
+fn number(block: &Block, key: &str) -> Option<f64> {
+    setting(block, key)?.trim_matches('"').parse::<f64>().ok()
+}
+
+/// The film grain the game turns on. Source draws it in `Engine_Post` when
+/// `$noiseEnable` is set, which `mat_grain_enable` drives; a game's highest
+/// `gpu_level_N_pc.txt` (the DX9 level the rest of the look follows) says
+/// whether that is 1. A game without the material, the level files or the
+/// setting has no grain. `setting.mat_grain_scale_override` of `video.txt`
+/// replaces `$noiseScale` unless it is -1; a scale of 0 or less is off.
+fn grain(read: &impl Fn(&str) -> Option<Vec<u8>>, diagnostics: &mut Vec<Diagnostic>) -> Option<Grain> {
+    let script = |path: &str| read(path).map(|b| keyvalues::parse(&String::from_utf8_lossy(&b)));
+    let engine_post = material(read, "dev/engine_post")?;
+    keyvalues::get(&engine_post, "$noiseenable")?;
+    let level = (0..=MAX_GPU_LEVEL).rev().find_map(|n| script(&format!("cfg/gpu_level_{n}_pc.txt")))?;
+    if number(&level, "mat_grain_enable").is_none_or(|v| v as i64 == 0) {
+        return None;
+    }
+    let mut scale = keyvalues::text(&engine_post, "$noisescale")
+        .and_then(|v| v.trim().trim_matches('"').parse::<f64>().ok())
+        .unwrap_or(1.0);
+    if let Some(over) = script("cfg/video.txt").and_then(|v| number(&v, "setting.mat_grain_scale_override"))
+        && over != -1.0
+    {
+        scale = over;
+    }
+    if !scale.is_finite() || scale <= 0.0 {
+        return None;
+    }
+    let texture = keyvalues::text(&engine_post, "$noisetexture")
+        .unwrap_or("dev/noise_post")
+        .trim_matches('"')
+        .to_ascii_lowercase();
+    // The shader reads the green channel only.
+    let texels = read(&format!("materials/{texture}.vtf")).and_then(|bytes| {
+        crate::source::vtf::decode_resized(&bytes, [GRAIN_SIZE, GRAIN_SIZE], false).ok()
+    });
+    match texels {
+        Some(image) => Some(Grain { scale: scale as f32, texels: image.pixels().map(|p| p.0[1]).collect() }),
+        None => {
+            diagnostics.push(diagnostic(
+                "LOOK_GRAIN_TEXTURE_MISSING",
+                "the game's film grain texture could not be read; the screen stays clean",
+                &[("texture", &texture)],
+            ));
+            None
+        }
+    }
 }
 
 /// [`collect`] after the entity scan, with the file lookup passed in.
@@ -231,7 +312,8 @@ fn diagnostic(code: &str, message: &str, context: &[(&str, &str)]) -> Diagnostic
 impl LookTable {
     /// Little-endian: magic, `u32` version, `u8` flags, `u8` bloom type,
     /// `u8` x and y blur kernels, with the vignette flag a `u32` width,
-    /// `u32` height and that many red texels, then a `u32` lookup count and
+    /// `u32` height and that many red texels, with the grain flag an `f32` scale and
+    /// [`GRAIN_SIZE`] squared texels, then a `u32` lookup count and
     /// per lookup in name order a `u32` name length, the UTF-8 name and its
     /// [`LOOKUP_BYTES`].
     pub fn encode(&self) -> Vec<u8> {
@@ -248,6 +330,9 @@ impl LookTable {
         if self.post.vignette.is_some() {
             flags |= FLAG_VIGNETTE;
         }
+        if self.post.grain.is_some() {
+            flags |= FLAG_GRAIN;
+        }
         out.push(flags);
         out.push(self.post.bloom_type.unwrap_or(0));
         out.push(self.post.kernel_x);
@@ -256,6 +341,10 @@ impl LookTable {
             out.extend_from_slice(&width.to_le_bytes());
             out.extend_from_slice(&height.to_le_bytes());
             out.extend_from_slice(red);
+        }
+        if let Some(grain) = &self.post.grain {
+            out.extend_from_slice(&grain.scale.to_le_bytes());
+            out.extend_from_slice(&grain.texels);
         }
         out.extend_from_slice(&(self.lookups.len() as u32).to_le_bytes());
         for (name, bytes) in &self.lookups {
@@ -304,10 +393,10 @@ mod tests {
         let mut lookups = BTreeMap::new();
         lookups.insert("b".to_string(), vec![2u8; LOOKUP_BYTES]);
         lookups.insert("a".to_string(), vec![1u8; LOOKUP_BYTES]);
-        let post = Post { bloom_type: Some(0), kernel_x: 4, kernel_y: 4, vignette: Some((2, 1, vec![9, 8])) };
+        let post = Post { bloom_type: Some(0), kernel_x: 4, kernel_y: 4, vignette: Some((2, 1, vec![9, 8])), grain: None };
         let bytes = LookTable { hdr: true, post, lookups }.encode();
         assert_eq!(&bytes[..8], MAGIC);
-        assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), 1);
+        assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), 2);
         assert_eq!(bytes[12], FLAG_HDR | FLAG_LATER_BLOOM | FLAG_VIGNETTE);
         assert_eq!(&bytes[13..16], [0, 4, 4]);
         assert_eq!(u32::from_le_bytes(bytes[16..20].try_into().unwrap()), 2);
@@ -346,7 +435,7 @@ mod tests {
                 "engine_post { $AllowVignette 1 $vignetteEnable 1 Proxies { ConVar { resultVar $vignetteEnable convar mat_vignette_enable } } }",
             ),
         ]));
-        assert_eq!(post, Post { bloom_type: Some(0), kernel_x: 4, kernel_y: 4, vignette: None });
+        assert_eq!(post, Post { bloom_type: Some(0), kernel_x: 4, kernel_y: 4, vignette: None, grain: None });
     }
 
     #[test]
@@ -357,5 +446,49 @@ mod tests {
         ]));
         assert_eq!(post.vignette, None);
         assert_eq!(diagnostics[0].code, "LOOK_VIGNETTE_MISSING");
+    }
+
+    const POST_VMT: &str = "engine_post { $noiseEnable 1 $noiseScale \"1.5\" $noiseTexture dev/noise_post }";
+
+    #[test]
+    fn grain_needs_the_material_and_a_level_that_enables_it() {
+        let mut diagnostics = Vec::new();
+        let none = files(&[("materials/dev/engine_post.vmt", POST_VMT)]);
+        assert_eq!(grain(&none, &mut diagnostics), None);
+        let off = files(&[
+            ("materials/dev/engine_post.vmt", POST_VMT),
+            ("cfg/gpu_level_3_pc.txt", "\"kv\" { \"mat_grain_enable\" \"0\" }"),
+            ("cfg/gpu_level_2_pc.txt", "\"kv\" { \"mat_grain_enable\" \"1\" }"),
+        ]);
+        assert_eq!(grain(&off, &mut diagnostics), None, "only the highest level counts");
+        assert!(diagnostics.is_empty());
+        let on = files(&[
+            ("materials/dev/engine_post.vmt", POST_VMT),
+            ("cfg/gpu_level_2_pc.txt", "\"kv\" { \"mat_grain_enable\" \"1\" }"),
+        ]);
+        assert_eq!(grain(&on, &mut diagnostics), None);
+        assert_eq!(diagnostics[0].code, "LOOK_GRAIN_TEXTURE_MISSING");
+    }
+
+    #[test]
+    fn grain_without_the_noise_switch_stays_off() {
+        let mut diagnostics = Vec::new();
+        let read = files(&[
+            ("materials/dev/engine_post.vmt", "engine_post { $vignetteEnable 1 }"),
+            ("cfg/gpu_level_3_pc.txt", "\"kv\" { \"mat_grain_enable\" \"1\" }"),
+        ]);
+        assert_eq!(grain(&read, &mut diagnostics), None);
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn the_encoding_carries_grain_after_the_vignette() {
+        let grain = Grain { scale: 2.0, texels: vec![5; (GRAIN_SIZE * GRAIN_SIZE) as usize] };
+        let post = Post { grain: Some(grain), ..Post::default() };
+        let bytes = LookTable { hdr: false, post, lookups: BTreeMap::new() }.encode();
+        assert_eq!(bytes[12], FLAG_GRAIN);
+        assert_eq!(f32::from_le_bytes(bytes[16..20].try_into().unwrap()), 2.0);
+        assert_eq!(bytes[20], 5);
+        assert_eq!(bytes.len(), 20 + 4096 + 4);
     }
 }

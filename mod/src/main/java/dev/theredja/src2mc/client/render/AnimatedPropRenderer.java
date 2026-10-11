@@ -421,6 +421,13 @@ public final class AnimatedPropRenderer {
      */
     private static final Map<BundleModel, Map<Integer, java.util.concurrent.CompletableFuture<Geometry>>> GEOMETRY = new java.util.IdentityHashMap<>();
 
+    /** Model geometry cuts still running on workers. */
+    static int pendingLoads() {
+        int pending = 0;
+        for (var tints : GEOMETRY.values()) for (var cut : tints.values()) if (!cut.isDone()) pending++;
+        return pending;
+    }
+
     /** The prop in one skin and tint, split into bone buffers and skinned triangles; null while its mesh loads. */
     private static Built build(BundleGeneration generation, BundleManifest bundle, BundleMap map, LogicPropTable.Prop prop, int model, int color) {
         BundleModel reference = map.models().get(model);

@@ -2,7 +2,47 @@
 
 Updated: 2026-10-10 (Europe/Berlin), stage 1 committed (33b1018); stage 2a+2b confirmed (uncommitted); stage 2 (2a-2c) USER-CONFIRMED DEV-0.45.0, committed 12ab766 + pushed 2026-10-10
 
-## IN PROGRESS: Source look, stage 2 "surfaces" -- D31
+## IN PROGRESS: side quest "menu + one MC world per map" (part 1 committed DEV-0.47.0, before stage 3) -- user decisions 2026-10-11
+
+Decisions (memory side-quest-menu-and-level-worlds): title menu = INFRA-faithful in-world vgui_screen panels in
+a menu world running main_menu.bsp (point_viewcontrol camera + node glides, mouse picking); one MC world per map,
+placed on demand behind an INFRA loading screen (black + 511x1 progress bar); New Game wipes the campaign's map
+worlds after a confirm; whole MC player carried over; SourceSansPro (OFL) bundled; saves (FTB Backups 3) skipped.
+User test 2026-10-11 (after hang fix: vanilla Save-and-Quit order before open/create; half-created folders without
+level.dat removed): level change furnace <-> tunnel4 works both ways, spot + facing right, inventory incl. NBT
+carried, first load < 10 s, revisits near instant. Open: loading screen closes ~15 s before props/textures are
+ready; "experimental settings" screen on some changes. Fixed: screen waits for MapSurfaceRenderer/PropRenderer
+pendingLoads == 0 for 10 ticks (45 s cap; bar 2nd half monotonic), WorldOpenFlowsWarningMixin skips askForBackup
+only while switching -- user-confirmed (no pop-in, no warning; loads 7-13 s). One-off purple/blue tint after a
+switch, not reproducible: logout now also clears PlacementNetwork.CLIENT, LookClient fog transition, SourcePost
+exposure/bloom/histogram state (SourcePost.resetState). Tint came back green (2026-10-11, tunnel4), `/src2mc_look correction off` removes it -> cause: CC
+LUT glTexImage3D set only UNPACK_ALIGNMENT and inherited ROW_LENGTH/SKIP_* left by vanilla NativeImage uploads
+(LUT re-uploads after a world switch). New client/render/UnpackState.begin/end (resets alignment, row length,
+skips, image height, unbinds PIXEL_UNPACK_BUFFER) used by every raw upload: SourcePost LUT + vignette,
+SurfaceEffects cubemaps/settings/detail array, BakedLighting, SkyboxScene. User-confirmed: no tint.
+Rainbow hue on dark props = INFRA's own 8-bit .vhv data (verified parse/decode match Source); INFRA hides it with
+film grain. Our CC black floor (cc_furnace_hall LUT black 9/255) matches INFRA (print_colorcorrection: weight 1).
+DEV-0.47.0: Source Engine_Post film grain, data-driven (look format v2, flag 8: highest cfg/gpu_level_N_pc.txt
+mat_grain_enable + engine_post.vmt $noiseScale / video.txt override; dev/noise_post 64x64), combine.fsh after
+vignette; off < 720 px high; HL2/Portal 2 carry none. User: "very very close to INFRA"; toggles grain/grainscale,
+lightonly, dither. Open: ours grain std 6.4 vs INFRA 4.6 at same 3440x1440 and dark corner mean 11 vs 9.5 (user:
+"slightly less intense", bloom not the cause) -- find why (noise sampler sRGB/filter?) rather than fudge the scale.
+Committed with part 1. NEXT: menu (part 2).
+Part 1 built (uncommitted): levels/LevelTransition (static handoff, 120 s expiry),
+LevelNetwork (protocol "13": change/progress/loaded), LevelWorldData (SavedData src2mc_level_world),
+LevelWorlds (login: apply old player NBT, spectator hold, place at translation 0 with 50 ms budget, arrive at
+landmark+offset or info_player_start, deferred 10 ticks when already placed), LogicSystem.leaveForWorldOf/arrive,
+WorldPlacer callback/progress/heightProblem/clear-on-stop, client/levels LevelChangeClient + SourceLoadingScreen.
+World folders: "src2mc <campaign> <mapid>", void flat (the_void preset), daylight/weather/mob spawning off.
+Source yaw -> MC yaw = -90 - yaw (assumes export rotate_yaw 0). Known gap: Back after a failed switch leaves the
+player in LogicSystem.LEAVING until rejoin. Test pair: infra_c4_m2_furnace <-> infra_c3_m4_tunnel4.
+Part 2 (menu) research done: main_menu entities (7 vgui_screen, viewcontrol + 2 nodes) reach the logic table;
+logo materials/vgui/logo.vtf + sound/music/menu.wav need new exporter code; chapter maps in
+scripts/screens/infra_menu_chapters.res.
+
+## NEXT: Source look, stage 3 "models" (phong, rimlight, world lights). Stage 2 below DONE, committed 12ab766 (DEV-0.45.0)
+
+## DONE: Source look, stage 2 "surfaces" -- D31
 
 Plan: 2a normal maps + bumped lightmaps (built), 2b cubemaps (env_cubemap pak VTFs, per-face
 cubemap via patched material names, envmap mask/tint/fresnel), 2c selfillum, detail, WVT blend.

@@ -128,6 +128,7 @@ public final class LogicSystem {
         PropSync.clear();
         LookSync.clear();
         OCCUPIED.clear();
+        LEAVING.clear();
         generationSequence = -1;
     }
 
@@ -226,6 +227,7 @@ public final class LogicSystem {
             if (distance < best) { best = distance; target = placement; }
         }
         if (target == null) {
+            if (player.server.isSingleplayer() && leaveForWorldOf(from, nextMap, landmark, player)) return;
             player.displayClientMessage(Component.literal("Level change to " + nextMap + " (not placed)"), true);
             return;
         }
@@ -239,20 +241,68 @@ public final class LogicSystem {
         Vec3 to = new Vec3(toLandmark[0] + target.translation().getX(), toLandmark[1] + target.translation().getY(),
             toLandmark[2] + target.translation().getZ()).add(offset);
         player.teleportTo(level, to.x, to.y, to.z, player.getYRot(), player.getXRot());
+        String failure = arrive(level, target, MapLogic.LoadType.TRANSITION, player);
+        if (failure != null) player.displayClientMessage(Component.literal(failure), true);
+    }
+
+    /**
+     * Hands the player over to the world of {@code nextMap} (one world per map): records the
+     * {@link dev.theredja.src2mc.levels.LevelTransition} and tells the client to switch worlds.
+     * False, with nothing done, when the map or its landmark is not in the loaded bundles.
+     */
+    private static boolean leaveForWorldOf(MapLogic from, String nextMap, String landmark, ServerPlayer player) {
+        // The trigger fires every tick the player stands in it; the switch is already under way.
+        if (LEAVING.contains(player.getUUID())) return true;
+        var generation = Src2mc.bundles().active();
+        var located = generation.findLocatedMap(from.placement.campaignId(), nextMap);
+        if (located.isEmpty()) {
+            located = generation.bundles().stream()
+                .flatMap(bundle -> bundle.maps().stream().filter(map -> map.mapId().equalsIgnoreCase(nextMap))
+                    .map(map -> new BundleGeneration.LocatedMap(bundle, map)))
+                .findFirst();
+        }
+        if (located.isEmpty()) return false;
+        BundleMap map = located.get().map();
+        double[] fromLandmark = landmark(from.table, landmark);
+        if (fromLandmark == null || map.logic() == null || landmark(map.logic(), landmark) == null) return false;
+        Vec3 offset = player.position().subtract(from.world(fromLandmark));
+        dev.theredja.src2mc.levels.LevelTransition.set(new dev.theredja.src2mc.levels.LevelTransition.Pending(
+            dev.theredja.src2mc.levels.LevelTransition.Kind.CHANGE_LEVEL, located.get().bundle().campaignId(), map.mapId(),
+            landmark, offset, player.getYRot(), player.getXRot(), player.getDeltaMovement(),
+            player.saveWithoutId(new CompoundTag())));
+        PacketDistributor.sendToPlayer(player, new dev.theredja.src2mc.levels.LevelNetwork.ChangePayload(
+            located.get().bundle().campaignId(), map.mapId()));
+        LEAVING.add(player.getUUID());
+        return true;
+    }
+
+    /** Players already handed over to another world's switch; cleared on logout and server stop. */
+    private static final java.util.Set<java.util.UUID> LEAVING = java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+    /** The player left this world (the switch completed or was abandoned). */
+    public static void forgetLeaving(java.util.UUID player) { LEAVING.remove(player); }
+
+    /**
+     * The tail of a level change or world entry: the placement's logic starts as {@code type} if it
+     * is not running, or is re-entered if nobody is in it, then the player has arrived. Null on
+     * success, else why logic could not start.
+     */
+    public static String arrive(ServerLevel level, MapPlacement target, MapLogic.LoadType type, ServerPlayer player) {
         MapLogic next = get(level, target);
         if (next == null) {
-            String failure = start(level, target, MapLogic.LoadType.TRANSITION);
-            if (failure != null) { player.displayClientMessage(Component.literal(failure), true); return; }
+            String failure = start(level, target, type);
+            if (failure != null) return failure;
             next = get(level, target);
         } else if (!OCCUPIED.getOrDefault(next, false)) {
             next.reenter();
         }
         next.arrived(player);
         OCCUPIED.put(next, true);
+        return null;
     }
 
     /** The map-local origin of the {@code info_landmark} named {@code name}, or null. */
-    private static double[] landmark(LogicTable table, String name) {
+    public static double[] landmark(LogicTable table, String name) {
         for (LogicTable.Entity entity : table.entities()) {
             if (entity.classname().equals("info_landmark") && name.equalsIgnoreCase(entity.targetname()) && entity.origin() != null) return entity.origin();
         }

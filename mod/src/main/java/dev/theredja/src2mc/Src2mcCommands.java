@@ -189,21 +189,9 @@ final class Src2mcCommands {
     /** Whether the schematic fits the world's build height at {@code translation}; says why not when it does not. */
     private static boolean fits(net.minecraft.commands.CommandSourceStack source, String mapId, BlockPos translation,
                                 dev.theredja.src2mc.world.SchematicReader.Result schematic) {
-        var level = source.getLevel();
-        int[] offset = schematic.offset();
-        int minWorldY = Integer.MAX_VALUE, maxWorldY = Integer.MIN_VALUE;
-        for (var cell : schematic.cells()) {
-            int worldY = translation.getY() + offset[1] + cell.y();
-            minWorldY = Math.min(minWorldY, worldY);
-            maxWorldY = Math.max(maxWorldY, worldY);
-        }
-        if (!schematic.cells().isEmpty()
-            && (minWorldY < level.getMinBuildHeight() || maxWorldY > level.getMaxBuildHeight() - 1)) {
-            source.sendFailure(Component.literal("src2mc: " + mapId + " needs y=" + minWorldY + ".." + maxWorldY
-                + " from this position, but this world's build height is only " + level.getMinBuildHeight() + ".."
-                + level.getMaxBuildHeight() + ". Placement would silently drop blocks/props outside that range. "
-                + "Install a taller dimension_type (custom height datapack) for this world before placing, "
-                + "or place from a lower anchor position."));
+        String problem = dev.theredja.src2mc.world.WorldPlacer.heightProblem(source.getLevel(), mapId, translation, schematic);
+        if (problem != null) {
+            source.sendFailure(Component.literal(problem));
             return false;
         }
         return true;

@@ -27,7 +27,8 @@ public final class PlacementNetwork {
         // "10": movers name the bundle mover they carry apart from their entity; prop mounts.
         // "11": bullet and projectile impacts.
         // "12": the view state of fog, tonemap and colour correction entities.
-        var registrar = event.registrar("12");
+        // "13": one world per map: level change and level loaded payloads.
+        var registrar = event.registrar("13");
         registrar.playToClient(PlacementSyncPayload.TYPE, PlacementSyncPayload.STREAM_CODEC,
             (payload, context) -> {
                 PlacementIndex index = new PlacementIndex();
@@ -45,9 +46,16 @@ public final class PlacementNetwork {
         dev.theredja.src2mc.logic.ScreenEffects.register(registrar);
         dev.theredja.src2mc.logic.LookSync.register(registrar);
         dev.theredja.src2mc.world.ImpactNetwork.register(registrar);
+        dev.theredja.src2mc.levels.LevelNetwork.register(registrar);
     }
 
     public static PlacementIndex clientIndex(ResourceLocation dimension) { return CLIENT.getOrDefault(dimension, new PlacementIndex()); }
+
+    /** Forgets the placements of the world being left, for a client logout. */
+    public static void clearClient() {
+        CLIENT.clear();
+        PlacementIndex.touch();
+    }
 
     public static void onLogin(PlayerEvent.PlayerLoggedInEvent event) {
         if (event.getEntity() instanceof ServerPlayer player) send(player);

@@ -157,6 +157,9 @@ public final class AtlasPageResidency implements AutoCloseable {
     public long residentVramBytes() { return residentVram; }
     public long pendingRamBytes() { return pendingRam; }
 
+    /** Pages requested but not yet uploaded (still decoding). */
+    public long pendingPages() { return entries.values().stream().filter(entry -> entry.textureId == null).count(); }
+
     /** Pages that changed from a loading placeholder to a resident texture since the last call. */
     public List<PageKey> drainReadyPages() {
         List<PageKey> result = List.copyOf(readyPages);

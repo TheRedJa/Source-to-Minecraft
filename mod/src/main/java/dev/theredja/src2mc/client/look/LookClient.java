@@ -60,6 +60,9 @@ public final class LookClient {
         INITIAL.clear();
         frame = null;
         fogController = -2;
+        oldColor = newColor = 0;
+        oldStart = oldEnd = newStart = newEnd = 0;
+        transitionStart = -1;
     }
 
     /** Forgets the spawn-time views, for a new bundle generation's tables. */

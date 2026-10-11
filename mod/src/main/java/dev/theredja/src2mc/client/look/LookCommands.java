@@ -26,7 +26,11 @@ public final class LookCommands {
     private LookCommands() {}
 
     @SubscribeEvent
-    static void onLogout(ClientPlayerNetworkEvent.LoggingOut event) { LookClient.clear(); }
+    static void onLogout(ClientPlayerNetworkEvent.LoggingOut event) {
+        LookClient.clear();
+        SourcePost.resetState();
+        dev.theredja.src2mc.network.PlacementNetwork.clearClient();
+    }
 
     @SubscribeEvent
     static void registerCommands(RegisterClientCommandsEvent event) {
@@ -35,11 +39,17 @@ public final class LookCommands {
             .then(onOff(literal("exposure"), value -> SourcePost.exposureOn = value, "auto exposure"))
             .then(onOff(literal("correction"), value -> SourcePost.correctionOn = value, "colour correction"))
             .then(onOff(literal("vignette"), value -> SourcePost.vignetteOn = value, "vignette"))
+            .then(onOff(literal("grain"), value -> SourcePost.grainOn = value, "film grain (on follows the map's data)"))
+            .then(literal("grainscale")
+                .then(argument("scale", FloatArgumentType.floatArg(-1f, 64f))
+                    .executes(context -> grainScale(context.getSource(), FloatArgumentType.getFloat(context, "scale")))))
             .then(onOff(literal("fog"), value -> LookClient.fogOn = value, "Source fog"))
             .then(onOff(literal("reflections"), value -> dev.theredja.src2mc.client.render.SurfaceEffects.enabled = value, "cubemap reflections"))
             .then(onOff(literal("detail"), value -> dev.theredja.src2mc.client.render.SurfaceEffects.detailOn = value, "detail textures"))
             .then(onOff(literal("blend"), value -> dev.theredja.src2mc.client.render.SurfaceEffects.blendOn = value, "displacement blending"))
             .then(onOff(literal("selfillum"), value -> dev.theredja.src2mc.client.render.SurfaceEffects.selfillumOn = value, "self-illumination"))
+            .then(onOff(literal("lightonly"), value -> dev.theredja.src2mc.client.render.SurfaceEffects.lightOnly = value, "light-only grey albedo"))
+            .then(onOff(literal("dither"), value -> dev.theredja.src2mc.client.render.SurfaceEffects.ditherAll = value, "dither on every path"))
             .then(literal("bump")
                 .then(literal("on").executes(context -> bump(context.getSource(), true)))
                 .then(literal("off").executes(context -> bump(context.getSource(), false))))
@@ -72,6 +82,11 @@ public final class LookCommands {
         return reply(source, value > 0 ? "src2mc tone map scale held at " + value : "src2mc tone map scale back to auto exposure");
     }
 
+    private static int grainScale(CommandSourceStack source, float value) {
+        SourcePost.grainScale = value;
+        return reply(source, value == -1 ? "src2mc film grain scale back to the map's own" : "src2mc film grain scale held at " + value);
+    }
+
     private static int status(CommandSourceStack source) {
         LookClient.Frame frame = LookClient.frame();
         StringBuilder text = new StringBuilder("src2mc look: post ").append(SourcePost.enabled ? "on" : "off")
@@ -79,12 +94,15 @@ public final class LookCommands {
             .append(", exposure ").append(SourcePost.exposureOn ? "on" : "off")
             .append(", correction ").append(SourcePost.correctionOn ? "on" : "off")
             .append(", vignette ").append(SourcePost.vignetteOn ? "on" : "off")
+            .append(", grain ").append(SourcePost.grainOn ? "on" : "off")
             .append(", fog ").append(LookClient.fogOn ? "on" : "off")
             .append(", bump ").append(dev.theredja.src2mc.client.render.BakedLighting.bumpEnabled ? "on" : "off")
             .append(", reflections ").append(dev.theredja.src2mc.client.render.SurfaceEffects.enabled ? "on" : "off")
             .append(", detail ").append(dev.theredja.src2mc.client.render.SurfaceEffects.detailOn ? "on" : "off")
             .append(", blend ").append(dev.theredja.src2mc.client.render.SurfaceEffects.blendOn ? "on" : "off")
             .append(", selfillum ").append(dev.theredja.src2mc.client.render.SurfaceEffects.selfillumOn ? "on" : "off")
+            .append(", lightonly ").append(dev.theredja.src2mc.client.render.SurfaceEffects.lightOnly ? "on" : "off")
+            .append(", dither ").append(dev.theredja.src2mc.client.render.SurfaceEffects.ditherAll ? "on" : "off")
             .append("\n").append(SourcePost.status());
         if (IrisCompat.shaderPackInUse()) text.append("\na shader pack is in use, which skips Source's post-processing");
         if (frame == null) {
@@ -109,6 +127,10 @@ public final class LookCommands {
             text.append(String.format(Locale.ROOT, "\n%d lookup(s) of %d in the map, uncorrected share %.2f",
                 frame.lookups().size(), look == null ? 0 : look.lookups().size(), frame.defaultWeight()));
             for (LookClient.Lookup lookup : frame.lookups()) text.append(String.format(Locale.ROOT, " %.2f", lookup.weight()));
+            text.append(String.format(Locale.ROOT, "\ngrain: map %s, scale in use %.2f (override %s), drawn %s",
+                look != null && look.grain() != null ? String.format(Locale.ROOT, "carries it at %.2f", look.grain().scale()) : "has none",
+                SourcePost.grainScaleFor(look), SourcePost.grainScale == -1 ? "none" : String.valueOf(SourcePost.grainScale),
+                SourcePost.grainUsed() > 0 ? "yes" : "no (off, no data, or framebuffer under 720 high)"));
             if (look != null && look.vignette() != null) text.append(", vignette ").append(look.vignette().width()).append('x').append(look.vignette().height());
         }
         return reply(source, text.toString());

@@ -33,6 +33,9 @@ public final class Src2mc {
         NeoForge.EVENT_BUS.addListener(dev.theredja.src2mc.world.SurfaceChangeTracker::onServerTick);
         NeoForge.EVENT_BUS.addListener(dev.theredja.src2mc.logic.LogicSystem::onServerTick);
         NeoForge.EVENT_BUS.addListener(dev.theredja.src2mc.logic.LogicSystem::onPlayerLoggedIn);
+        NeoForge.EVENT_BUS.addListener(dev.theredja.src2mc.levels.LevelWorlds::onPlayerLoggedIn);
+        NeoForge.EVENT_BUS.addListener(dev.theredja.src2mc.levels.LevelWorlds::onServerTick);
+        NeoForge.EVENT_BUS.addListener(dev.theredja.src2mc.levels.LevelWorlds::onPlayerLoggedOut);
         NeoForge.EVENT_BUS.addListener(dev.theredja.src2mc.logic.LogicSystem::onPlayerChangedDimension);
         NeoForge.EVENT_BUS.addListener(dev.theredja.src2mc.logic.LogicSystem::onServerStopped);
         NeoForge.EVENT_BUS.addListener(dev.theredja.src2mc.logic.PropSync::onPlayerLoggedIn);
@@ -51,6 +54,8 @@ public final class Src2mc {
         NeoForge.EVENT_BUS.addListener((net.neoforged.neoforge.event.server.ServerStoppedEvent event) -> {
             dev.theredja.src2mc.world.SurfaceChangeTracker.clear();
             dev.theredja.src2mc.world.CollisionShapes.clear();
+            dev.theredja.src2mc.world.WorldPlacer.clear();
+            dev.theredja.src2mc.levels.LevelWorlds.clear();
         });
         LOGGER.info("src2mc initialized; bundles load in the background during startup");
     }

@@ -77,6 +77,8 @@ public final class MapSurfaceRenderer {
     private static long frame;
     private static long pvsRejectedRegions;
     private static boolean stillLoading = true;
+    /** Regions in range that were not built after the last render pass's dispatch (building or waiting). */
+    private static int pendingRegionsLast;
     private static long relightsQueued;
     /** Build pipeline counters, read back through {@code /src2mc_render_status}. */
     private static int waitingLast, uploadsLast;
@@ -719,6 +721,16 @@ public final class MapSurfaceRenderer {
     /** The frame count atlas page residency is stamped with; other renderers sharing the pages use it too. */
     public static long currentFrame() { return frame; }
 
+    /**
+     * Surface regions in range still unbuilt (building or waiting for light) plus atlas pages still decoding,
+     * or -1 while this renderer has not yet had a render pass for {@code clientLevel} with placements.
+     * Read-only; used by the level-change loading screen.
+     */
+    public static int pendingLoads(ClientLevel clientLevel) {
+        if (level != clientLevel || frame < 2 || generationSequence <= 0 || placementSnapshot.isEmpty()) return -1;
+        return pendingRegionsLast + (int) PAGES.pendingPages();
+    }
+
     static boolean pvsCulling() { return pvsCulling; }
 
     static boolean smoothLighting() { return smoothLighting; }
@@ -831,6 +843,7 @@ public final class MapSurfaceRenderer {
         recheckHiddenOwners();
         dispatchBuilds(minecraft, candidates, distance);
         stillLoading = !candidates.isEmpty() || !IN_FLIGHT.isEmpty();
+        pendingRegionsLast = IN_FLIGHT.size() + (int) candidates.stream().filter(c -> !IN_FLIGHT.containsKey(c.entry.key)).count();
         discardExpiredMeshes();
         prefetchNearMeshes(generation);
         PAGES.pump(frame);

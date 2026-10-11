@@ -1172,14 +1172,14 @@ lightmap. The 2,048 newest decals stay (`r_decals`).
 
 `maps/<map-id>/look.s2look` holds what the mod needs to draw the map's view as
 the game's post-processing does: whether the map has HDR light, how the game
-blooms, the game's vignette, and the map's colour correction lookups. Map
+blooms, the game's vignette and film grain, and the map's colour correction lookups. Map
 metadata references it through the optional `look` field, after `particles`.
-Little-endian, after the magic `S2LOOK\0\0` and `u32` version 1:
+Little-endian, after the magic `S2LOOK\0\0` and `u32` version 2:
 
 - `u8` flags: 1 the map has HDR light (`LUMP_LIGHTING_HDR`), which turns on
   auto exposure and bloom; 2 the game blooms as the later branch (Alien Swarm,
   Portal 2, INFRA) does, its `dev/downsample_non_hdr` material having
-  `$bloomtype`; 4 a vignette follows. At most 7.
+  `$bloomtype`; 4 a vignette follows; 8 film grain follows. At most 15.
 - `u8` bloom type, the material's `$bloomtype` (0 or 1); 0 without flag 2.
 - `u8` x and `u8` y blur kernels, `$kernel` of `dev/blurfilterx_nohdr` and
   `dev/blurfiltery_nohdr`, 0 to 4; 0 is the SDK 2013 cross filter.
@@ -1188,6 +1188,16 @@ Little-endian, after the magic `S2LOOK\0\0` and `u32` version 1:
   (`$internal_vignettetexture` of `dev/engine_post`, default `dev/vignette`).
   Present only when `dev/engine_post` sets `$vignetteenable` and no ConVar
   proxy turns it on and off.
+- With flag 8: `f32` grain scale, finite and above 0, then 4,096 bytes, row by
+  row, of the green channel of the 64 × 64 grain texture (`$noisetexture` of
+  `dev/engine_post`, default `dev/noise_post`), the only channel the shader
+  reads. Present only when `dev/engine_post` has `$noiseenable` and the
+  game's highest `cfg/gpu_level_N_pc.txt` sets `mat_grain_enable` to a
+  non-zero value; a game without those, such as Half-Life 2, has no grain. The
+  scale is `$noisescale` (default 1), or `setting.mat_grain_scale_override`
+  of `cfg/video.txt` unless that is -1; a scale of 0 or less is no grain.
+  The mod adds `scale * (n * 0.3 - 0.15) * k` to the colour after the
+  vignette, in display gamma, as `Engine_Post` does.
 - `u32` lookup count, at most 256, then per lookup sorted by name `u32` name
   length, the name, and 98,304 bytes: a 32 × 32 × 32 RGB lookup, red fastest,
   then green, then blue, as the game's `.raw` file stores it. The name is the

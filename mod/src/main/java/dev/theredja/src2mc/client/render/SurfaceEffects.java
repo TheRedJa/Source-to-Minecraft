@@ -43,6 +43,8 @@ public final class SurfaceEffects {
     public static volatile boolean enabled = true;
     /** {@code /src2mc_look detail|blend|selfillum off}: switch one effect off, read per draw. */
     public static volatile boolean detailOn = true, blendOn = true, selfillumOn = true;
+    /** {@code /src2mc_look lightonly|dither on}: grey albedo, and dithered output on every path. */
+    public static volatile boolean lightOnly = false, ditherAll = false;
 
     private record Textures(int cubes, int settings, int details) {}
 
@@ -83,6 +85,7 @@ public final class SurfaceEffects {
         GlStateManager._activeTexture(active);
         shader.safeGetUniform("DetailArray").set(DETAIL_UNIT);
         shader.safeGetUniform("SurfaceToggles").set(enabled ? 1f : 0f, detailOn ? 1f : 0f, blendOn ? 1f : 0f, selfillumOn ? 1f : 0f);
+        shader.safeGetUniform("DebugToggles").set(lightOnly ? 1f : 0f, ditherAll ? 1f : 0f, 0f, 0f);
     }
 
     /** Drops every map's textures; a new bundle generation brings new tables. */
@@ -127,7 +130,7 @@ public final class SurfaceEffects {
             cubeTexture = GlStateManager._genTexture();
             GlStateManager._bindTexture(cubeTexture);
             GL11.glTexImage2D(GL11.GL_TEXTURE_2D, 0, GL30.GL_RGB16F, size[0], size[1], 0, GL11.GL_RGB, GL30.GL_HALF_FLOAT, (ByteBuffer) null);
-            GL11.glPixelStorei(GL11.GL_UNPACK_ALIGNMENT, 2);
+            int unpack = UnpackState.begin(2);
             for (int i = 0; i < cubes.size(); i++) {
                 CubemapTable.Cube cube = cubes.get(i);
                 int side = cube.size();
@@ -145,7 +148,7 @@ public final class SurfaceEffects {
                     MemoryUtil.memFree(row);
                 }
             }
-            GL11.glPixelStorei(GL11.GL_UNPACK_ALIGNMENT, 4);
+            UnpackState.end(unpack);
             parameters(GL11.GL_LINEAR);
         }
 
@@ -187,7 +190,9 @@ public final class SurfaceEffects {
             settings.flip();
             int settingsTexture = GlStateManager._genTexture();
             GlStateManager._bindTexture(settingsTexture);
+            int unpack = UnpackState.begin(4);
             GL11.glTexImage2D(GL11.GL_TEXTURE_2D, 0, GL30.GL_RGBA32F, MATERIALS_PER_ROW * TEXELS, rows, 0, GL11.GL_RGBA, GL11.GL_FLOAT, settings);
+            UnpackState.end(unpack);
             parameters(GL11.GL_NEAREST);
             GlStateManager._bindTexture(0);
             return new Textures(cubeTexture, settingsTexture, detailTexture);
@@ -226,8 +231,9 @@ public final class SurfaceEffects {
             }
             int texture = GlStateManager._genTexture();
             GL11.glBindTexture(GL30.GL_TEXTURE_2D_ARRAY, texture);
-            GL11.glPixelStorei(GL11.GL_UNPACK_ALIGNMENT, 4);
+            int unpack = UnpackState.begin(4);
             GL12.glTexImage3D(GL30.GL_TEXTURE_2D_ARRAY, 0, GL11.GL_RGBA8, side, side, images.size(), 0, GL11.GL_RGBA, GL11.GL_UNSIGNED_BYTE, pixels);
+            UnpackState.end(unpack);
             GL30.glGenerateMipmap(GL30.GL_TEXTURE_2D_ARRAY);
             GL11.glTexParameteri(GL30.GL_TEXTURE_2D_ARRAY, GL11.GL_TEXTURE_MIN_FILTER, GL11.GL_LINEAR_MIPMAP_LINEAR);
             GL11.glTexParameteri(GL30.GL_TEXTURE_2D_ARRAY, GL11.GL_TEXTURE_MAG_FILTER, GL11.GL_LINEAR);

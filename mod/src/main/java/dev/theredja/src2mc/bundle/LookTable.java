@@ -13,11 +13,20 @@ import java.util.Map;
  *     INFRA); -1 for the 2013 engine's shader, which shapes each tap instead of their average
  * @param kernelX the horizontal blur's {@code $kernel}, 0 for the thirteen-tap cross
  * @param vignette the red channel of {@code engine_post}'s vignette texture, or null without one
+ * @param grain the film grain the game turns on, or null where it does not
  */
-public record LookTable(boolean hdr, int bloomType, int kernelX, int kernelY, Vignette vignette, Map<String, byte[]> lookups) {
+public record LookTable(boolean hdr, int bloomType, int kernelX, int kernelY, Vignette vignette, Grain grain, Map<String, byte[]> lookups) {
     /** A texture of {@code width} by {@code height} red texels, rows top to bottom. */
     public record Vignette(int width, int height, byte[] red) {}
 
+    /**
+     * {@code engine_post}'s film grain: {@code scale} from {@code $noiseScale} or the video
+     * setting's override, and the green channel of its noise texture, {@link #GRAIN_SIZE} squared.
+     */
+    public record Grain(float scale, byte[] green) {}
+
+    /** Side of the grain texture. */
+    public static final int GRAIN_SIZE = 64;
     /** Edge of a lookup's cube. */
     public static final int CELLS = 32;
     /** Bytes of one lookup. */

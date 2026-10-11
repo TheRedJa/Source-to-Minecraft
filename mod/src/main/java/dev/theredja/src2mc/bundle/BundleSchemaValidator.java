@@ -527,19 +527,25 @@ final class BundleSchemaValidator {
     }
 
     private static LookTable validateLook(ZipFile zip, ZipEntry entry) throws IOException {
-        limit(entry.getSize(), 28L + 4096L * 4096 + (long) BundleLimits.MAX_LOOK_LOOKUPS * (4 + BundleLimits.MAX_LOOK_NAME_BYTES + LookTable.LOOKUP_BYTES), "look size");
+        limit(entry.getSize(), 28L + 4096L * 4096 + 4L + LookTable.GRAIN_SIZE * LookTable.GRAIN_SIZE + (long) BundleLimits.MAX_LOOK_LOOKUPS * (4 + BundleLimits.MAX_LOOK_NAME_BYTES + LookTable.LOOKUP_BYTES), "look size");
         try (Binary in = new Binary(zip.getInputStream(entry), entry.getSize())) {
             in.magic(LOOK_MAGIC);
-            in.version();
+            in.version(2);
             byte[] head = in.bytes(4);
             int flags = head[0] & 0xFF, bloomType = head[1] & 0xFF, kernelX = head[2] & 0xFF, kernelY = head[3] & 0xFF;
-            if ((flags & ~7) != 0) fail(BundleErrorCode.INVALID_SCHEMA, "unknown look flags");
+            if ((flags & ~15) != 0) fail(BundleErrorCode.INVALID_SCHEMA, "unknown look flags");
             if (bloomType > 1 || kernelX > 4 || kernelY > 4) fail(BundleErrorCode.INVALID_SCHEMA, "unknown bloom setup");
             LookTable.Vignette vignette = null;
             if ((flags & 4) != 0) {
                 int width = (int) in.count(4096, "vignette width"), height = (int) in.count(4096, "vignette height");
                 if (width == 0 || height == 0) fail(BundleErrorCode.INVALID_SCHEMA, "empty vignette");
                 vignette = new LookTable.Vignette(width, height, in.bytes(width * height));
+            }
+            LookTable.Grain grain = null;
+            if ((flags & 8) != 0) {
+                float scale = in.canonicalF32("grain scale");
+                if (scale <= 0) fail(BundleErrorCode.INVALID_SCHEMA, "grain scale must be positive");
+                grain = new LookTable.Grain(scale, in.bytes(LookTable.GRAIN_SIZE * LookTable.GRAIN_SIZE));
             }
             long count = in.count(BundleLimits.MAX_LOOK_LOOKUPS, "look lookup");
             java.util.Map<String, byte[]> lookups = new java.util.HashMap<>();
@@ -553,7 +559,7 @@ final class BundleSchemaValidator {
                 previous = name;
             }
             in.end();
-            return new LookTable((flags & 1) != 0, (flags & 2) != 0 ? bloomType : -1, kernelX, kernelY, vignette, lookups);
+            return new LookTable((flags & 1) != 0, (flags & 2) != 0 ? bloomType : -1, kernelX, kernelY, vignette, grain, lookups);
         }
     }
 

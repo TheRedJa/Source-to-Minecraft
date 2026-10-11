@@ -103,7 +103,7 @@ impl Vfs {
     }
 
     /// Index a game directory's loose `materials/`, `sound/`, `scripts/`,
-    /// `scenes/` and `resource/` trees. Games ship their soundscapes,
+    /// `scenes/`, `resource/`, `particles/` and `cfg/` trees. Games ship their soundscapes,
     /// soundscripts, choreography scenes and caption files loose even when
     /// everything else is packed.
     pub fn add_dir(&mut self, root: &Path) {
@@ -115,6 +115,7 @@ impl Vfs {
             "scenes",
             "resource",
             "particles",
+            "cfg",
         ] {
             let dir = root.join(tree);
             if dir.is_dir() {

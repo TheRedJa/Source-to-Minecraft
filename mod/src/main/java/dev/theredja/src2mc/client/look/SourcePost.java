@@ -49,7 +49,9 @@ public final class SourcePost {
 
     // ---- Toggles and counters for /src2mc_look.
 
-    static boolean enabled = true, bloomOn = true, exposureOn = true, correctionOn = true, vignetteOn = true;
+    static boolean enabled = true, bloomOn = true, exposureOn = true, correctionOn = true, vignetteOn = true, grainOn = true;
+    /** Film grain scale override for A/B; -1 uses the map's own. */
+    static float grainScale = -1;
     /** mat_force_tonemap_scale: above 0 the scale is held there. */
     static float forcedScale = 0;
     /** The histogram measures linear light (sRGB decode) instead of the stored gamma values. */
@@ -66,6 +68,21 @@ public final class SourcePost {
     private static long lastFrame = -1;
     /** The map the scale belongs to; a new one starts at 1, as Source resets on level load. */
     private static Object scaleMap;
+
+    /**
+     * Back to the fresh-start tone map, for leaving a world: nothing measured in the last
+     * one carries over. Toggles and GL objects stay; query objects are kept for reuse.
+     */
+    public static void resetState() {
+        current = target = lastTarget = 1;
+        java.util.Arrays.fill(history, 0);
+        historyCount = 0;
+        bloomAmount = 1;
+        lastFrame = -1;
+        scaleMap = null;
+        queryFrame = 0;
+        for (Bucket b : buckets) { b.state = 0; b.pixels = 0; b.frameQueued = 0; }
+    }
 
     /** The scale the map is drawn at this frame. */
     public static float scale() { return current; }
@@ -125,6 +142,12 @@ public final class SourcePost {
     private static boolean failed;
     private static final Map<byte[], Integer> LOOKUP_TEXTURES = new IdentityHashMap<>();
     private static final Map<LookTable.Vignette, Integer> VIGNETTES = new IdentityHashMap<>();
+    private static final Map<LookTable.Grain, Integer> GRAINS = new IdentityHashMap<>();
+    /** Source's grain is off below this framebuffer height. */
+    private static final int GRAIN_MIN_HEIGHT = 720;
+    private static final long CLOCK_START = System.nanoTime();
+    /** The grain in use on the last frame, for status. */
+    private static float grainUsed;
 
     /** Runs after the world and hand are drawn; the main target is the frame. */
     public static void afterLevel() {
@@ -198,10 +221,30 @@ public final class SourcePost {
             bind(6, GL11.GL_TEXTURE_2D, vignette == null ? 0 : vignette(vignette));
             uniform(combineProgram, "Vignette", 6);
             uniform(combineProgram, "VignetteOn", vignette == null ? 0 : 1);
+            float grainScaleUsed = grainScaleFor(look);
+            LookTable.Grain grain = grainScaleUsed > 0 && height >= GRAIN_MIN_HEIGHT ? look.grain() : null;
+            grainUsed = grain == null ? 0 : grainScaleUsed;
+            bind(7, GL11.GL_TEXTURE_2D, grain == null ? 0 : grain(grain));
+            uniform(combineProgram, "Noise", 7);
+            uniform(combineProgram, "GrainOn", grain == null ? 0 : 1);
+            GL20.glUniform1f(GL20.glGetUniformLocation(combineProgram, "GrainScale"), grainScaleUsed);
+            // CurrentTime: wall clock, so it keeps running while a screen pauses the game.
+            GL20.glUniform1f(GL20.glGetUniformLocation(combineProgram, "Time"), (float) (((nowNanos - CLOCK_START) / 1e9) % 1000.0));
             GL11.glDrawArrays(GL11.GL_TRIANGLES, 0, 3);
         } finally {
             saved.restore();
         }
+    }
+
+    /** The grain scale in use: the map's, or the override, 0 when off or the map has none. */
+    static float grainScaleFor(LookTable look) {
+        if (!grainOn || look == null || look.grain() == null) return 0;
+        return grainScale == -1 ? look.grain().scale() : Math.max(0, grainScale);
+    }
+
+    /** What the last frame drew, for status. */
+    static float grainUsed() {
+        return grainUsed;
     }
 
     // ---- Tone mapping.
@@ -430,10 +473,10 @@ public final class SourcePost {
         ByteBuffer data = MemoryUtil.memAlloc(cells.length);
         try {
             data.put(cells).flip();
-            GL11.glPixelStorei(GL11.GL_UNPACK_ALIGNMENT, 1);
+            int unpack = dev.theredja.src2mc.client.render.UnpackState.begin(1);
             GL12.glTexImage3D(GL12.GL_TEXTURE_3D, 0, GL11.GL_RGB8, LookTable.CELLS, LookTable.CELLS, LookTable.CELLS, 0,
                 GL11.GL_RGB, GL11.GL_UNSIGNED_BYTE, data);
-            GL11.glPixelStorei(GL11.GL_UNPACK_ALIGNMENT, 4);
+            dev.theredja.src2mc.client.render.UnpackState.end(unpack);
         } finally {
             MemoryUtil.memFree(data);
         }
@@ -454,9 +497,9 @@ public final class SourcePost {
         ByteBuffer data = MemoryUtil.memAlloc(vignette.red().length);
         try {
             data.put(vignette.red()).flip();
-            GL11.glPixelStorei(GL11.GL_UNPACK_ALIGNMENT, 1);
+            int unpack = dev.theredja.src2mc.client.render.UnpackState.begin(1);
             GL11.glTexImage2D(GL11.GL_TEXTURE_2D, 0, GL30.GL_R8, vignette.width(), vignette.height(), 0, GL11.GL_RED, GL11.GL_UNSIGNED_BYTE, data);
-            GL11.glPixelStorei(GL11.GL_UNPACK_ALIGNMENT, 4);
+            dev.theredja.src2mc.client.render.UnpackState.end(unpack);
         } finally {
             MemoryUtil.memFree(data);
         }
@@ -468,6 +511,28 @@ public final class SourcePost {
         return id;
     }
 
+    private static int grain(LookTable.Grain grain) {
+        Integer existing = GRAINS.get(grain);
+        if (existing != null) return existing;
+        int id = GL11.glGenTextures();
+        GL11.glBindTexture(GL11.GL_TEXTURE_2D, id);
+        ByteBuffer data = MemoryUtil.memAlloc(grain.green().length);
+        try {
+            data.put(grain.green()).flip();
+            int unpack = dev.theredja.src2mc.client.render.UnpackState.begin(1);
+            GL11.glTexImage2D(GL11.GL_TEXTURE_2D, 0, GL30.GL_R8, LookTable.GRAIN_SIZE, LookTable.GRAIN_SIZE, 0, GL11.GL_RED, GL11.GL_UNSIGNED_BYTE, data);
+            dev.theredja.src2mc.client.render.UnpackState.end(unpack);
+        } finally {
+            MemoryUtil.memFree(data);
+        }
+        GL11.glTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_MIN_FILTER, GL11.GL_LINEAR);
+        GL11.glTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_MAG_FILTER, GL11.GL_LINEAR);
+        GL11.glTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_WRAP_S, GL11.GL_REPEAT);
+        GL11.glTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_WRAP_T, GL11.GL_REPEAT);
+        GRAINS.put(grain, id);
+        return id;
+    }
+
     /** Drops the textures made for a bundle generation's tables. */
     public static void clearTables() {
         RenderSystem.assertOnRenderThread();
@@ -475,6 +540,8 @@ public final class SourcePost {
         for (int id : VIGNETTES.values()) GL11.glDeleteTextures(id);
         LOOKUP_TEXTURES.clear();
         VIGNETTES.clear();
+        for (int id : GRAINS.values()) GL11.glDeleteTextures(id);
+        GRAINS.clear();
     }
 
     private static void bind(int unit, int target, int texture) {
@@ -520,7 +587,7 @@ public final class SourcePost {
     private record Saved(int program, int vertexArray, int readFbo, int drawFbo, int activeTexture, int[] textures2d, int[] textures3d,
                          int[] viewport, boolean depthTest, boolean blend, boolean cull, boolean scissor, boolean depthMask,
                          boolean[] colorMask) {
-        private static final int UNITS = 7;
+        private static final int UNITS = 8;
 
         static Saved capture() {
             int active = GL11.glGetInteger(GL13.GL_ACTIVE_TEXTURE);

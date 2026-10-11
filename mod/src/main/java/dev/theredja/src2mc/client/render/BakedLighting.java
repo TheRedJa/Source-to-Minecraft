@@ -265,12 +265,10 @@ public final class BakedLighting {
             int id = GL11.glGenTextures();
             int previous = GL11.glGetInteger(GL11.GL_TEXTURE_BINDING_2D);
             GL11.glBindTexture(GL11.GL_TEXTURE_2D, id);
-            GL11.glPixelStorei(GL11.GL_UNPACK_ALIGNMENT, 4);
-            GL11.glPixelStorei(GL11.GL_UNPACK_ROW_LENGTH, 0);
-            GL11.glPixelStorei(GL11.GL_UNPACK_SKIP_ROWS, 0);
-            GL11.glPixelStorei(GL11.GL_UNPACK_SKIP_PIXELS, 0);
+            int unpack = UnpackState.begin(4);
             // Shared exponent: HDR light in four bytes a luxel, and filterable.
             GL11.glTexImage2D(GL11.GL_TEXTURE_2D, 0, GL30.GL_RGB9_E5, width, height, 0, GL11.GL_RGB, GL11.GL_FLOAT, data);
+            UnpackState.end(unpack);
             GL11.glTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_MIN_FILTER, GL11.GL_LINEAR);
             GL11.glTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_MAG_FILTER, GL11.GL_LINEAR);
             GL11.glTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_WRAP_S, GL12.GL_CLAMP_TO_EDGE);
@@ -289,7 +287,9 @@ public final class BakedLighting {
             int previous = GL11.glGetInteger(GL11.GL_TEXTURE_BINDING_2D);
             GL11.glBindTexture(GL11.GL_TEXTURE_2D, white);
             FloatBuffer one = MemoryUtil.memAllocFloat(3).put(0, 1f).put(1, 1f).put(2, 1f);
+            int unpack = UnpackState.begin(4);
             GL11.glTexImage2D(GL11.GL_TEXTURE_2D, 0, GL30.GL_RGB9_E5, 1, 1, 0, GL11.GL_RGB, GL11.GL_FLOAT, one);
+            UnpackState.end(unpack);
             MemoryUtil.memFree(one);
             GL11.glTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_MIN_FILTER, GL11.GL_NEAREST);
             GL11.glTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_MAG_FILTER, GL11.GL_NEAREST);
