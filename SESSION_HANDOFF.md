@@ -27,7 +27,9 @@ mat_grain_enable + engine_post.vmt $noiseScale / video.txt override; dev/noise_p
 vignette; off < 720 px high; HL2/Portal 2 carry none. User: "very very close to INFRA"; toggles grain/grainscale,
 lightonly, dither. Open: ours grain std 6.4 vs INFRA 4.6 at same 3440x1440 and dark corner mean 11 vs 9.5 (user:
 "slightly less intense", bloom not the cause) -- find why (noise sampler sRGB/filter?) rather than fudge the scale.
-Committed with part 1. NEXT: menu (part 2).
+Committed with part 1 (d9ce899, pushed). DEV-0.48.0: Minecraft's Brightness option = Source Brightness slider
+(INFRA shaderapidx9 ramp out = in^(mat_monitorgamma/2.2); MC 0..1 -> gamma 2.6..1.8, 0.5 = 2.2 identity), last
+step of combine.fsh -- user-confirmed. NEXT: menu (part 2).
 Part 1 built (uncommitted): levels/LevelTransition (static handoff, 120 s expiry),
 LevelNetwork (protocol "13": change/progress/loaded), LevelWorldData (SavedData src2mc_level_world),
 LevelWorlds (login: apply old player NBT, spectator hold, place at translation 0 with 50 ms budget, arrive at

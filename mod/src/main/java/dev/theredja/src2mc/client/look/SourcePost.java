@@ -228,6 +228,9 @@ public final class SourcePost {
             uniform(combineProgram, "Noise", 7);
             uniform(combineProgram, "GrainOn", grain == null ? 0 : 1);
             GL20.glUniform1f(GL20.glGetUniformLocation(combineProgram, "GrainScale"), grainScaleUsed);
+            // Minecraft's brightness option as Source's Brightness slider (mat_monitorgamma 2.6..1.8, 2.2 at the default): the gamma ramp in^(gamma/2.2) on display values.
+            double monitorGamma = 2.6 - 0.8 * Math.max(0.0, Math.min(1.0, Minecraft.getInstance().options.gamma().get()));
+            GL20.glUniform1f(GL20.glGetUniformLocation(combineProgram, "MonitorExponent"), (float) (monitorGamma / 2.2));
             // CurrentTime: wall clock, so it keeps running while a screen pauses the game.
             GL20.glUniform1f(GL20.glGetUniformLocation(combineProgram, "Time"), (float) (((nowNanos - CLOCK_START) / 1e9) % 1000.0));
             GL11.glDrawArrays(GL11.GL_TRIANGLES, 0, 3);

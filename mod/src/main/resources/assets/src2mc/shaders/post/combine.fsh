@@ -18,6 +18,7 @@ uniform vec4 LookupWeights;
 uniform int VignetteOn;
 uniform int GrainOn;
 uniform float GrainScale;
+uniform float MonitorExponent;
 uniform float Time;
 
 in vec2 texCoord;
@@ -51,6 +52,7 @@ void main() {
         float k = 0.2 + 0.8 * clamp(pow(1.0 - lum, 12.0), 0.0, 1.0);
         color += (n * 0.3 - 0.15) * GrainScale * k;
     }
+    color = pow(clamp(color, 0.0, 1.0), vec3(MonitorExponent));
     // Half a step of 8-bit noise against banding where the vignette and lookups rescale the frame.
     color += (fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715)))) - 0.5) / 255.0;
     fragColor = vec4(color, 1.0);
