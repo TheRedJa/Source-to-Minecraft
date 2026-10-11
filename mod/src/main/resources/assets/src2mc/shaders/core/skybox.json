@@ -13,6 +13,7 @@
         { "name": "VertexLit", "type": "float", "count": 1, "values": [ 0.0 ] },
         { "name": "Cutout", "type": "float", "count": 1, "values": [ 0.0 ] },
         { "name": "Exposure", "type": "float", "count": 1, "values": [ 1.0 ] },
+        { "name": "SrgbCurve", "type": "float", "count": 1, "values": [ 1.0 ] },
         { "name": "SkyFogColor", "type": "float", "count": 3, "values": [ 1.0, 1.0, 1.0 ] },
         { "name": "SkyFogRange", "type": "float", "count": 3, "values": [ 0.0, 0.0, 0.0 ] }
     ]

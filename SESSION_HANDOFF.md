@@ -30,6 +30,12 @@ lightonly, dither. Open: ours grain std 6.4 vs INFRA 4.6 at same 3440x1440 and d
 Committed with part 1 (d9ce899, pushed). DEV-0.48.0: Minecraft's Brightness option = Source Brightness slider
 (INFRA shaderapidx9 ramp out = in^(mat_monitorgamma/2.2); MC 0..1 -> gamma 2.6..1.8, 0.5 = 2.2 identity), last
 step of combine.fsh -- user-confirmed. NEXT: menu (part 2).
+DEV-0.49.0 USER-CONFIRMED 2026-10-11 (uncommitted; "dark spots now dark", rainbow hue on dark props gone everywhere): "everything slightly too bright" = our pow 2.2 texture decode +
+output encode; Source (ASW EnableSRGBRead/Write, SDK2013 same on sRGB-blend hardware) uses hardware sRGB = exact
+piecewise curve, which keeps deep darks much darker. Prediction: furnace dark corner pre-CC 5.7/255 -> ~0.8/255,
+after LUT ~9.2 (INFRA 9.5, ours was 11.3). baked/skybox/particle/lumcompare use the exact curve; toggle
+`/src2mc_look srgb on|off` (off = old pow 2.2). Tints/fog colour/MC lightmap stay pow 2.2 (baked albedo decode
+still includes vertexColor). Grain std gap: user says it looks perfect now, no re-measure wanted; treat as closed.
 Part 1 built (uncommitted): levels/LevelTransition (static handoff, 120 s expiry),
 LevelNetwork (protocol "13": change/progress/loaded), LevelWorldData (SavedData src2mc_level_world),
 LevelWorlds (login: apply old player NBT, spectator hold, place at translation 0 with 50 ms budget, arrive at

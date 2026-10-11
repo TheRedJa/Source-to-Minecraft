@@ -304,6 +304,7 @@ public final class SourcePost {
         bind(0, GL11.GL_TEXTURE_2D, frameTexture);
         uniform(lumProgram, "Frame", 0);
         uniform(lumProgram, "Linear", measureLinear ? 1 : 0);
+        uniform(lumProgram, "Srgb", dev.theredja.src2mc.client.render.SurfaceEffects.srgbCurve ? 1 : 0);
         // A range ending at 1 counts everything brighter too.
         GL20.glUniform2f(GL20.glGetUniformLocation(lumProgram, "Range"), b.min, b.max == 1 ? 10000 : b.max);
         int skipX = (int) (width * 0.5f * (1 - REGION_X)), skipY = (int) (height * 0.5f * (1 - REGION_Y));

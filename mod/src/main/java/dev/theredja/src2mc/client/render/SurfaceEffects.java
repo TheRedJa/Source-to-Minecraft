@@ -45,6 +45,8 @@ public final class SurfaceEffects {
     public static volatile boolean detailOn = true, blendOn = true, selfillumOn = true;
     /** {@code /src2mc_look lightonly|dither on}: grey albedo, and dithered output on every path. */
     public static volatile boolean lightOnly = false, ditherAll = false;
+    /** {@code /src2mc_look srgb on}: the exact sRGB curve for texture decode and output encode, as Source's hardware sRGB does; off is pow 2.2. */
+    public static volatile boolean srgbCurve = true;
 
     private record Textures(int cubes, int settings, int details) {}
 
@@ -85,7 +87,7 @@ public final class SurfaceEffects {
         GlStateManager._activeTexture(active);
         shader.safeGetUniform("DetailArray").set(DETAIL_UNIT);
         shader.safeGetUniform("SurfaceToggles").set(enabled ? 1f : 0f, detailOn ? 1f : 0f, blendOn ? 1f : 0f, selfillumOn ? 1f : 0f);
-        shader.safeGetUniform("DebugToggles").set(lightOnly ? 1f : 0f, ditherAll ? 1f : 0f, 0f, 0f);
+        shader.safeGetUniform("DebugToggles").set(lightOnly ? 1f : 0f, ditherAll ? 1f : 0f, srgbCurve ? 1f : 0f, 0f);
     }
 
     /** Drops every map's textures; a new bundle generation brings new tables. */

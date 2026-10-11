@@ -19,7 +19,7 @@ uniform sampler2D Sampler7;
 uniform sampler2DArray DetailArray;
 // Reflections, detail textures, displacement blending, self-illumination: 1 on, 0 off.
 uniform vec4 SurfaceToggles;
-// Debug: x light only (grey albedo), y dither every path; 1 on, 0 off.
+// Debug: x light only (grey albedo), y dither every path, z exact sRGB curve; 1 on, 0 off.
 uniform vec4 DebugToggles;
 
 uniform vec4 ColorModulator;
@@ -140,6 +140,13 @@ vec3 reflection(vec3 tangentNormal, mat3 tbn, float mask) {
     return spec * fresnel;
 }
 
+// Source reads textures and writes the frame through hardware sRGB: the exact piecewise curve.
+// DebugToggles.z 0 falls back to pow 2.2 (/src2mc_look srgb).
+vec3 srgbToLinear(vec3 c) { c = max(c, vec3(0.0)); return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(vec3(0.04045), c)); }
+vec3 linearToSrgb(vec3 c) { c = max(c, vec3(0.0)); return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(vec3(0.0031308), c)); }
+vec3 toLinearTex(vec3 c) { return DebugToggles.z > 0.5 ? srgbToLinear(c) : pow(max(c, vec3(0.0)), vec3(2.2)); }
+vec3 toGamma(vec3 c) { return DebugToggles.z > 0.5 ? linearToSrgb(c) : pow(max(c, vec3(0.0)), vec3(1.0 / 2.2)); }
+
 void main() {
     // Screen derivatives, taken before anything is discarded: the face's tangent axes and the
     // repeating textures' mips.
@@ -151,7 +158,7 @@ void main() {
         discard;
     }
     albedo *= vertexColor * ColorModulator;
-    vec3 base = pow(max(albedo.rgb, vec3(0.0)), vec3(2.2));
+    vec3 base = toLinearTex(albedo.rgb);
     float baseAlpha = albedo.a;
     float alpha = albedo.a;
     bool effects = envRow > 0;
@@ -168,7 +175,7 @@ void main() {
             vec4 m = repeating(modulateTile, surface.xy, dsx, dsy);
             blend = smoothstep(clamp(m.g - m.r, 0.0, 1.0), clamp(m.g + m.r, 0.0, 1.0), blend);
         }
-        base = mix(base, pow(max(second.rgb, vec3(0.0)), vec3(2.2)), blend);
+        base = mix(base, toLinearTex(second.rgb), blend);
         alpha = mix(alpha, second.a, blend);
     }
 
@@ -182,7 +189,7 @@ void main() {
     if (mode >= 0) {
         detail = repeating(setting(4), surface.xy * detailSettings.xy, dsx * detailSettings.xy, dsy * detailSettings.xy);
         detail.rgb *= setting(6).rgb;
-        if (mode == 1) detail.rgb = pow(max(detail.rgb, vec3(0.0)), vec3(2.2));
+        if (mode == 1) detail.rgb = toLinearTex(detail.rgb);
         if (mode == 0) base *= mix(vec3(1.0), 2.0 * detail.rgb, factor);
         else if (mode == 1) base += factor * detail.rgb;
         else if (mode == 2) base = mix(base, detail.rgb, factor * detail.a);
@@ -223,8 +230,8 @@ void main() {
     }
     if (SourceFog.w > 0.5) {
         if (SourceFog.w < 1.5) color = mix(color, SourceFogColor * Exposure, source_fog(viewDepth));
-        fragColor = vec4(pow(max(color, vec3(0.0)), vec3(1.0 / 2.2)) + dither(), alpha);
+        fragColor = vec4(toGamma(color) + dither(), alpha);
     } else {
-        fragColor = linear_fog(vec4(pow(max(color, vec3(0.0)), vec3(1.0 / 2.2)) + (DebugToggles.y > 0.5 ? dither() : 0.0), alpha), vertexDistance, FogStart, FogEnd, FogColor);
+        fragColor = linear_fog(vec4(toGamma(color) + (DebugToggles.y > 0.5 ? dither() : 0.0), alpha), vertexDistance, FogStart, FogEnd, FogColor);
     }
 }

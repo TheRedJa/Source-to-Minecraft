@@ -49,6 +49,7 @@ public final class LookCommands {
             .then(onOff(literal("blend"), value -> dev.theredja.src2mc.client.render.SurfaceEffects.blendOn = value, "displacement blending"))
             .then(onOff(literal("selfillum"), value -> dev.theredja.src2mc.client.render.SurfaceEffects.selfillumOn = value, "self-illumination"))
             .then(onOff(literal("lightonly"), value -> dev.theredja.src2mc.client.render.SurfaceEffects.lightOnly = value, "light-only grey albedo"))
+            .then(onOff(literal("srgb"), value -> dev.theredja.src2mc.client.render.SurfaceEffects.srgbCurve = value, "exact sRGB curve"))
             .then(onOff(literal("dither"), value -> dev.theredja.src2mc.client.render.SurfaceEffects.ditherAll = value, "dither on every path"))
             .then(literal("bump")
                 .then(literal("on").executes(context -> bump(context.getSource(), true)))
@@ -102,6 +103,7 @@ public final class LookCommands {
             .append(", blend ").append(dev.theredja.src2mc.client.render.SurfaceEffects.blendOn ? "on" : "off")
             .append(", selfillum ").append(dev.theredja.src2mc.client.render.SurfaceEffects.selfillumOn ? "on" : "off")
             .append(", lightonly ").append(dev.theredja.src2mc.client.render.SurfaceEffects.lightOnly ? "on" : "off")
+            .append(", srgb ").append(dev.theredja.src2mc.client.render.SurfaceEffects.srgbCurve ? "on" : "off")
             .append(", dither ").append(dev.theredja.src2mc.client.render.SurfaceEffects.ditherAll ? "on" : "off")
             .append("\n").append(SourcePost.status());
         if (IrisCompat.shaderPackInUse()) text.append("\na shader pack is in use, which skips Source's post-processing");

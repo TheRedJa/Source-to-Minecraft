@@ -1158,6 +1158,13 @@ converter records which one the game is (format section 24).
   models. A shader pack skips it. `/src2mc_look` switches each part off and
   shows what the camera's map makes of its view.
 
+Texture decode and output encode use the exact piecewise sRGB curve, as Source's
+hardware sRGB read and write do (ASW `EnableSRGBRead`/`EnableSRGBWrite`; the SDK 2013
+shaders convert in software only on hardware without sRGB blending). The earlier
+pow 2.2 approximation made deep darks too bright (about 1.5 to 2 levels of 255).
+Constants Source itself converts with pow 2.2 (vertex colour tints, fog colour, the
+Minecraft lightmap, bloom tint) are unchanged. `/src2mc_look srgb on|off` switches
+back to pow 2.2 for comparison.
 
 ## D31 — World surfaces are shaded as LightmappedGeneric shades them
 

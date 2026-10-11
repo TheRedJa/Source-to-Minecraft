@@ -345,6 +345,7 @@ public final class SkyRenderer {
             roomShader.safeGetUniform("Offset").set((float) (-(localX - origin[0]) / scale), (float) (-(localY - origin[1]) / scale),
                 (float) (-(localZ - origin[2]) / scale));
             roomShader.safeGetUniform("Exposure").set(BakedLighting.exposure());
+            roomShader.safeGetUniform("SrgbCurve").set(SurfaceEffects.srgbCurve ? 1f : 0f);
             SkyboxTable.Fog fog = table.fog();
             if (fog != null) {
                 // Source units to blocks, and the skybox view's division by the scale.

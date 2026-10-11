@@ -12,6 +12,8 @@ uniform float FogStart;
 uniform float FogEnd;
 uniform vec4 FogColor;
 uniform float ParticleExposure;
+// 1: exact sRGB curve for the texture decode and the output; 0: pow 2.2.
+uniform float ParticleSrgb;
 uniform float ParticleOverbright;
 uniform float ParticleAddSelf;
 uniform float ParticleBlendFrames;
@@ -38,10 +40,16 @@ in vec3 frame1;
 out vec4 fragColor;
 
 vec4 toLinear(vec4 c) { return vec4(pow(max(c.rgb, vec3(0.0)), vec3(2.2)), c.a); }
+// Source reads textures and writes the frame through hardware sRGB: the exact piecewise curve.
+// ParticleSrgb 0 falls back to pow 2.2 (/src2mc_look srgb).
+vec3 srgbToLinear(vec3 c) { c = max(c, vec3(0.0)); return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(vec3(0.04045), c)); }
+vec3 linearToSrgb(vec3 c) { c = max(c, vec3(0.0)); return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(vec3(0.0031308), c)); }
+vec4 toLinearTex(vec4 c) { return ParticleSrgb > 0.5 ? vec4(srgbToLinear(c.rgb), c.a) : toLinear(c); }
+vec3 toGamma(vec3 c) { return ParticleSrgb > 0.5 ? linearToSrgb(c) : pow(max(c, vec3(0.0)), vec3(1.0 / 2.2)); }
 
 void main() {
-    vec4 base0 = toLinear(texture(Sampler0, texCoord0));
-    vec4 base1 = toLinear(texture(Sampler0, frame1.xy));
+    vec4 base0 = toLinearTex(texture(Sampler0, texCoord0));
+    vec4 base1 = toLinearTex(texture(Sampler0, frame1.xy));
     vec4 blended = ParticleBlendFrames > 0.5 ? mix(base0, base1, frame1.z) : base0;
     if (ParticleMaxLum > 0.5) {
         float lum0 = dot(vec3(0.3, 0.59, 0.11), base0.rgb * (1.0 - frame1.z));
@@ -63,10 +71,10 @@ void main() {
     if (SourceFog.w > 0.5) {
         // Additive sprites fog to black, as Source draws them with FogToBlack.
         if (SourceFog.w < 1.5) blended.rgb = mix(blended.rgb, ParticleAdditive > 0.5 ? vec3(0.0) : SourceFogColor * ParticleExposure, source_fog(viewDepth));
-        fragColor = vec4(pow(max(blended.rgb, vec3(0.0)), vec3(1.0 / 2.2)), blended.a);
+        fragColor = vec4(toGamma(blended.rgb), blended.a);
         return;
     }
-    vec3 color = pow(max(blended.rgb, vec3(0.0)), vec3(1.0 / 2.2));
+    vec3 color = toGamma(blended.rgb);
     float fog = clamp((vertexDistance - FogStart) / max(FogEnd - FogStart, 1e-4), 0.0, 1.0);
     if (ParticleAdditive > 0.5) {
         // Fog takes an additive glow away rather than painting it the fog colour.
