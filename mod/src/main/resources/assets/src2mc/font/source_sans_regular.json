@@ -1,0 +1,10 @@
+{
+    "providers": [
+        {
+            "type": "ttf",
+            "file": "src2mc:source_sans/sourcesanspro_regular.ttf",
+            "size": 24.0,
+            "oversample": 1.5
+        }
+    ]
+}

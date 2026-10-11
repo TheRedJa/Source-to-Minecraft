@@ -28,7 +28,9 @@ public final class PlacementNetwork {
         // "11": bullet and projectile impacts.
         // "12": the view state of fog, tonemap and colour correction entities.
         // "13": one world per map: level change and level loaded payloads.
-        var registrar = event.registrar("13");
+        // "14": the in-world menu: menu state (viewcontrols, vgui screens), a panel's engine command, the menu's
+        // start request, and the arriving client's level-ready report that releases the map logic.
+        var registrar = event.registrar("14");
         registrar.playToClient(PlacementSyncPayload.TYPE, PlacementSyncPayload.STREAM_CODEC,
             (payload, context) -> {
                 PlacementIndex index = new PlacementIndex();
@@ -47,6 +49,7 @@ public final class PlacementNetwork {
         dev.theredja.src2mc.logic.LookSync.register(registrar);
         dev.theredja.src2mc.world.ImpactNetwork.register(registrar);
         dev.theredja.src2mc.levels.LevelNetwork.register(registrar);
+        dev.theredja.src2mc.menu.MenuNetwork.register(registrar);
     }
 
     public static PlacementIndex clientIndex(ResourceLocation dimension) { return CLIENT.getOrDefault(dimension, new PlacementIndex()); }

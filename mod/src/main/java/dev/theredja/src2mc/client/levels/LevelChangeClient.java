@@ -119,6 +119,7 @@ public final class LevelChangeClient {
     private static void applyLoaded(Minecraft minecraft, LevelNetwork.LoadedPayload payload) {
         loginNanos = 0;
         if (payload.ok()) {
+            if (awaiting != null) dev.theredja.src2mc.client.menu.MenuActions.recordArrival(awaiting.campaignId, awaiting.mapId);
             // Placed on the server; the screen stays until the client has built what is around the player.
             failure = null;
             finishingSince = System.nanoTime();
@@ -152,6 +153,7 @@ public final class LevelChangeClient {
     }
 
     private static void showFailure(Minecraft minecraft, String message) {
+        dev.theredja.src2mc.client.menu.ScreenFade.clear();
         failure = message == null || message.isEmpty() ? "Level change failed." : message;
         if (minecraft.screen instanceof SourceLoadingScreen screen) screen.fail(failure);
         else minecraft.setScreen(new SourceLoadingScreen(awaiting == null ? "" : awaiting.mapId, failure));
@@ -304,6 +306,10 @@ public final class LevelChangeClient {
         awaiting = null;
         failure = null;
         minecraft.setScreen(null);
+        // INFRA fades in after a load: black for infra_transition_fade_in_hold_time, then infra_transition_fade_in_time.
+        dev.theredja.src2mc.client.menu.ScreenFade.fadeIn();
+        // The server holds the map's clock (logic, chapter title) until this: the screen is closed now.
+        if (minecraft.getConnection() != null) net.neoforged.neoforge.network.PacketDistributor.sendToServer(new LevelNetwork.ReadyPayload());
     }
 
     @SubscribeEvent

@@ -4,9 +4,11 @@
     "package": "dev.theredja.src2mc.mixin",
     "compatibilityLevel": "JAVA_21",
     "client": [
+        "CameraMenuMixin",
         "EntityRendererLightMixin",
         "GameRendererLookMixin",
         "LivingEntityRendererTintMixin",
+        "MouseHandlerMenuMixin",
         "WorldOpenFlowsWarningMixin"
     ],
     "injectors": {

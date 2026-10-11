@@ -11,6 +11,7 @@ pub mod cubemap;
 pub mod extract;
 pub mod infra;
 pub mod keyvalues;
+pub mod kvfile;
 pub mod mdl;
 pub mod pcf;
 pub mod report;

@@ -51,6 +51,9 @@ public final class SourceAudio {
 
     private SourceAudio() {}
 
+    /** The bundle sound library, for the menu's sounds ({@link MenuSounds}). */
+    static SoundLibrary library() { return LIBRARY; }
+
     @SubscribeEvent
     static void onClientTick(ClientTickEvent.Post event) {
         Minecraft minecraft = Minecraft.getInstance();

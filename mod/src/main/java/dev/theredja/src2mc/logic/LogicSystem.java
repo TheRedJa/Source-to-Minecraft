@@ -48,6 +48,7 @@ public final class LogicSystem {
         BundleGeneration generation = Src2mc.bundles().active();
         boolean reloaded = generation.sequence() != generationSequence;
         generationSequence = generation.sequence();
+        tickHolds();
         for (ServerLevel level : event.getServer().getAllLevels()) {
             LogicSavedData data = LogicSavedData.get(level);
             Map<Long, MapLogic> maps = running(level);
@@ -62,9 +63,10 @@ public final class LogicSystem {
             for (MapLogic logic : List.copyOf(maps.values())) {
                 List<ServerPlayer> inside = playersInside(level, logic.placement);
                 OCCUPIED.put(logic, !inside.isEmpty());
-                if (ticking && !inside.isEmpty()) logic.tick(level, inside);
+                if (ticking && !inside.isEmpty() && !allHeld(inside)) logic.tick(level, inside);
                 PropSync.update(level, logic);
                 LookSync.update(level, logic);
+                MenuSync.update(level, logic);
                 LogicNetwork.Update update = logic.drainUpdate(false);
                 if (!update.isEmpty()) send(level, logic, update, false);
                 if (logic.dirty()) data.setDirty();
@@ -127,8 +129,10 @@ public final class LogicSystem {
         dev.theredja.src2mc.world.PropStates.clear(false);
         PropSync.clear();
         LookSync.clear();
+        MenuSync.clear();
         OCCUPIED.clear();
         LEAVING.clear();
+        HELD.clear();
         generationSequence = -1;
     }
 
@@ -171,6 +175,7 @@ public final class LogicSystem {
         boolean had = logic != null | data.pending().remove(placement.anchorWorld().asLong()) != null;
         if (logic != null) OCCUPIED.remove(logic);
         if (logic != null) LookSync.forget(level, logic);
+        if (logic != null) MenuSync.forget(level, logic);
         data.setDirty();
         PacketDistributor.sendToPlayersInDimension(level, new LogicNetwork.SyncPayload(level.dimension().location(),
             placement.anchorWorld().asLong(), false, true, List.of(), List.of(), List.of()));
@@ -205,6 +210,22 @@ public final class LogicSystem {
         // The client aimed within its block reach; a little slack for the shape's corners and latency.
         if (distance > player.blockInteractionRange() + 1.5) return;
         usable.use(new PlayerActor(player.getUUID()), pressed);
+    }
+
+    /**
+     * A panel's {@code ent_fire}: queued in the running map the player stands in, as {@code /src2mc logic fire}
+     * queues it. Null on success, else why it was dropped.
+     */
+    static String fireFromScreen(ServerPlayer player, String target, String input, String parameter) {
+        ServerLevel level = player.serverLevel();
+        BlockPos at = BlockPos.containing(player.position());
+        for (MapLogic logic : running(level).values()) {
+            if (!logic.placement.contains(at)) continue;
+            if (!logic.hasActiveScreen()) return "the map has no shown screen";
+            logic.queue(0, target, null, input, parameter, new PlayerActor(player.getUUID()), null);
+            return null;
+        }
+        return "the player is in no running map";
     }
 
     // ---- Level changes.
@@ -280,7 +301,39 @@ public final class LogicSystem {
     private static final java.util.Set<java.util.UUID> LEAVING = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
     /** The player left this world (the switch completed or was abandoned). */
-    public static void forgetLeaving(java.util.UUID player) { LEAVING.remove(player); }
+    public static void forgetLeaving(java.util.UUID player) {
+        LEAVING.remove(player);
+        HELD.remove(player);
+    }
+
+    /** Server ticks an arriving client may keep the map's clock stopped before it runs without it. */
+    private static final int HOLD_TIMEOUT_TICKS = 60 * 20;
+
+    /** Arriving players whose client is still behind its loading screen, with the ticks left before the hold gives up. */
+    private static final Map<java.util.UUID, int[]> HELD = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /**
+     * Source's server does not advance map time while a client is still signing on: until {@link #release} (the
+     * client's loading screen closed) or the timeout, a map with only held players inside does not tick, so its
+     * spawn logic, engine events (the chapter title) and timers wait.
+     */
+    public static void hold(java.util.UUID player) { HELD.put(player, new int[] {HOLD_TIMEOUT_TICKS}); }
+
+    public static void release(java.util.UUID player) { HELD.remove(player); }
+
+    private static boolean allHeld(List<ServerPlayer> inside) {
+        if (HELD.isEmpty()) return false;
+        for (ServerPlayer player : inside) if (!HELD.containsKey(player.getUUID())) return false;
+        return true;
+    }
+
+    private static void tickHolds() {
+        for (var entry : HELD.entrySet()) {
+            if (--entry.getValue()[0] > 0) continue;
+            HELD.remove(entry.getKey());
+            Src2mc.LOGGER.warn("src2mc level change: {} never reported its loading screen closed; the map's clock runs without it", entry.getKey());
+        }
+    }
 
     /**
      * The tail of a level change or world entry: the placement's logic starts as {@code type} if it

@@ -24,10 +24,18 @@ public record AudioTable(List<Sound> sounds, List<Soundscape> soundscapes, List<
         surfaces = Map.copyOf(surfaces);
     }
 
-    /** {@code loopStart} is the frame a loop restarts at, or -1 for a sound that plays once. */
-    public record Sound(String contentId, String source, int channels, int sampleRate, long frames, long loopStart) {
+    /**
+     * {@code loopStart} is the frame a loop restarts at, or -1 for a sound that plays once. {@code entry} is the
+     * sound's path in the bundle when it is not an {@code audio/} content file, as the menu sounds of the
+     * screens table are; null otherwise.
+     */
+    public record Sound(String contentId, String source, int channels, int sampleRate, long frames, long loopStart, String entry) {
+        public Sound(String contentId, String source, int channels, int sampleRate, long frames, long loopStart) {
+            this(contentId, source, channels, sampleRate, frames, loopStart, null);
+        }
+
         public boolean loops() { return loopStart >= 0; }
-        public String entryPath() { return "audio/" + contentId + ".ogg"; }
+        public String entryPath() { return entry != null ? entry : "audio/" + contentId + ".ogg"; }
     }
 
     /** Source's interval: a value picked uniformly between the two ends each time it is used. */

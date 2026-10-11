@@ -42,8 +42,21 @@ public record BundleMap(
     // The cubemaps its materials reflect; null when none does.
     CubemapTable cubemaps,
     // Its materials' detail and blend modulation textures; null when none has one.
-    DetailImages details
+    DetailImages details,
+    // The canonical path of its VGUI screens table (format section 26); null when it has none.
+    String screens
 ) {
+    public BundleMap(String mapId, String sourceName, int[] cellMin, int[] cellMax, int[] anchorCell,
+                     java.util.List<BundleMaterial> materials, java.util.List<BundleModel> models,
+                     java.util.List<BundleProp> props, boolean exceedsVanillaBuildHeight, SurfaceTable surfaces,
+                     java.util.Set<String> modelContentIds, AtlasIndex atlas, PropVisibility pvs,
+                     OcclusionTable occlusion, CollisionTable collision, AudioTable audio, LogicTable logic, MoverTable movers,
+                     LogicPropTable logicProps, SkyTable sky, SkyboxTable skybox, LightTable light, ParticleTable particles,
+                     LookTable look, CubemapTable cubemaps, DetailImages details) {
+        this(mapId, sourceName, cellMin, cellMax, anchorCell, materials, models, props, exceedsVanillaBuildHeight,
+            surfaces, modelContentIds, atlas, pvs, occlusion, collision, audio, logic, movers, logicProps, sky, skybox, light, particles, look, cubemaps, details, null);
+    }
+
     public BundleMap(String mapId, String sourceName, int[] cellMin, int[] cellMax, int[] anchorCell,
                      java.util.List<BundleMaterial> materials, java.util.List<BundleModel> models,
                      java.util.List<BundleProp> props, boolean exceedsVanillaBuildHeight, SurfaceTable surfaces,

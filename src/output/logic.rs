@@ -501,7 +501,7 @@ fn load_captions(vfs: &Vfs, pak: Option<&vbsp::Packfile>) -> HashMap<String, Str
 
 /// Every loose `resource/*_english.txt`, as the HUD's localization loads
 /// them; a token the first file in path order defines wins.
-fn load_strings(vfs: &Vfs, pak: Option<&vbsp::Packfile>) -> HashMap<String, String> {
+pub fn load_strings(vfs: &Vfs, pak: Option<&vbsp::Packfile>) -> HashMap<String, String> {
     let mut strings = HashMap::new();
     for file in vfs.loose_files("resource/", "_english.txt") {
         let Some(bytes) = read_file(vfs, pak, &file) else {

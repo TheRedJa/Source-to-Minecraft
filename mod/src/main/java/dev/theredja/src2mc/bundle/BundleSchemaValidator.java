@@ -103,6 +103,7 @@ final class BundleSchemaValidator {
         if (map.has("particles")) expected.add("particles");
         if (map.has("look")) expected.add("look");
         if (map.has("cubemaps")) expected.add("cubemaps");
+        if (map.has("screens")) expected.add("screens");
         expected.add("diagnostics");
         keys(map, expected.toArray(String[]::new));
         format(map, "src2mc-map", path);
@@ -246,6 +247,12 @@ final class BundleSchemaValidator {
             referenced.add(cubemapsPath);
             cubemaps = validateCubemaps(zip, required(entries, cubemapsPath));
         }
+        String screens = null;
+        if (map.has("screens")) {
+            screens = exactPath(map, "screens", prefix + "screens.json");
+            referenced.add(screens);
+            validateScreens(json(zip, required(entries, screens), screens), entries, prefix, referenced);
+        }
         int cubemapCount = cubemaps == null ? 0 : cubemaps.cubes().size();
         for (BundleMaterial material : loadedMaterials) {
             if (material.envmap() != null && material.envmap().cubemap() >= cubemapCount)
@@ -307,10 +314,28 @@ final class BundleSchemaValidator {
         long mapHeight = (long) max[1] - min[1] + 1;
         return new BundleMap(mapId, sourceName, min, max, anchor, loadedMaterials, modelRefs, propRecords, mapHeight > 384,
             surfaceTable, modelRefs.stream().map(BundleModel::contentId).collect(java.util.stream.Collectors.toUnmodifiableSet()), atlas, pvs, occlusion, collision, audio, logic, movers,
-            logicProps, sky, skybox, light, particles, look, cubemaps, validateDetails(zip, entries, hashes, loadedMaterials, referenced));
+            logicProps, sky, skybox, light, particles, look, cubemaps, validateDetails(zip, entries, hashes, loadedMaterials, referenced), screens);
     }
 
     /** Format section 23. */
+    /**
+     * The VGUI screens table (format section 26) is data for a runtime that does not exist yet, so only its
+     * envelope is checked here; the images and sounds it points at are bundle payloads and must exist.
+     */
+    private static void validateScreens(JsonObject root, Map<String, ZipEntry> entries, String prefix, Set<String> referenced) throws BundleValidationException {
+        keys(root, "format", "version", "panels", "layouts", "schemes", "images", "sounds", "strings");
+        format(root, "src2mc-screens", "screens.json");
+        for (String list : new String[] {"images", "sounds"}) {
+            for (JsonElement element : array(root, list)) {
+                if (!element.isJsonObject()) fail(BundleErrorCode.INVALID_SCHEMA, "screens " + list + " entry is not an object");
+                String path = string(element.getAsJsonObject(), "path");
+                if (!path.startsWith(prefix + "screens/" + list + "/")) fail(BundleErrorCode.INVALID_REFERENCE, "non-canonical screens " + list + " path");
+                referenced.add(path);
+                required(entries, path);
+            }
+        }
+    }
+
     static ParticleTable validateParticles(JsonObject root, int materialCount) throws BundleValidationException {
         keys(root, "format", "version", "systems", "materials", "impacts", "decals");
         format(root, "src2mc-particles", "particles.json");

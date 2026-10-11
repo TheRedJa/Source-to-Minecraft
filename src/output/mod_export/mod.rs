@@ -222,6 +222,8 @@ pub struct MapExport {
     pub look: crate::output::look::LookTable,
     /// The cubemaps the map's materials reflect (format section 25).
     pub cubemaps: Vec<crate::source::cubemap::Cubemap>,
+    /// The map's vgui_screen panels (format section 26); absent without any.
+    pub screens: Option<crate::output::screens::ScreensExport>,
     /// Detail and blend modulation textures by content ID: their PNG.
     pub details: BTreeMap<String, Vec<u8>>,
     pub diagnostics: metadata::Diagnostics,
@@ -291,10 +293,27 @@ pub fn from_conversion(
         conversion.transform.units_per_block() == UNITS_PER_BLOCK,
         "mod export requires exactly 32 Source units per block"
     );
-    let (mut grid_min, mut grid_max) = conversion
-        .grid
-        .bounds()
-        .context("mod export produced an empty map")?;
+    // A map built only of thin brushes (INFRA's `main_menu`) voxelizes to
+    // nothing; its faces are all meshes, so the map's own box stands in.
+    let (mut grid_min, mut grid_max) = match conversion.grid.bounds() {
+        Some(bounds) => bounds,
+        None => {
+            let bounds = crate::convert::block_bounds(map, &conversion.transform);
+            ensure!(!bounds.is_empty(), "mod export produced an empty map");
+            (
+                [
+                    bounds.min.x.floor() as i32,
+                    bounds.min.y.floor() as i32,
+                    bounds.min.z.floor() as i32,
+                ],
+                [
+                    (bounds.max.x - 1.0e-6).floor() as i32,
+                    (bounds.max.y - 1.0e-6).floor() as i32,
+                    (bounds.max.z - 1.0e-6).floor() as i32,
+                ],
+            )
+        }
+    };
     let extracted = crate::source::extract::extract_mod_props(map, config);
     crate::timing::mark("export: load prop models");
     // Movers: every brush entity the conversion took out of the world, and
@@ -670,6 +689,11 @@ pub fn from_conversion(
         crate::timing::mark("export: logic");
         Some(logic.table)
     };
+    let screens = crate::output::screens::collect(&entities, &vfs, pak, &portable_id(&map.name));
+    if let Some(screens) = &screens {
+        diagnostics.extend(screens.diagnostics.iter().cloned());
+        crate::timing::mark("export: screens");
+    }
     let skybox = config
         .contents
         .skip_3d_skybox
@@ -713,6 +737,7 @@ pub fn from_conversion(
         particles,
         look,
         cubemaps,
+        screens,
         details,
         diagnostics: metadata::Diagnostics::new(diagnostics)?,
     })

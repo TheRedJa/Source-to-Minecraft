@@ -207,6 +207,7 @@ fields in order:
 | `particles` | optional canonical `maps/<map-id>/particles.json` path (section 23) |
 | `look` | optional canonical `maps/<map-id>/look.s2look` path (section 24) |
 | `cubemaps` | optional canonical `maps/<map-id>/cubemaps.s2cube` path (section 25); absent when no material reflects a cubemap |
+| `screens` | optional canonical `maps/<map-id>/screens.json` path (section 26); absent when the map has no `vgui_screen` whose panel is defined |
 | `diagnostics` | canonical `maps/<map-id>/diagnostics.json` path |
 
 Surface-table material IDs index `materials` directly. This array therefore
@@ -1223,3 +1224,54 @@ its `RGBA16161616F` texels are written as they are. 8-bit cubemaps are gamma
 encoded and are decoded with exponent 2.2. A cubemap that does not decode is
 written black, one texel a side.
 
+## 26. VGUI screens
+
+`maps/<map-id>/screens.json` carries what the mod needs to draw and drive the
+map's `vgui_screen` panels. Map metadata references it through the optional
+`screens` field, after `cubemaps`. The entities themselves are in the logic
+table (section 16); this adds what their `panelname` keyvalue resolves to.
+Written only when at least one `vgui_screen` names a panel that
+`scripts/vgui_screens.txt` defines.
+
+Fields, in order: `format` `"src2mc-screens"`, `version` 1, `panels`,
+`layouts`, `schemes`, `images`, `sounds`, `strings`.
+
+A TREE is a Source KeyValues block as a JSON array of `[key, value]` pairs in
+file order, duplicates kept, keys as written; a value is a string or a nested
+TREE. Files are read as the engine reads them: `[...]` conditionals are
+evaluated (Windows PC: `$WIN32` and `$WINDOWS` true, every other symbol false,
+including a game's own such as `$INFRA_PLAYTEST_MODE`; `!`, `&&`, `||` and
+parentheses are understood), `#include` appends and `#base` merges as in
+`KeyValues::LoadFromBuffer` (the including file's keys win, missing children
+are added), so no conditional or `#base` remains.
+
+- `panels`: object keyed by lowercase panel name, one per distinct `panelname`
+  the map's screens use: that panel's `vgui_screens.txt` block as a TREE
+  (`type`, `pixelswide`, `pixelshigh`, `acceptsinput`, `resfile`, ...).
+- `layouts`: object keyed by lowercase game path, the layout of each panel's
+  `resfile` as a TREE. A map with a panel whose `type` starts with
+  `infra_menu` carries every `scripts/screens/*.res`, since INFRA's client
+  code switches between them by name.
+- `schemes`: object keyed by lowercase path, every `resource/*scheme.res`.
+- `images`: array sorted by `material`, the materials the layouts draw
+  (`material` of any control, `image` of an `ImagePanel` below `vgui/`), each
+  `{material, path, width, height, translucent, additive}`. `material` is
+  lowercase without `materials/` and `.vmt`; `path` is
+  `maps/<map-id>/screens/images/<index>.png`, the `$basetexture`'s full top
+  mip as RGBA PNG (greyscale formats expand to grey RGB with their alpha);
+  `translucent` and `additive` are the VMT flags. A material that cannot be
+  read is left out with a `SCREENS_IMAGE_MISSING` diagnostic.
+- `sounds`: array sorted by `wave`, only for `infra_menu` panels, each
+  `{wave, path, loop}` plus `loop_start` (seconds) when `loop`. `wave` is the
+  lowercase path below `sound/`; `path` is
+  `maps/<map-id>/screens/sounds/<index>.ogg`, Vorbis quality 7 as section 15.
+  `loop` is true when the WAV carries a `cue ` or `smpl` loop, as in section
+  15. The names (`ui/menu_accept.wav`, `menu_back`, `menu_focus`,
+  `menu_invalid`, `music/menu.wav`) come from INFRA's closed client code.
+- `strings`: object keyed by lowercase localization token without `#`: every
+  `#` token used in a layout, plus for `infra_menu` panels every token
+  starting `infra_menu_`, `infra_chapter_` or `infra_part_`. Tokens no
+  `resource/*_english.txt` defines are absent.
+
+The mod accepts the section and requires every image and sound `path` to exist
+and be below the map's `screens/` directory; it does not read the trees yet.

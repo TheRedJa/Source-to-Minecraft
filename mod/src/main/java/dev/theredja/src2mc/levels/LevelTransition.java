@@ -17,6 +17,8 @@ public final class LevelTransition {
         CHANGE_LEVEL,
         /** A chapter started from the menu: logic starts as a new game, the player spawns at {@code info_player_start}. */
         NEW_GAME,
+        /** The menu's Continue: the map's existing world, logic re-entered, the player exactly as that world saved them. */
+        CONTINUE,
         /** The menu's background map. */
         MENU
     }

@@ -188,6 +188,21 @@ pub struct Solid {
     pub bounds: Aabb,
 }
 
+/// vbsp's `MAX_COORD_INTEGER` (16384) less the 8 units a brush stops short of it.
+const COORD_LIMIT: f64 = 16376.0;
+/// How far past the region inside a coordinate-limit shell its brushes keep:
+/// one block at the mod's 32 units per block, so the shell's inner faces stay.
+const SHELL_MARGIN: f64 = 32.0;
+
+fn reaches_coord_limit(bounds: &Aabb) -> bool {
+    [bounds.min.x, bounds.min.y, bounds.min.z]
+        .iter()
+        .any(|&v| v <= -COORD_LIMIT)
+        || [bounds.max.x, bounds.max.y, bounds.max.z]
+            .iter()
+            .any(|&v| v >= COORD_LIMIT)
+}
+
 pub struct Map {
     pub bsp: Bsp,
     pub path: PathBuf,
@@ -205,6 +220,7 @@ pub struct Map {
     pub repaired_bytes: usize,
     /// The 3D skybox room, found on first use.
     skybox: std::sync::OnceLock<Option<skybox::Skybox>>,
+    unsealed_region: std::sync::OnceLock<Option<Aabb>>,
     /// The baked light vrad wrote: lightmaps, HDR when the map has them.
     pub light: lighting::BakedLight,
     /// The ambient light cubes vrad sampled in each leaf, for what has no
@@ -303,6 +319,7 @@ impl Map {
             materials,
             repaired_bytes,
             skybox: std::sync::OnceLock::new(),
+            unsealed_region: std::sync::OnceLock::new(),
             light,
             ambient,
         })
@@ -343,11 +360,41 @@ impl Map {
     }
 
     /// Overall world bounds, taken from worldspawn's model.
+    ///
+    /// A map sealed by a hollow box of brushes out at the coordinate limit
+    /// (INFRA's `main_menu`, a `tools/toolsskybox` shell) gets the whole
+    /// coordinate range as worldspawn's box; there the bounds are the
+    /// worldspawn brushes inside the shell.
     pub fn bounds(&self) -> Aabb {
+        if let Some(region) = self.unsealed_region() {
+            return region;
+        }
         match self.bsp.models.first() {
             Some(model) => Aabb::new(model.mins.into(), model.maxs.into()),
             None => Aabb::empty(),
         }
+    }
+
+    /// The box the worldspawn brushes inside a coordinate-limit shell fill,
+    /// when worldspawn's own box spans the whole coordinate range.
+    fn unsealed_region(&self) -> Option<Aabb> {
+        *self.unsealed_region.get_or_init(|| {
+            let model = self.bsp.models.first()?;
+            let (mins, maxs) = (model.mins, model.maxs);
+            let unsealed = [(mins.x, maxs.x), (mins.y, maxs.y), (mins.z, maxs.z)]
+                .iter()
+                .all(|&(min, max)| f64::from(min) <= -COORD_LIMIT && f64::from(max) >= COORD_LIMIT);
+            if !unsealed {
+                return None;
+            }
+            let region = self
+                .model_brushes(0)
+                .into_iter()
+                .filter_map(|brush| self.raw_solid(0, brush))
+                .filter(|solid| !reaches_coord_limit(&solid.bounds))
+                .fold(Aabb::empty(), |bounds, solid| bounds.union(&solid.bounds));
+            (!region.is_empty()).then_some(region)
+        })
     }
 
     /// Material name for a texture-info index, e.g. `CONCRETE/CONCRETEWALL001A`.
@@ -438,7 +485,28 @@ impl Map {
 
     /// Build the convex solid for a single brush, or `None` if its planes do
     /// not enclose a finite volume.
+    ///
+    /// In a map sealed by a coordinate-limit shell, the shell's brushes are
+    /// bounded to the region inside it widened by a margin, so nothing walks
+    /// their cells out to the limit; a shell brush wholly outside is `None`.
     pub fn solid(&self, model: usize, brush_index: usize) -> Option<Solid> {
+        let mut solid = self.raw_solid(model, brush_index)?;
+        if model == 0
+            && reaches_coord_limit(&solid.bounds)
+            && let Some(region) = self.unsealed_region()
+        {
+            let margin = Vec3::splat(SHELL_MARGIN);
+            let min = solid.bounds.min.max(region.min - margin);
+            let max = solid.bounds.max.min(region.max + margin);
+            if min.x >= max.x || min.y >= max.y || min.z >= max.z {
+                return None;
+            }
+            solid.bounds = Aabb::new(min, max);
+        }
+        Some(solid)
+    }
+
+    fn raw_solid(&self, model: usize, brush_index: usize) -> Option<Solid> {
         let brush = self.bsp.brushes.get(brush_index)?;
         let start = brush.brush_side as usize;
         let end = start + brush.num_brush_sides as usize;

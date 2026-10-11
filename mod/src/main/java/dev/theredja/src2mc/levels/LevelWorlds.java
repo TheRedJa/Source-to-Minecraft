@@ -197,6 +197,11 @@ public final class LevelWorlds {
             xRot = pending.xRot();
             motion = pending.motion();
             type = MapLogic.LoadType.TRANSITION;
+        } else if (pending.kind() == LevelTransition.Kind.CONTINUE) {
+            // The world's own player data put them where they stood; nothing moves them.
+            position = null;
+            yRot = xRot = 0;
+            type = MapLogic.LoadType.TRANSITION;
         } else {
             var start = map.logic().entities().stream()
                 .filter(entity -> entity.classname().equals("info_player_start") && entity.origin() != null).findFirst().orElse(null);
@@ -211,12 +216,18 @@ public final class LevelWorlds {
             xRot = (float) angles[0];
             type = MapLogic.LoadType.NEW_GAME;
         }
-        player.teleportTo(level, position.x, position.y, position.z, yRot, xRot);
-        player.setDeltaMovement(motion);
-        player.hurtMarked = true;
+        if (position != null) {
+            player.teleportTo(level, position.x, position.y, position.z, yRot, xRot);
+            player.setDeltaMovement(motion);
+            player.hurtMarked = true;
+        }
         player.setGameMode(restoreMode);
+        // The client is still behind its loading screen: the map's clock waits for its ready report (the menu has none).
+        boolean hold = pending.kind() != LevelTransition.Kind.MENU;
+        if (hold) LogicSystem.hold(player.getUUID());
         String failure = LogicSystem.arrive(level, placement, type, player);
         if (failure != null) {
+            LogicSystem.release(player.getUUID());
             fail(player, failure, failMode(pending, restoreMode));
             return;
         }

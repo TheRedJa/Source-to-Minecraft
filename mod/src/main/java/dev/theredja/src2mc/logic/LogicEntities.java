@@ -52,6 +52,8 @@ final class LogicEntities {
             case "env_soundscape" -> new SoundEntities.Soundscape(map, index, entity);
             case "infra_music" -> new SoundEntities.Music(map, index, entity);
             case "logic_choreographed_scene" -> new SoundEntities.Scene(map, index, entity);
+            case "point_viewcontrol" -> new MenuEntities.ViewControl(map, index, entity);
+            case "vgui_screen" -> new MenuEntities.VguiScreen(map, index, entity);
             default -> new LogicEntity(map, index, entity);
         };
     }

@@ -237,6 +237,13 @@ pub fn write_campaign(
             let added = archive.add_content("details", "png", png.clone())?;
             ensure!(added == *id, "detail texture content ID changed");
         }
+        let has_screens = map.screens.is_some();
+        if let Some(screens) = &map.screens {
+            archive.add(format!("{prefix}/screens.json"), screens.table.encode()?)?;
+            for (path, bytes) in &screens.assets {
+                archive.add(path.clone(), bytes.clone())?;
+            }
+        }
         if !map.cubemaps.is_empty() {
             archive.add(
                 format!("{prefix}/cubemaps.s2cube"),
@@ -309,6 +316,7 @@ pub fn write_campaign(
             particles: has_particles.then(|| format!("{prefix}/particles.json")),
             look: Some(format!("{prefix}/look.s2look")),
             cubemaps: (!map.cubemaps.is_empty()).then(|| format!("{prefix}/cubemaps.s2cube")),
+            screens: has_screens.then(|| format!("{prefix}/screens.json")),
             diagnostics: format!("{prefix}/diagnostics.json"),
         };
         archive.add(&metadata_path, meta.encode()?)?;

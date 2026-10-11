@@ -1,52 +1,26 @@
 # src2mc implementation handoff
 
-Updated: 2026-10-10 (Europe/Berlin), stage 1 committed (33b1018); stage 2a+2b confirmed (uncommitted); stage 2 (2a-2c) USER-CONFIRMED DEV-0.45.0, committed 12ab766 + pushed 2026-10-10
+Updated: 2026-10-12 (Europe/Berlin), menu side quest done (DEV-0.50.0); next Source look stage 3
 
-## IN PROGRESS: side quest "menu + one MC world per map" (part 1 committed DEV-0.47.0, before stage 3) -- user decisions 2026-10-11
+## DONE: side quest "menu + one MC world per map" -- part 1 d9ce899 (DEV-0.47.0), part 2 menu DEV-0.50.0 user-confirmed 2026-10-12
 
-Decisions (memory side-quest-menu-and-level-worlds): title menu = INFRA-faithful in-world vgui_screen panels in
-a menu world running main_menu.bsp (point_viewcontrol camera + node glides, mouse picking); one MC world per map,
-placed on demand behind an INFRA loading screen (black + 511x1 progress bar); New Game wipes the campaign's map
-worlds after a confirm; whole MC player carried over; SourceSansPro (OFL) bundled; saves (FTB Backups 3) skipped.
-User test 2026-10-11 (after hang fix: vanilla Save-and-Quit order before open/create; half-created folders without
-level.dat removed): level change furnace <-> tunnel4 works both ways, spot + facing right, inventory incl. NBT
-carried, first load < 10 s, revisits near instant. Open: loading screen closes ~15 s before props/textures are
-ready; "experimental settings" screen on some changes. Fixed: screen waits for MapSurfaceRenderer/PropRenderer
-pendingLoads == 0 for 10 ticks (45 s cap; bar 2nd half monotonic), WorldOpenFlowsWarningMixin skips askForBackup
-only while switching -- user-confirmed (no pop-in, no warning; loads 7-13 s). One-off purple/blue tint after a
-switch, not reproducible: logout now also clears PlacementNetwork.CLIENT, LookClient fog transition, SourcePost
-exposure/bloom/histogram state (SourcePost.resetState). Tint came back green (2026-10-11, tunnel4), `/src2mc_look correction off` removes it -> cause: CC
-LUT glTexImage3D set only UNPACK_ALIGNMENT and inherited ROW_LENGTH/SKIP_* left by vanilla NativeImage uploads
-(LUT re-uploads after a world switch). New client/render/UnpackState.begin/end (resets alignment, row length,
-skips, image height, unbinds PIXEL_UNPACK_BUFFER) used by every raw upload: SourcePost LUT + vignette,
-SurfaceEffects cubemaps/settings/detail array, BakedLighting, SkyboxScene. User-confirmed: no tint.
-Rainbow hue on dark props = INFRA's own 8-bit .vhv data (verified parse/decode match Source); INFRA hides it with
-film grain. Our CC black floor (cc_furnace_hall LUT black 9/255) matches INFRA (print_colorcorrection: weight 1).
-DEV-0.47.0: Source Engine_Post film grain, data-driven (look format v2, flag 8: highest cfg/gpu_level_N_pc.txt
-mat_grain_enable + engine_post.vmt $noiseScale / video.txt override; dev/noise_post 64x64), combine.fsh after
-vignette; off < 720 px high; HL2/Portal 2 carry none. User: "very very close to INFRA"; toggles grain/grainscale,
-lightonly, dither. Open: ours grain std 6.4 vs INFRA 4.6 at same 3440x1440 and dark corner mean 11 vs 9.5 (user:
-"slightly less intense", bloom not the cause) -- find why (noise sampler sRGB/filter?) rather than fudge the scale.
-Committed with part 1 (d9ce899, pushed). DEV-0.48.0: Minecraft's Brightness option = Source Brightness slider
-(INFRA shaderapidx9 ramp out = in^(mat_monitorgamma/2.2); MC 0..1 -> gamma 2.6..1.8, 0.5 = 2.2 identity), last
-step of combine.fsh -- user-confirmed. NEXT: menu (part 2).
-DEV-0.49.0 USER-CONFIRMED 2026-10-11 (uncommitted; "dark spots now dark", rainbow hue on dark props gone everywhere): "everything slightly too bright" = our pow 2.2 texture decode +
-output encode; Source (ASW EnableSRGBRead/Write, SDK2013 same on sRGB-blend hardware) uses hardware sRGB = exact
-piecewise curve, which keeps deep darks much darker. Prediction: furnace dark corner pre-CC 5.7/255 -> ~0.8/255,
-after LUT ~9.2 (INFRA 9.5, ours was 11.3). baked/skybox/particle/lumcompare use the exact curve; toggle
-`/src2mc_look srgb on|off` (off = old pow 2.2). Tints/fog colour/MC lightmap stay pow 2.2 (baked albedo decode
-still includes vertexColor). Grain std gap: user says it looks perfect now, no re-measure wanted; treat as closed.
-Part 1 built (uncommitted): levels/LevelTransition (static handoff, 120 s expiry),
-LevelNetwork (protocol "13": change/progress/loaded), LevelWorldData (SavedData src2mc_level_world),
-LevelWorlds (login: apply old player NBT, spectator hold, place at translation 0 with 50 ms budget, arrive at
-landmark+offset or info_player_start, deferred 10 ticks when already placed), LogicSystem.leaveForWorldOf/arrive,
-WorldPlacer callback/progress/heightProblem/clear-on-stop, client/levels LevelChangeClient + SourceLoadingScreen.
-World folders: "src2mc <campaign> <mapid>", void flat (the_void preset), daylight/weather/mob spawning off.
-Source yaw -> MC yaw = -90 - yaw (assumes export rotate_yaw 0). Known gap: Back after a failed switch leaves the
-player in LogicSystem.LEAVING until rejoin. Test pair: infra_c4_m2_furnace <-> infra_c3_m4_tunnel4.
-Part 2 (menu) research done: main_menu entities (7 vgui_screen, viewcontrol + 2 nodes) reach the logic table;
-logo materials/vgui/logo.vtf + sound/music/menu.wav need new exporter code; chapter maps in
-scripts/screens/infra_menu_chapters.res.
+Part 1: one MC world per map ("src2mc <campaign> <mapid>") behind INFRA's loading screen (levels/*, client/levels/*).
+Part 2 (INFRA in-world main menu), all user-tested OK:
+- Converter: `maps/<id>/screens.json` (format section 26: vgui_screens.txt panels, all scripts/screens/*.res with
+  #base + conditionals via source/kvfile.rs, resource/*scheme.res, images, menu sounds, strings); unsealed maps
+  (main_menu's toolsskybox shell at the coordinate limit) take their bounds from the brushes inside; an all-thin-brush
+  map exports with its own box instead of failing "empty map".
+- Mod: point_viewcontrol(_node) with INFRA's glide (smootherstep + Catmull-Rom, quaternion angles), vgui_screen
+  SetActive/SetInactive, screens drawn in 3D (AFTER_PARTICLES, under SourcePost), Source Sans Pro (OFL), mouse picking,
+  focus/accept sounds, Music.Menu 0.2 looped, Options -> MC's Video/Sound/Options/Controls screens (Back on close),
+  Play/Continue/New Game/chapter start (our confirm + wipe of the campaign's map worlds), Load Game greyed, Quit ->
+  MC title, INFRA transition fades (out 0.5+0.1 s, in hold 1.0 + 0.5 s, under HUD texts), chapter unlock = INFRA
+  LevelInit rule (digits after infra_c, only rises), map logic held until the arriving client's loading screen closes
+  (60 s fallback). `/src2mc menu <campaign> [map]`, `/src2mc_menu status|chapters <n>|progress`. Chat usable in menu.
+- INFRA reverse-engineering notes: source_refs/data/infra_menu_re.md. Test bundle: target/infra-campaign
+  (main_menu, office, tunnel4, furnace as campaign `infra`); schematics go in config/src2mc/schematics/.
+Open: HL2/Portal menus (2D GameUI over background maps) not done; options lists on the phone not drawn (MC screens
+instead, user decision); list scrollbar not drawn; progress only recorded on level-change arrivals.
 
 ## NEXT: Source look, stage 3 "models" (phong, rimlight, world lights). Stage 2 below DONE, committed 12ab766 (DEV-0.45.0)
 

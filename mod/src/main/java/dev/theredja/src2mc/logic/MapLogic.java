@@ -486,6 +486,24 @@ public final class MapLogic {
             masterFog, masterTonemap, List.copyOf(corrections), Map.copyOf(lookPlayers));
     }
 
+    /** What the map's menu entities network, for {@link MenuSync}; {@code now} is the server's game time. */
+    dev.theredja.src2mc.menu.MenuState menu(long now) {
+        List<dev.theredja.src2mc.menu.MenuState.View> views = new ArrayList<>();
+        List<dev.theredja.src2mc.menu.MenuState.Screen> screens = new ArrayList<>();
+        for (LogicEntity entity : entities) {
+            if (entity.removed) continue;
+            if (entity instanceof MenuEntities.ViewControl view) views.add(view.view(now));
+            else if (entity instanceof MenuEntities.VguiScreen screen) screens.add(screen.screen());
+        }
+        return new dev.theredja.src2mc.menu.MenuState(views, screens);
+    }
+
+    /** Whether any {@code vgui_screen} is shown: only then does a panel's {@code engine} command mean anything. */
+    boolean hasActiveScreen() {
+        for (LogicEntity entity : entities) if (!entity.removed && entity instanceof MenuEntities.VguiScreen screen && screen.active()) return true;
+        return false;
+    }
+
     double time() { return time; }
 
     ServerLevel level() { return level; }

@@ -120,6 +120,7 @@ fn fixture_map(map_id: &str, source_model: &str, mesh_bytes: Vec<u8>) -> MapExpo
             lookups: Default::default(),
         },
         cubemaps: Vec::new(),
+        screens: None,
         details: BTreeMap::new(),
         props: vec![Prop {
             source_ordinal: 0,

@@ -41,7 +41,20 @@ public final class LevelNetwork {
         @Override public Type<? extends CustomPacketPayload> type() { return TYPE; }
     }
 
+    /** Client to server: the loading screen of the level change closed, so the arrival may start the map's clock. */
+    public record ReadyPayload() implements CustomPacketPayload {
+        public static final Type<ReadyPayload> TYPE = new Type<>(ResourceLocation.fromNamespaceAndPath(Src2mc.MOD_ID, "level_ready"));
+        public static final StreamCodec<FriendlyByteBuf, ReadyPayload> STREAM_CODEC = StreamCodec.of(
+            (buffer, payload) -> { }, buffer -> new ReadyPayload());
+
+        @Override public Type<? extends CustomPacketPayload> type() { return TYPE; }
+    }
+
     public static void register(PayloadRegistrar registrar) {
+        registrar.playToServer(ReadyPayload.TYPE, ReadyPayload.STREAM_CODEC, (payload, context) -> {
+            if (context.player() instanceof net.minecraft.server.level.ServerPlayer player)
+                dev.theredja.src2mc.logic.LogicSystem.release(player.getUUID());
+        });
         registrar.playToClient(ChangePayload.TYPE, ChangePayload.STREAM_CODEC,
             (payload, context) -> dev.theredja.src2mc.client.levels.LevelChangeClient.onChange(payload));
         registrar.playToClient(LoadedPayload.TYPE, LoadedPayload.STREAM_CODEC,

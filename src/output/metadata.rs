@@ -129,6 +129,10 @@ pub struct MapMetadata {
     /// when no material reflects a cubemap.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cubemaps: Option<String>,
+    /// Canonical `maps/<map-id>/screens.json` path (section 26); absent when
+    /// the map has no vgui_screen with a known panel.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub screens: Option<String>,
     pub diagnostics: String,
 }
 
@@ -732,6 +736,7 @@ mod tests {
             particles: None,
             look: None,
             cubemaps: None,
+            screens: None,
             diagnostics: "maps/d1_01/diagnostics.json".into(),
         };
         let value: serde_json::Value =
