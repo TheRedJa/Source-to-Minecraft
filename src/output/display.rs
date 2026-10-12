@@ -374,6 +374,7 @@ mod tests {
             color: [255; 3],
             entity: None,
             static_index: None,
+            lighting_origin: None,
         }
     }
 

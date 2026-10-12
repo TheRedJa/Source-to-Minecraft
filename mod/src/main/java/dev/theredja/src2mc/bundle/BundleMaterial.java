@@ -7,7 +7,7 @@ package dev.theredja.src2mc.bundle;
  */
 public record BundleMaterial(String sourceMaterial, RenderClass renderClass, TextureReference texture, boolean doubleSided,
                              String surfaceProp, float reflectR, float reflectG, float reflectB, Bump bump, Envmap envmap,
-                             boolean blend, String blendModulate, Detail detail, float[] selfillum) {
+                             boolean blend, String blendModulate, Detail detail, float[] selfillum, Phong phong) {
     public enum RenderClass { SOLID, CUTOUT, TRANSLUCENT, FALLBACK }
 
     /**
@@ -29,9 +29,27 @@ public record BundleMaterial(String sourceMaterial, RenderClass renderClass, Tex
      */
     public record Detail(String texture, float scaleS, float scaleT, float blendFactor, int blendMode, float[] tint) {}
 
+    /** Where a phong material's specular strength comes from. */
+    public enum PhongMask { NORMAL_ALPHA, BASE_ALPHA, BASE_LUMINANCE }
+
+    /**
+     * {@code $phong} of a VertexLitGeneric material, as {@code phong_ps20b.fxc} combines it. {@code
+     * exponent} 0 reads the exponent from the red of the texture's phong layer, {@code 1 + 149 * r}
+     * (150 without a layer); {@code exponentTexture} says the atlas has that layer (red exponent,
+     * green albedo-tint mask, alpha rim mask). With {@code albedoTint} the specular is tinted by
+     * {@code lerp(1, base colour, layer green)} instead of {@code tint}. {@code warp} and {@code
+     * lightWarp} are content IDs of clamped ramps in {@link DetailImages#warps()}; {@code rim} is
+     * null without {@code $rimlight}.
+     */
+    public record Phong(float exponent, boolean exponentTexture, float boost, float[] fresnelRanges, float[] tint,
+                        boolean albedoTint, PhongMask mask, boolean halfLambert, String warp, String lightWarp, Rim rim) {}
+
+    /** {@code $rimlight}: scaled by {@code lerp(1, phong layer alpha, mask)}. */
+    public record Rim(float exponent, float boost, float mask) {}
+
     /** Whether the material needs a row of surface settings in the baked shader. */
     public boolean surfaceEffects() {
-        return envmap != null || blend || detail != null || selfillum != null;
+        return envmap != null || blend || detail != null || selfillum != null || phong != null;
     }
 
     public BundleMaterial {
@@ -41,7 +59,7 @@ public record BundleMaterial(String sourceMaterial, RenderClass renderClass, Tex
     public BundleMaterial(String sourceMaterial, RenderClass renderClass, TextureReference texture, boolean doubleSided,
                           String surfaceProp, float reflectR, float reflectG, float reflectB) {
         this(sourceMaterial, renderClass, texture, doubleSided, surfaceProp, reflectR, reflectG, reflectB, Bump.NONE, null,
-            false, null, null, null);
+            false, null, null, null, null);
     }
 
     /** Without the average colour: mid grey. */

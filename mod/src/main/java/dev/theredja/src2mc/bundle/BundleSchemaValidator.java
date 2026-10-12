@@ -103,10 +103,12 @@ final class BundleSchemaValidator {
         if (map.has("particles")) expected.add("particles");
         if (map.has("look")) expected.add("look");
         if (map.has("cubemaps")) expected.add("cubemaps");
+        if (map.has("worldlights")) expected.add("worldlights");
+        if (map.has("sunvis")) expected.add("sunvis");
         if (map.has("screens")) expected.add("screens");
         expected.add("diagnostics");
         keys(map, expected.toArray(String[]::new));
-        format(map, "src2mc-map", path);
+        format(map, "src2mc-map", path, 2);
         if (!mapId.equals(string(map, "map_id"))) fail(BundleErrorCode.INVALID_REFERENCE, "map ID differs from path: " + path);
         String sourceName = string(map, "source_name");
         if (sourceName.isEmpty()) fail(BundleErrorCode.INVALID_SCHEMA, "empty source_name: " + path);
@@ -247,6 +249,34 @@ final class BundleSchemaValidator {
             referenced.add(cubemapsPath);
             cubemaps = validateCubemaps(zip, required(entries, cubemapsPath));
         }
+        WorldLightTable worldLights = null;
+        if (map.has("worldlights")) {
+            String worldLightsPath = exactPath(map, "worldlights", prefix + "worldlights.s2wlit");
+            referenced.add(worldLightsPath);
+            ZipEntry worldLightsEntry = required(entries, worldLightsPath);
+            limit(worldLightsEntry.getSize(), 16L + (long) WorldLightTable.MAX_LIGHTS * 68, "world light file size");
+            try {
+                worldLights = WorldLightTable.parse(zip.getInputStream(worldLightsEntry).readAllBytes());
+            } catch (IllegalArgumentException e) {
+                fail(BundleErrorCode.INVALID_SCHEMA, e.getMessage());
+            }
+            if (worldLights.lights().isEmpty()) fail(BundleErrorCode.INVALID_SCHEMA, "an empty world light file must be omitted");
+        }
+        SunVisibilityTable sunVisibility = null;
+        if (map.has("sunvis")) {
+            String sunPath = exactPath(map, "sunvis", prefix + "sunvis.s2sun");
+            referenced.add(sunPath);
+            ZipEntry sunEntry = required(entries, sunPath);
+            limit(sunEntry.getSize(), 16L + 2L * SunVisibilityTable.MAX_ENTRIES + 16L * SunVisibilityTable.MAX_ENTRIES, "sun visibility file size");
+            try {
+                sunVisibility = SunVisibilityTable.parse(zip.getInputStream(sunEntry).readAllBytes());
+            } catch (IllegalArgumentException e) {
+                fail(BundleErrorCode.INVALID_SCHEMA, e.getMessage());
+            }
+            if (light == null) fail(BundleErrorCode.INVALID_SCHEMA, "sun visibility requires the map's light data");
+            if (sunVisibility.sampleCount() != light.sampleCount()) fail(BundleErrorCode.INVALID_SCHEMA, "sun visibility sample count does not match the light data");
+            if (sunVisibility.propCount() != propRecords.size()) fail(BundleErrorCode.INVALID_SCHEMA, "sun visibility prop count does not match the placement table");
+        }
         String screens = null;
         if (map.has("screens")) {
             screens = exactPath(map, "screens", prefix + "screens.json");
@@ -314,7 +344,7 @@ final class BundleSchemaValidator {
         long mapHeight = (long) max[1] - min[1] + 1;
         return new BundleMap(mapId, sourceName, min, max, anchor, loadedMaterials, modelRefs, propRecords, mapHeight > 384,
             surfaceTable, modelRefs.stream().map(BundleModel::contentId).collect(java.util.stream.Collectors.toUnmodifiableSet()), atlas, pvs, occlusion, collision, audio, logic, movers,
-            logicProps, sky, skybox, light, particles, look, cubemaps, validateDetails(zip, entries, hashes, loadedMaterials, referenced), screens);
+            logicProps, sky, skybox, light, particles, look, cubemaps, validateDetails(zip, entries, hashes, loadedMaterials, referenced), screens, worldLights, sunVisibility);
     }
 
     /** Format section 23. */
@@ -498,17 +528,21 @@ final class BundleSchemaValidator {
     /** Format section 22. */
     private static final byte[] LOOK_MAGIC = {'S','2','L','O','O','K',0,0};
 
-    /** Decodes every detail and blend modulation texture the materials name. */
+    /** Decodes every detail, blend modulation and phong warp texture the materials name. */
     private static DetailImages validateDetails(ZipFile zip, Map<String, ZipEntry> entries, Map<String, String> hashes,
                                                 List<BundleMaterial> materials, Set<String> referenced) throws IOException {
-        java.util.TreeSet<String> ids = new java.util.TreeSet<>();
+        java.util.TreeSet<String> ids = new java.util.TreeSet<>(), warpIds = new java.util.TreeSet<>();
         for (BundleMaterial material : materials) {
             if (material.detail() != null) ids.add(material.detail().texture());
             if (material.blendModulate() != null) ids.add(material.blendModulate());
+            if (material.phong() != null && material.phong().warp() != null) warpIds.add(material.phong().warp());
+            if (material.phong() != null && material.phong().lightWarp() != null) warpIds.add(material.phong().lightWarp());
         }
-        if (ids.isEmpty()) return null;
-        Map<String, DetailImages.Image> images = new java.util.HashMap<>();
-        for (String id : ids) {
+        if (ids.isEmpty() && warpIds.isEmpty()) return null;
+        java.util.TreeSet<String> all = new java.util.TreeSet<>(ids);
+        all.addAll(warpIds);
+        Map<String, DetailImages.Image> images = new java.util.HashMap<>(), warps = new java.util.HashMap<>();
+        for (String id : all) {
             String path = "details/" + id + ".png";
             referenced.add(path);
             contentHash(hashes, path, id);
@@ -525,9 +559,10 @@ final class BundleSchemaValidator {
                 int argb = image.getRGB(x, y), at = (y * w + x) * 4;
                 rgba[at] = (byte) (argb >> 16); rgba[at + 1] = (byte) (argb >> 8); rgba[at + 2] = (byte) argb; rgba[at + 3] = (byte) (argb >>> 24);
             }
-            images.put(id, new DetailImages.Image(w, h, rgba));
+            if (ids.contains(id)) images.put(id, new DetailImages.Image(w, h, rgba));
+            if (warpIds.contains(id)) warps.put(id, new DetailImages.Image(w, h, rgba));
         }
-        return new DetailImages(images);
+        return new DetailImages(images, warps);
     }
 
     private static final byte[] CUBE_MAGIC = "S2CUBE\0\0".getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
@@ -938,7 +973,7 @@ final class BundleSchemaValidator {
         referenced.add(path);
         JsonObject root = json(zip, required(entries, path), path);
         keys(root, "format", "version", "page_size", "max_mip_level", "gutter", "pages", "textures");
-        format(root, "src2mc-atlas", path, 3);
+        format(root, "src2mc-atlas", path, 4);
         int pageSize = uintIndex(root.get("page_size"), "page_size");
         int maxMip = uintIndex(root.get("max_mip_level"), "max_mip_level");
         int gutter = uintIndex(root.get("gutter"), "gutter");
@@ -947,16 +982,18 @@ final class BundleSchemaValidator {
         JsonArray pageArray = array(root, "pages");
         for (int p = 0; p < pageArray.size(); p++) {
             JsonObject page = object(pageArray.get(p), "atlas page");
-            boolean bumped = page.has("bump_mips"), blended = page.has("blend_mips");
+            boolean bumped = page.has("bump_mips"), blended = page.has("blend_mips"), phonged = page.has("phong_mips");
             List<String> pageKeys = new ArrayList<>(List.of("page", "mips"));
             if (bumped) pageKeys.add("bump_mips");
             if (blended) pageKeys.add("blend_mips");
+            if (phonged) pageKeys.add("phong_mips");
             keys(page, pageKeys.toArray(String[]::new));
             if (uintIndex(page.get("page"), "page") != p) fail(BundleErrorCode.INVALID_SCHEMA, "atlas pages are not ordered");
             List<AtlasIndex.Mip> mips = atlasMips(zip, entries, hashes, array(page, "mips"), pageSize, maxMip, referenced);
             List<AtlasIndex.Mip> bumpMips = bumped ? atlasMips(zip, entries, hashes, array(page, "bump_mips"), pageSize, maxMip, referenced) : List.of();
             List<AtlasIndex.Mip> blendMips = blended ? atlasMips(zip, entries, hashes, array(page, "blend_mips"), pageSize, maxMip, referenced) : List.of();
-            pages.add(new AtlasIndex.Page(p, mips, bumpMips, blendMips));
+            List<AtlasIndex.Mip> phongMips = phonged ? atlasMips(zip, entries, hashes, array(page, "phong_mips"), pageSize, maxMip, referenced) : List.of();
+            pages.add(new AtlasIndex.Page(p, mips, bumpMips, blendMips, phongMips));
         }
         Map<String, AtlasIndex.Texture> textures = new java.util.LinkedHashMap<>();
         List<AtlasIndex.Region> allRegions = new ArrayList<>();
@@ -1020,7 +1057,7 @@ final class BundleSchemaValidator {
 
     private static BundleMaterial validateMaterial(JsonObject material, Map<String, int[]> textures) throws BundleValidationException {
         Set<String> allowed = Set.of("source_material", "source_material_raw", "render_class", "texture", "surface_prop", "reflectivity", "double_sided", "bump", "envmap",
-            "blend", "blend_modulate", "detail", "selfillum");
+            "blend", "blend_modulate", "detail", "selfillum", "phong");
         if (!allowed.containsAll(material.keySet()) || !material.has("source_material") || !material.has("render_class") || !material.has("reflectivity")) fail(BundleErrorCode.INVALID_SCHEMA, "invalid material fields");
         String source = string(material, "source_material");
         if (source.isEmpty()) fail(BundleErrorCode.INVALID_SCHEMA, "empty source material");
@@ -1077,6 +1114,7 @@ final class BundleSchemaValidator {
             selfillum = new float[3];
             for (int i = 0; i < 3; i++) selfillum[i] = (float) finiteNumber(tint.get(i), "selfillum tint");
         }
+        BundleMaterial.Phong phong = material.has("phong") ? validatePhong(object(material.get("phong"), "phong"), material.has("texture")) : null;
         JsonArray reflectivity = array(material, "reflectivity");
         if (reflectivity.size() != 3) fail(BundleErrorCode.INVALID_SCHEMA, "reflectivity must have three values");
         float[] averageColor = new float[3];
@@ -1100,7 +1138,52 @@ final class BundleSchemaValidator {
             case "translucent" -> BundleMaterial.RenderClass.TRANSLUCENT;
             default -> BundleMaterial.RenderClass.FALLBACK;
         }, loadedTexture, material.has("double_sided"), material.has("surface_prop") ? string(material, "surface_prop") : null,
-            averageColor[0], averageColor[1], averageColor[2], bump, envmap, material.has("blend"), blendModulate, detail, selfillum);
+            averageColor[0], averageColor[1], averageColor[2], bump, envmap, material.has("blend"), blendModulate, detail, selfillum, phong);
+    }
+
+    /** {@code phong} of a material record (format.md section 6); its fields are in canonical order, optional ones only when set. */
+    private static BundleMaterial.Phong validatePhong(JsonObject p, boolean textured) throws BundleValidationException {
+        List<String> expected = new ArrayList<>(List.of("exponent"));
+        if (p.has("exponent_texture")) expected.add("exponent_texture");
+        expected.addAll(List.of("boost", "fresnel_ranges", "tint"));
+        if (p.has("albedo_tint")) expected.add("albedo_tint");
+        expected.addAll(List.of("mask", "half_lambert"));
+        if (p.has("warp")) expected.add("warp");
+        if (p.has("light_warp")) expected.add("light_warp");
+        if (p.has("rim")) expected.add("rim");
+        keys(p, expected.toArray(String[]::new));
+        // Written only when set, so a present flag has to be true.
+        for (String flag : List.of("exponent_texture", "albedo_tint")) {
+            if (p.has(flag) && !(p.get(flag).isJsonPrimitive() && p.get(flag).getAsJsonPrimitive().isBoolean() && p.get(flag).getAsBoolean()))
+                fail(BundleErrorCode.INVALID_SCHEMA, flag + " must be true when present");
+        }
+        if (p.has("exponent_texture") && !textured) fail(BundleErrorCode.INVALID_SCHEMA, "a phong layer needs a texture");
+        if (p.has("albedo_tint") && !p.has("exponent_texture")) fail(BundleErrorCode.INVALID_SCHEMA, "albedo tint needs a phong layer");
+        float exponent = (float) finiteNumber(p.get("exponent"), "phong exponent");
+        if (exponent < 0) fail(BundleErrorCode.INVALID_SCHEMA, "negative phong exponent");
+        JsonArray ranges = array(p, "fresnel_ranges"), tint = array(p, "tint");
+        if (ranges.size() != 3 || tint.size() != 3) fail(BundleErrorCode.INVALID_SCHEMA, "phong vectors must have three values");
+        float[] r = new float[3], t = new float[3];
+        for (int i = 0; i < 3; i++) { r[i] = (float) finiteNumber(ranges.get(i), "phong fresnel range"); t[i] = (float) finiteNumber(tint.get(i), "phong tint"); }
+        BundleMaterial.PhongMask mask = switch (string(p, "mask")) {
+            case "normal_alpha" -> BundleMaterial.PhongMask.NORMAL_ALPHA;
+            case "base_alpha" -> BundleMaterial.PhongMask.BASE_ALPHA;
+            case "base_luminance" -> BundleMaterial.PhongMask.BASE_LUMINANCE;
+            default -> { fail(BundleErrorCode.INVALID_SCHEMA, "invalid phong mask"); yield BundleMaterial.PhongMask.NORMAL_ALPHA; }
+        };
+        JsonElement halfLambert = p.get("half_lambert");
+        if (halfLambert == null || !halfLambert.isJsonPrimitive() || !halfLambert.getAsJsonPrimitive().isBoolean()) fail(BundleErrorCode.INVALID_SCHEMA, "half_lambert must be a boolean");
+        BundleMaterial.Rim rim = null;
+        if (p.has("rim")) {
+            JsonObject o = object(p.get("rim"), "rim");
+            keys(o, "exponent", "boost", "mask");
+            float rimExponent = (float) finiteNumber(o.get("exponent"), "rim exponent");
+            if (rimExponent < 1) fail(BundleErrorCode.INVALID_SCHEMA, "rim exponent below one");
+            rim = new BundleMaterial.Rim(rimExponent, (float) finiteNumber(o.get("boost"), "rim boost"), (float) finiteNumber(o.get("mask"), "rim mask"));
+        }
+        return new BundleMaterial.Phong(exponent, p.has("exponent_texture"), (float) finiteNumber(p.get("boost"), "phong boost"), r, t, p.has("albedo_tint"), mask,
+            halfLambert.getAsBoolean(), p.has("warp") ? digest(string(p, "warp"), "phong warp") : null,
+            p.has("light_warp") ? digest(string(p, "light_warp"), "phong light warp") : null, rim);
     }
 
     private static final byte[] OGG_MAGIC = {'O','g','g','S'};

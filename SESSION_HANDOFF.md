@@ -22,7 +22,59 @@ Part 2 (INFRA in-world main menu), all user-tested OK:
 Open: HL2/Portal menus (2D GameUI over background maps) not done; options lists on the phone not drawn (MC screens
 instead, user decision); list scrollbar not drawn; progress only recorded on level-change arrivals.
 
-## NEXT: Source look, stage 3 "models" (phong, rimlight, world lights). Stage 2 below DONE, committed 12ab766 (DEV-0.45.0)
+## IN PROGRESS: Source look, stage 3 "models" (phong, rimlight, world lights). Stage 2 below DONE, committed 12ab766 (DEV-0.45.0)
+
+Research 2026-10-12 (refs R=~/projects/minecraft/tools/source_refs; ASW stdshaders S=R/asw/repo/src/materialsystem/stdshaders):
+- Phong reference = ASW only (SDK2013 has no phong PS). Gate (S/vertexlitgeneric_dx9_helper.cpp:43-66): $phong 1 and
+  ($bumpmap or $basemapalphaphongmask or $lightwarptexture); no bump -> flat normal.
+- Phong lighting has NO static (vhv) light at all (S/phong_*: no STATIC_LIGHT); bumped vertexlit ignores vhv too
+  (R/sdk2013/.../vertexlit_and_unlit_generic_bump_ps2x.fxc:187-189). Diffuse = ambient cube(N) + up to 4 local lights
+  (half-lambert squared unless $phongdisablehalflambert; lightwarp 2*tex(t) on unsquared t). Atten per vertex.
+- Spec per light: pow(sat(dot(reflect(-V,N),L)), E) * sat(NdL) * color*atten; E = $phongexponent if defined else
+  1+149*exp.r; F = fresnel ranges on (1-NdV)^2 (lo,mid,hi); spec *= mask*boost*tint (*F unless phongwarp); mask =
+  normal alpha | base alpha | base luminance; tint = $phongtint or lerp(1, base, exp.g). Not times albedo.
+- Rim: per light pow(LdR, rimExp)*NdL*color*atten summed, *rimMask*(1-NdV)^4, spec = max(spec, rim); spec +=
+  (1-NdV)^4*rimMask*rimBoost*AmbientCube(V)*sat(N.z). Exp texture: R exp, G albedo tint, A rim mask.
+- Combine: (spec + envmap + albedo*diffuse [selfillum]) * LINEAR_LIGHT_SCALE. Envmap mask = $normalmapalphaenvmapmask ?
+  specMask : base.a, inverted by $invertphongmask; $envmapfresnel mixes in F.
+- World lights: LUMP 15/54, dworldlight_t 88 B (v0) / 100 B (v1, +shadow_cast_offset). INFRA furnace: lump 54 v1, 345
+  lights (273 spot, 70 point, sky, skyambient). Leaf ambient cubes contain NO direct point/spot/sky light (only bounce +
+  sky + INAMBIENTCUBE surface lights; R/sdk2013/.../vrad/leaf_ambient_lighting.cpp:92-197) -> our cube-lit moving props
+  miss all direct light today. vhv includes direct light (vradstaticprops.cpp:1152-1210).
+- Engine model light selection is closed source. noclip (R/noclip/src/SourceEngine/Materials/WorldLight.ts:258-345):
+  per-prop cache at lighting origin, rank = falloff*gray(intensity), no trace/PVS, top 4, rest folded into the cube,
+  sky rank 0.1. Provisional; ask the user's expert for the real rule (r_worldlightmin, visibility, folding).
+- Survey (10 test maps, R/tools/phong_survey/): phong props INFRA 563, P1 45, P2 133; P1 uses exponent textures;
+  INFRA mostly const exponent + fresnel [0.5 0.5 1]; rim 22; warps rare.
+
+Built DEV-0.51.0 (uncommitted): converter material `phong` object + atlas v4 `phong_mips` layer + map json v2 + prop
+bump layer for phong materials + warps in details/ (vmt.rs Phong/phong_of, materials.rs phong_reference); section 27
+worldlights.s2wlit (src/bsp/worldlights.rs, src/output/worldlights.rs, noclip fixups for attn/exponent/radius; INFRA
+furnace 345 lights, P1 testchmb_a_00 642 incl 624 surface). Mod: BundleMaterial.Phong/Rim, AtlasIndex phongMips,
+DetailImages.warps, WorldLightTable. Styled world lights skipped (lightmaps only carry style 0).
+Mod rendering built (DEV-0.51.0, reviewed + 16 findings fixed, NOT tested in game, WAITING on user test):
+LightSelection.java (noclip port: rank falloff*gray, top 4, ejected light folded into cube, sky rank 0.1 no
+visibility), PropLights.java (light-set float texture Sampler8, 32 texels/row: cube 6 + 4 lights x 5; static/logic
+rows >=64 built on workers, row in vertex Surface.z; animated/mover rows 1-63 re-selected after 0.25 block, uniform
+LightRow; MapOffset uniform), baked.fsh phong path (per-pixel N from bump via derivative TBN, Sampler9 phong layer,
+Sampler10 warp sheet; settings texture now 16 texels/material). Phong props ignore vhv (Source). Non-phong cube-lit
+moving props get world lights (Lambert; $halflambert not exported for non-phong). Toggles /src2mc_look
+phong|rimlight|proplights; status shows counts + static-row overflow. Quake lights: linear falloff, unverified.
+User test DEV-0.51.0 (2026-10-12): highlights good (strength, movement); rim no visible change (traced: subtle by
+design, silhouette-only); P1 no visible change (traced: low normal-alpha masks); phong props WAY too bright in dark
+areas -> measured (source_refs/tools/proplight_check/): sun (skylight) selected for every prop without visibility, ~300x
+the cube in furnace tunnels; units otherwise match vhv ~1x. Moving props rough + light pops; spikes to 38 ms.
+DEV-0.52.0 (built, installed, validated, NOT tested in game): section 28 sunvis.s2sun (src/output/sunvis.rs: vrad
+TestLine_DoesHitSky rule vs model-0 brushes, per ambient sample + per prop lighting origin from $illumposition /
+sprp LightingOrigin; furnace props 5.7% sun-visible); mod SunVisibilityTable, sun weight vis/255, all non-top-4 lights
+folded into cube (istudiorender.h:215), non-phong moving props lit per vertex, 0.2 s light cross-fade (rows up to 8
+lights), selection on a worker + LightGrid, toggle /src2mc_look sun.
+User test DEV-0.52.0 (2026-10-12): dark props exactly right, sun on better, highlights same, moving props OK, spikes
+gone, rim visible up close (subtle). Open: lamp light leaks through solid walls onto props (no visibility test for
+local lights; noclip has none either).
+Test bundles now grouped (2026-10-12): source_refs/tools/export_all.sh exports + installs infra (main_menu, office, tunnel4,
+furnace, metro, waterplant; 2.4 GB), portal (escape_02, testchmb_a_00), portal2 (wakeup, bts4, a3_01, a3_end); old
+per-map exports deleted. All validated (big bundles need `./gradlew -I ~/projects/minecraft/tools/source_refs/tools/bigheap.gradle` with Test maxHeapSize 12g).
 
 ## DONE: Source look, stage 2 "surfaces" -- D31
 

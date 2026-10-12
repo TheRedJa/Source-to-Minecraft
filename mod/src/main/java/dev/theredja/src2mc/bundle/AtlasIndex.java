@@ -8,11 +8,15 @@ public record AtlasIndex(int pageSize, int maxMipLevel, int gutter, List<Page> p
     public AtlasIndex { pages = List.copyOf(pages); textures = Map.copyOf(textures); }
     /** {@code bumpMips}: the page's bump layer, the same layout as {@code mips}; empty when no texture on it has one. */
     /** {@code blendMips}: the blend layer (blended displacements' second texture), the same layout; empty without one. */
-    public record Page(int page, List<Mip> mips, List<Mip> bumpMips, List<Mip> blendMips) {
-        public Page { mips = List.copyOf(mips); bumpMips = List.copyOf(bumpMips); blendMips = List.copyOf(blendMips); }
-        public Page(int page, List<Mip> mips) { this(page, mips, List.of(), List.of()); }
+    /** {@code phongMips}: the phong layer (model materials' exponent textures, white elsewhere), the same layout; empty without one. */
+    public record Page(int page, List<Mip> mips, List<Mip> bumpMips, List<Mip> blendMips, List<Mip> phongMips) {
+        public Page {
+            mips = List.copyOf(mips); bumpMips = List.copyOf(bumpMips); blendMips = List.copyOf(blendMips); phongMips = List.copyOf(phongMips);
+        }
+        public Page(int page, List<Mip> mips) { this(page, mips, List.of(), List.of(), List.of()); }
         public boolean bumped() { return !bumpMips.isEmpty(); }
         public boolean blended() { return !blendMips.isEmpty(); }
+        public boolean phonged() { return !phongMips.isEmpty(); }
     }
     public record Mip(int level, String path, int width, int height) {}
     public record Texture(String contentId, int width, int height, List<Region> regions) {

@@ -110,6 +110,9 @@ public final class AnimatedPropRenderer {
         final Map<Part, Blended> blended;
         /** The map's baked light; null for none. */
         dev.theredja.src2mc.bundle.LightTable lightTable;
+        /** The map, for the world lights near the prop, and what they last gave it; see {@link PropLights}. */
+        BundleMap map;
+        final PropLights.Moving moving = new PropLights.Moving();
         final Map<Part, VertexBuffer> buffers = new HashMap<>();
         final float[] positions, rotations, skin, previousPositions, previousRotations;
         /** Model-space corners posed this frame, by mesh vertex; {@code posedFrame} says which are current. */
@@ -453,6 +456,7 @@ public final class AnimatedPropRenderer {
         builds++;
         Built built = new Built(prop, model, color, bundle, map.atlas(), animation, mesh, rigid, geometry.rigidBounds(), blended);
         built.lightTable = map.light();
+        built.map = map;
         // A still model's box is where it stays.
         if (animation == null) bounds(built);
         return built;
@@ -928,8 +932,12 @@ public final class AnimatedPropRenderer {
             // The ambient cube where the prop's middle is now, in its map.
             org.joml.Vector3d middle = middleAt(level, placing, built);
             BlockPos t = placing.placement.translation();
-            float[] cube = middle == null ? BakedLighting.cube(built.lightTable, placing.translation[0], placing.translation[1], placing.translation[2])
-                : BakedLighting.cube(built.lightTable, middle.x - t.getX(), middle.y - t.getY(), middle.z - t.getZ());
+            double lx = middle == null ? placing.translation[0] : middle.x - t.getX();
+            double ly = middle == null ? placing.translation[1] : middle.y - t.getY();
+            double lz = middle == null ? placing.translation[2] : middle.z - t.getZ();
+            // Its ambient cube and the local world lights are chosen again when it has moved a quarter block.
+            boolean lit = built.map != null && PropLights.update(built.moving, built.map, lx, ly, lz, frame);
+            float[] cube = lit && PropLights.propLightsOn ? built.moving.cube() : BakedLighting.cube(built.lightTable, lx, ly, lz);
             for (Map.Entry<Part, VertexBuffer> buffer : built.buffers.entrySet()) {
                 Part part = buffer.getKey();
                 if ((part.renderClass() == BundleMaterial.RenderClass.TRANSLUCENT) != translucent) continue;
@@ -950,9 +958,13 @@ public final class AnimatedPropRenderer {
                 type.setupRenderState();
                 MapSurfaceRenderer.applyAtlasFilter(texture);
                 if (suppressDepthWrite) RenderSystem.depthMask(false);
+                MapSurfaceRenderer.bindBumpLayer(generation.sequence(), built.bundle, built.atlas, part.page(), frame);
+                MapSurfaceRenderer.bindPhongLayer(generation.sequence(), built.bundle, built.atlas, part.page(), frame);
+                var shader = BakedLighting.prepare(built.lightTable, part.renderClass(), cube, new Matrix3f().set(rotation));
+                PropLights.apply(shader, built.lightTable, (float) (t.getX() - camera.x), (float) (t.getY() - camera.y), (float) (t.getZ() - camera.z),
+                    lit ? built.moving : null, frame);
                 buffer.getValue().bind();
-                buffer.getValue().drawWithShader(modelView, event.getProjectionMatrix(),
-                    BakedLighting.prepare(built.lightTable, part.renderClass(), cube, new Matrix3f().set(rotation)));
+                buffer.getValue().drawWithShader(modelView, event.getProjectionMatrix(), shader);
                 type.clearRenderState();
                 if (suppressDepthWrite) RenderSystem.depthMask(true);
                 drawn++;

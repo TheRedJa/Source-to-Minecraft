@@ -73,7 +73,15 @@ pub struct RawProp {
     /// The colour the model is tinted with (Hammer's `rendercolor` on a
     /// `prop_static`), RGB; white for the versions that do not carry one.
     pub color: [u8; 3],
+    /// The record's `LightingOrigin` (a world position) when the prop sets
+    /// `STATIC_PROP_USE_LIGHTING_ORIGIN`; the engine lights the model there.
+    pub lighting_origin: Option<[f32; 3]>,
 }
+
+/// `STATIC_PROP_USE_LIGHTING_ORIGIN`.
+pub const USE_LIGHTING_ORIGIN: u8 = 0x2;
+/// `LightingOrigin`, after the fade distances, in every version since 4.
+const LIGHTING_ORIGIN: usize = 44;
 
 /// `STATIC_PROP_NO_DRAW`: the compiler kept the prop for its collision and
 /// lighting, and the engine never draws it.
@@ -231,6 +239,8 @@ fn parse(lump: &[u8], version: u16) -> Result<StaticProps> {
                 Some(at) => [record[at], record[at + 1], record[at + 2]],
                 None => [255; 3],
             },
+            lighting_origin: (record[FLAGS] & USE_LIGHTING_ORIGIN != 0)
+                .then(|| read_vec(record, LIGHTING_ORIGIN)),
         });
     }
 

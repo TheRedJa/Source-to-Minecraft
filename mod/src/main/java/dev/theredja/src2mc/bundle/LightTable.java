@@ -74,6 +74,16 @@ public final class LightTable {
      * instead. False only when the map has no samples at all.
      */
     public boolean ambientAt(double x, double y, double z, float[] cube) {
+        return ambientAt(x, y, z, cube, null, null);
+    }
+
+    /**
+     * {@link #ambientAt(double, double, double, float[])} that also reports the sun visibility
+     * (0 to 1) at the point in {@code sun[0]}: {@code sunTable}'s value per sample, weighted by the
+     * same sample weights as the cube. Both null skip it; 0 when the point has no samples.
+     */
+    public boolean ambientAt(double x, double y, double z, float[] cube, SunVisibilityTable sunTable, float[] sun) {
+        if (sun != null) sun[0] = 0f;
         java.util.Arrays.fill(cube, 0f);
         int leaf = leafAt(x, y, z);
         int first, count;
@@ -94,13 +104,16 @@ public final class LightTable {
             first = nearest;
             count = 1;
         }
-        double total = 0;
+        double total = 0, visible = 0;
+        boolean sunKnown = sun != null && sunTable != null && sunTable.sampleCount() == sampleCount();
         for (int i = first; i < first + count; i++) {
             double weight = 1.0 / (distanceSquared(i, x, y, z) * UNITS_PER_BLOCK * UNITS_PER_BLOCK + 1.0);
             total += weight;
+            if (sunKnown) visible += weight * sunTable.sample(i);
             for (int c = 0; c < 18; c++) cube[c] += (float) (cubes[i * 18 + c] * weight);
         }
         for (int c = 0; c < 18; c++) cube[c] /= (float) total;
+        if (sunKnown) sun[0] = (float) (visible / total);
         return true;
     }
 

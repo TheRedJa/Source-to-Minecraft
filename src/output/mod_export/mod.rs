@@ -2,7 +2,7 @@
 
 use crate::geom::Vec3;
 use crate::output::{atlas, bundle, metadata, placement, schem, surface};
-use crate::source::vmt::EnvmapMask;
+use crate::source::vmt::{EnvmapMask, Phong, PhongMask};
 use crate::voxel::grid::{IVec3, Palette};
 use anyhow::{Context, Result, ensure};
 use sha2::{Digest, Sha256};
@@ -40,12 +40,13 @@ pub struct ModelAsset {
 pub type ModelKey = (String, String, Vec<u32>, [u8; 3], Option<String>);
 
 /// Logical textures by content ID: the bytes they are named by, the image,
-/// and their bump and blend layers.
+/// and their bump, blend and phong layers.
 type TextureAssets = BTreeMap<
     String,
     (
         Vec<u8>,
         image::RgbaImage,
+        Option<image::RgbaImage>,
         Option<image::RgbaImage>,
         Option<image::RgbaImage>,
     ),
@@ -61,6 +62,9 @@ pub struct TextureAsset {
     /// The blend layer: a blended displacement material's `$basetexture2`
     /// at the same size, at the same atlas place on the blend pages.
     pub blend: Option<image::RgbaImage>,
+    /// The phong layer: a model material's `$phongexponenttexture` at the
+    /// same size, at the same atlas place on the phong pages.
+    pub phong: Option<image::RgbaImage>,
     /// Only the 3D skybox room draws it: packed after every texture the map
     /// draws, so the room never spreads the map's textures over more pages.
     pub room_only: bool,
@@ -148,6 +152,9 @@ pub struct Prop {
     /// A static prop's `.vhv` light, one colour per mesh vertex (format
     /// section 22); `None` lights it by the ambient cube.
     pub vertex_light: Option<Vec<[u8; 3]>>,
+    /// Lighting origin in block space and the sun's visibility there
+    /// (format section 28).
+    pub sun: ([f32; 3], u8),
 }
 
 /// A prop the map's logic changes (format section 18).
@@ -236,6 +243,10 @@ type VertexLight = Vec<[u8; 3]>;
 pub struct LightExport {
     pub atlas: crate::output::light::Atlas,
     pub ambient: Option<crate::output::light::AmbientExport>,
+    /// The encoded world lights (section 27); empty when the map has none.
+    pub world_lights: Vec<u8>,
+    /// The sun's visibility at each ambient sample (section 28).
+    pub sun_samples: Vec<u8>,
 }
 
 /// One moving entity, cut out of the world and moved into cells of its own.
@@ -528,6 +539,8 @@ pub fn from_conversion(
         &mut materials,
     )?;
     crate::timing::mark("export: prop meshes");
+    let sun_tracer = crate::output::sunvis::SunTracer::new(map);
+    let ambient = crate::output::light::ambient(map, &conversion.transform);
     let pvs_tracking = pvs_index.is_some().then_some(&mut pvs_sections);
     let WorldProps {
         props,
@@ -537,6 +550,7 @@ pub fn from_conversion(
         cell_max,
     } = place_props(
         map,
+        &sun_tracer,
         conversion,
         extracted,
         &model_by_path,
@@ -731,8 +745,14 @@ pub fn from_conversion(
         sky,
         skybox: skybox_table,
         light: Some(LightExport {
-            ambient: crate::output::light::ambient(map, &conversion.transform),
+            sun_samples: sun_samples(&sun_tracer, map, &ambient),
+            ambient,
             atlas: light_atlas,
+            world_lights: if map.world_lights.is_empty() {
+                Vec::new()
+            } else {
+                crate::output::worldlights::encode(&map.world_lights, &conversion.transform)?
+            },
         }),
         particles,
         look,
@@ -741,6 +761,20 @@ pub fn from_conversion(
         details,
         diagnostics: metadata::Diagnostics::new(diagnostics)?,
     })
+}
+
+/// The sun's visibility per section 22 ambient sample, or none when the
+/// section has no samples.
+fn sun_samples(
+    tracer: &crate::output::sunvis::SunTracer,
+    map: &crate::bsp::Map,
+    ambient: &Option<crate::output::light::AmbientExport>,
+) -> Vec<u8> {
+    if ambient.is_some() {
+        crate::output::sunvis::sample_visibility(tracer, map)
+    } else {
+        Vec::new()
+    }
 }
 
 fn sub(a: IVec3, b: IVec3) -> IVec3 {

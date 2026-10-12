@@ -2,11 +2,15 @@
 
 use super::*;
 
-/// Logical textures by content ID: image, bump, blend, and room-only.
+/// Logical textures by content ID: image, bump, blend, phong, and room-only.
+/// A prop's lighting origin in block space and the sun's visibility there.
+type SunRecord = ([f32; 3], u8);
+
 type AtlasAssets = BTreeMap<
     String,
     (
         image::RgbaImage,
+        Option<image::RgbaImage>,
         Option<image::RgbaImage>,
         Option<image::RgbaImage>,
         bool,
@@ -146,7 +150,7 @@ pub fn write_campaign(
             &map.map_id,
             map.anchor_cell,
         )?);
-        let mut prop_light: Vec<([u8; 32], Option<VertexLight>)> = Vec::new();
+        let mut prop_light: Vec<([u8; 32], Option<VertexLight>, SunRecord)> = Vec::new();
         for prop in map.props {
             ensure!(
                 occupied.insert(prop.root_cell),
@@ -185,10 +189,10 @@ pub fn write_campaign(
                 rotation: prop.rotation,
                 scale: prop.scale,
             });
-            prop_light.push((stable_id, prop.vertex_light));
+            prop_light.push((stable_id, prop.vertex_light, prop.sun));
         }
         // In the placement table's order, which is by stable ID.
-        prop_light.sort_by_key(|(stable_id, _)| *stable_id);
+        prop_light.sort_by_key(|(stable_id, _, _)| *stable_id);
         archive.add(
             format!("{prefix}/props.s2props"),
             placement::encode(placements, model_refs.len() as u32)?,
@@ -201,11 +205,20 @@ pub fn write_campaign(
         if let Some(light) = &map.light {
             let records: Vec<Option<&[[u8; 3]]>> = prop_light
                 .iter()
-                .map(|(_, colors)| colors.as_deref())
+                .map(|(_, colors, _)| colors.as_deref())
                 .collect();
             archive.add(
                 format!("{prefix}/light.s2light"),
                 crate::output::light::encode(&light.atlas, light.ambient.as_ref(), &records)?,
+            )?;
+        }
+        let has_world_lights = map.light.as_ref().is_some_and(|l| !l.world_lights.is_empty());
+        if let Some(light) = map.light.as_ref().filter(|_| has_world_lights) {
+            archive.add(format!("{prefix}/worldlights.s2wlit"), light.world_lights.clone())?;
+            let props: Vec<SunRecord> = prop_light.iter().map(|(_, _, sun)| *sun).collect();
+            archive.add(
+                format!("{prefix}/sunvis.s2sun"),
+                crate::output::sunvis::encode(&light.sun_samples, &props)?,
             )?;
         }
         let has_occlusion = map.occlusion.is_some();
@@ -292,7 +305,7 @@ pub fn write_campaign(
         let metadata_path = format!("maps/{}.json", map.map_id);
         let meta = metadata::MapMetadata {
             format: "src2mc-map",
-            version: 1,
+            version: 2,
             map_id: map.map_id.clone(),
             source_name: map.source_name,
             units_per_block: UNITS_PER_BLOCK,
@@ -315,6 +328,8 @@ pub fn write_campaign(
             light: has_light.then(|| format!("{prefix}/light.s2light")),
             particles: has_particles.then(|| format!("{prefix}/particles.json")),
             look: Some(format!("{prefix}/look.s2look")),
+            worldlights: has_world_lights.then(|| format!("{prefix}/worldlights.s2wlit")),
+            sunvis: has_world_lights.then(|| format!("{prefix}/sunvis.s2sun")),
             cubemaps: (!map.cubemaps.is_empty()).then(|| format!("{prefix}/cubemaps.s2cube")),
             screens: has_screens.then(|| format!("{prefix}/screens.json")),
             diagnostics: format!("{prefix}/diagnostics.json"),
@@ -364,11 +379,11 @@ fn gather_textures(maps: &mut [MapExport]) -> Result<AtlasAssets> {
             // Room-only when no map of the bundle draws it.
             let room_only = atlas_assets
                 .get(&texture.content_id)
-                .is_none_or(|(_, _, _, room_only)| *room_only)
+                .is_none_or(|(_, _, _, _, room_only)| *room_only)
                 && texture.room_only;
-            if let Some((old, _, _, _)) = atlas_assets.insert(
+            if let Some((old, _, _, _, _)) = atlas_assets.insert(
                 texture.content_id.clone(),
-                (texture.image, texture.bump, texture.blend, room_only),
+                (texture.image, texture.bump, texture.blend, texture.phong, room_only),
             ) {
                 ensure!(
                     old.as_raw() == atlas_assets[&texture.content_id].0.as_raw(),
@@ -385,7 +400,7 @@ fn write_atlas(archive: &mut bundle::Bundle, atlas_assets: AtlasAssets) -> Resul
     let logical = atlas_assets
         .iter()
         .map(
-            |(content_id, (image, _, _, room_only))| atlas::LogicalTexture {
+            |(content_id, (image, _, _, _, room_only))| atlas::LogicalTexture {
                 content_id: content_id.clone(),
                 width: image.width(),
                 height: image.height(),
@@ -396,11 +411,12 @@ fn write_atlas(archive: &mut bundle::Bundle, atlas_assets: AtlasAssets) -> Resul
     let layout = atlas::pack(&logical)?;
     let images = atlas_assets
         .into_iter()
-        .map(|(content_id, (image, bump, blend, _))| atlas::ImageAsset {
+        .map(|(content_id, (image, bump, blend, phong, _))| atlas::ImageAsset {
             content_id,
             image,
             bump,
             blend,
+            phong,
         })
         .collect::<Vec<_>>();
     let pages = atlas::build_pages(&layout, &images)?;
@@ -423,6 +439,7 @@ fn write_atlas(archive: &mut bundle::Bundle, atlas_assets: AtlasAssets) -> Resul
         Vec<Result<(u32, u32, Vec<u8>)>>,
         Option<Vec<Result<(u32, u32, Vec<u8>)>>>,
         Option<Vec<Result<(u32, u32, Vec<u8>)>>>,
+        Option<Vec<Result<(u32, u32, Vec<u8>)>>>,
     )> = pages
         .par_iter()
         .map(|images| {
@@ -430,6 +447,7 @@ fn write_atlas(archive: &mut bundle::Bundle, atlas_assets: AtlasAssets) -> Resul
                 encode_mips(&images.mips),
                 images.bump_mips.as_ref().map(encode_mips),
                 images.blend_mips.as_ref().map(encode_mips),
+                images.phong_mips.as_ref().map(encode_mips),
             )
         })
         .collect();
@@ -449,15 +467,17 @@ fn write_atlas(archive: &mut bundle::Bundle, atlas_assets: AtlasAssets) -> Resul
             }
             Ok(mips)
         };
-    for (page, (images, bump, blend)) in encoded.into_iter().enumerate() {
+    for (page, (images, bump, blend, phong)) in encoded.into_iter().enumerate() {
         let mips = add_mips(images)?;
         let bump_mips = bump.map(&mut add_mips).transpose()?;
         let blend_mips = blend.map(&mut add_mips).transpose()?;
+        let phong_mips = phong.map(&mut add_mips).transpose()?;
         page_meta.push(metadata::AtlasPage {
             page: page as u32,
             mips,
             bump_mips,
             blend_mips,
+            phong_mips,
         });
     }
     let textures = logical
@@ -487,7 +507,7 @@ fn write_atlas(archive: &mut bundle::Bundle, atlas_assets: AtlasAssets) -> Resul
         "atlas.json",
         metadata::AtlasMetadata {
             format: "src2mc-atlas",
-            version: 3,
+            version: 4,
             page_size: atlas::PAGE_SIZE,
             max_mip_level: atlas::MAX_MIP_LEVEL,
             gutter: atlas::GUTTER,

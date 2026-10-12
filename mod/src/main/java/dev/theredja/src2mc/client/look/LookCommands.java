@@ -49,6 +49,10 @@ public final class LookCommands {
             .then(onOff(literal("blend"), value -> dev.theredja.src2mc.client.render.SurfaceEffects.blendOn = value, "displacement blending"))
             .then(onOff(literal("selfillum"), value -> dev.theredja.src2mc.client.render.SurfaceEffects.selfillumOn = value, "self-illumination"))
             .then(onOff(literal("lightonly"), value -> dev.theredja.src2mc.client.render.SurfaceEffects.lightOnly = value, "light-only grey albedo"))
+            .then(onOff(literal("phong"), value -> dev.theredja.src2mc.client.render.PropLights.phongOn = value, "phong on props (off: baked light only)"))
+            .then(onOff(literal("rimlight"), value -> dev.theredja.src2mc.client.render.PropLights.rimOn = value, "phong rim light"))
+            .then(onOff(literal("proplights"), value -> dev.theredja.src2mc.client.render.PropLights.propLightsOn = value, "world lights on non-phong moving props (phong always uses them)"))
+            .then(onOff(literal("sun"), value -> dev.theredja.src2mc.client.render.PropLights.setSunOn(value), "skylight on props (off: excluded everywhere)"))
             .then(onOff(literal("srgb"), value -> dev.theredja.src2mc.client.render.SurfaceEffects.srgbCurve = value, "exact sRGB curve"))
             .then(onOff(literal("dither"), value -> dev.theredja.src2mc.client.render.SurfaceEffects.ditherAll = value, "dither on every path"))
             .then(literal("bump")
@@ -105,6 +109,9 @@ public final class LookCommands {
             .append(", lightonly ").append(dev.theredja.src2mc.client.render.SurfaceEffects.lightOnly ? "on" : "off")
             .append(", srgb ").append(dev.theredja.src2mc.client.render.SurfaceEffects.srgbCurve ? "on" : "off")
             .append(", dither ").append(dev.theredja.src2mc.client.render.SurfaceEffects.ditherAll ? "on" : "off")
+            .append(", phong ").append(dev.theredja.src2mc.client.render.PropLights.phongOn ? "on" : "off")
+            .append(", rimlight ").append(dev.theredja.src2mc.client.render.PropLights.rimOn ? "on" : "off")
+            .append(", proplights (non-phong) ").append(dev.theredja.src2mc.client.render.PropLights.propLightsOn ? "on" : "off")
             .append("\n").append(SourcePost.status());
         if (IrisCompat.shaderPackInUse()) text.append("\na shader pack is in use, which skips Source's post-processing");
         if (frame == null) {
@@ -126,6 +133,10 @@ public final class LookCommands {
                 cubemaps == null ? 0 : cubemaps.cubes().size(), reflecting,
                 materials.stream().filter(m -> m.detail() != null).count(), materials.stream().filter(m -> m.blend()).count(),
                 materials.stream().filter(m -> m.selfillum() != null).count()));
+            text.append(String.format(Locale.ROOT, "\n%d phong material(s) (%d with rim light), %d world light(s) in the map; %s",
+                materials.stream().filter(m -> m.phong() != null).count(), materials.stream().filter(m -> m.phong() != null && m.phong().rim() != null).count(),
+                frame.map().worldLights() == null ? 0 : frame.map().worldLights().lights().size(),
+                dev.theredja.src2mc.client.render.PropLights.status()));
             text.append(String.format(Locale.ROOT, "\n%d lookup(s) of %d in the map, uncorrected share %.2f",
                 frame.lookups().size(), look == null ? 0 : look.lookups().size(), frame.defaultWeight()));
             for (LookClient.Lookup lookup : frame.lookups()) text.append(String.format(Locale.ROOT, " %.2f", lookup.weight()));

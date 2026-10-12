@@ -537,6 +537,7 @@ fn fallback_material(name: String) -> metadata::MaterialReference {
         blend_modulate: None,
         detail: None,
         selfillum: None,
+        phong: None,
     }
 }
 
@@ -577,8 +578,10 @@ pub(super) struct WorldProps {
 /// land in a carrier's cell: it then carries that cell's collision itself, and
 /// the carrier is left out. Every section a prop spans goes into
 /// `pvs_sections` when the map has a visibility table.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn place_props(
     map: &crate::bsp::Map,
+    sun: &crate::output::sunvis::SunTracer,
     conversion: &crate::convert::Conversion,
     extracted: Vec<ModProp>,
     models: &BTreeMap<ModelUse, BuiltModel>,
@@ -645,6 +648,7 @@ pub(super) fn place_props(
                 item.prop.static_index,
                 &built.hardware,
             ),
+            sun: crate::output::sunvis::prop_record(sun, &conversion.transform, &item),
         });
     }
     if let Some(collision) = collision.collision.as_mut() {

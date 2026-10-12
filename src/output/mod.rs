@@ -12,6 +12,8 @@ pub mod display;
 pub mod kubejs;
 pub mod layout;
 pub mod light;
+pub mod sunvis;
+pub mod worldlights;
 pub mod limits;
 pub mod logic;
 pub mod cubemaps;

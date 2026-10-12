@@ -14,6 +14,7 @@ pub mod rawleaves;
 pub mod rawprops;
 pub mod skybox;
 pub mod texcoord;
+pub mod worldlights;
 
 use crate::geom::{Aabb, Plane, Vec3};
 use anyhow::{Context, Result};
@@ -226,6 +227,8 @@ pub struct Map {
     /// The ambient light cubes vrad sampled in each leaf, for what has no
     /// lightmap or vertex light of its own.
     pub ambient: lighting::Ambient,
+    /// The world lights compiled from the map's light entities, HDR when present.
+    pub world_lights: Vec<worldlights::WorldLight>,
 }
 
 impl Map {
@@ -266,6 +269,9 @@ impl Map {
             .with_context(|| format!("reading the light of {}", path.display()))?;
         let ambient = lighting::Ambient::read(&data, &leaf_brushes, light.hdr)
             .with_context(|| format!("reading the ambient light of {}", path.display()))?;
+
+        let world_lights = worldlights::read(&data)
+            .with_context(|| format!("reading the world lights of {}", path.display()))?;
 
         // `vbsp` insists the entity lump is valid UTF-8; shipped maps are not
         // always. Repair in place before handing it over.
@@ -322,6 +328,7 @@ impl Map {
             unsealed_region: std::sync::OnceLock::new(),
             light,
             ambient,
+            world_lights,
         })
     }
 

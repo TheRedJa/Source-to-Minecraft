@@ -44,8 +44,34 @@ public record BundleMap(
     // Its materials' detail and blend modulation textures; null when none has one.
     DetailImages details,
     // The canonical path of its VGUI screens table (format section 26); null when it has none.
-    String screens
+    String screens,
+    // The world lights Source adds to props besides their ambient cube; null when there are none.
+    WorldLightTable worldLights,
+    // Whether the sun reaches each ambient sample and static prop; null when the map has no such file.
+    SunVisibilityTable sunVisibility
 ) {
+    public BundleMap(String mapId, String sourceName, int[] cellMin, int[] cellMax, int[] anchorCell,
+                     java.util.List<BundleMaterial> materials, java.util.List<BundleModel> models,
+                     java.util.List<BundleProp> props, boolean exceedsVanillaBuildHeight, SurfaceTable surfaces,
+                     java.util.Set<String> modelContentIds, AtlasIndex atlas, PropVisibility pvs,
+                     OcclusionTable occlusion, CollisionTable collision, AudioTable audio, LogicTable logic, MoverTable movers,
+                     LogicPropTable logicProps, SkyTable sky, SkyboxTable skybox, LightTable light, ParticleTable particles,
+                     LookTable look, CubemapTable cubemaps, DetailImages details, String screens, WorldLightTable worldLights) {
+        this(mapId, sourceName, cellMin, cellMax, anchorCell, materials, models, props, exceedsVanillaBuildHeight,
+            surfaces, modelContentIds, atlas, pvs, occlusion, collision, audio, logic, movers, logicProps, sky, skybox, light, particles, look, cubemaps, details, screens, worldLights, null);
+    }
+
+    public BundleMap(String mapId, String sourceName, int[] cellMin, int[] cellMax, int[] anchorCell,
+                     java.util.List<BundleMaterial> materials, java.util.List<BundleModel> models,
+                     java.util.List<BundleProp> props, boolean exceedsVanillaBuildHeight, SurfaceTable surfaces,
+                     java.util.Set<String> modelContentIds, AtlasIndex atlas, PropVisibility pvs,
+                     OcclusionTable occlusion, CollisionTable collision, AudioTable audio, LogicTable logic, MoverTable movers,
+                     LogicPropTable logicProps, SkyTable sky, SkyboxTable skybox, LightTable light, ParticleTable particles,
+                     LookTable look, CubemapTable cubemaps, DetailImages details, String screens) {
+        this(mapId, sourceName, cellMin, cellMax, anchorCell, materials, models, props, exceedsVanillaBuildHeight,
+            surfaces, modelContentIds, atlas, pvs, occlusion, collision, audio, logic, movers, logicProps, sky, skybox, light, particles, look, cubemaps, details, screens, null);
+    }
+
     public BundleMap(String mapId, String sourceName, int[] cellMin, int[] cellMax, int[] anchorCell,
                      java.util.List<BundleMaterial> materials, java.util.List<BundleModel> models,
                      java.util.List<BundleProp> props, boolean exceedsVanillaBuildHeight, SurfaceTable surfaces,

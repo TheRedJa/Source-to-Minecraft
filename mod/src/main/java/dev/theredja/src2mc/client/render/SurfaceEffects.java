@@ -28,9 +28,9 @@ public final class SurfaceEffects {
     private SurfaceEffects() {}
 
     /** Materials per row of the settings texture. */
-    static final int MATERIALS_PER_ROW = 128;
+    static final int MATERIALS_PER_ROW = 64;
     /** Settings texels per material. */
-    static final int TEXELS = 8;
+    static final int TEXELS = 16;
     /**
      * The texture unit of the detail array: past every sampler the baked shader lists, since the
      * shader binds those on the plain 2D target of units 0 up and a unit's samplers must agree.
@@ -48,7 +48,7 @@ public final class SurfaceEffects {
     /** {@code /src2mc_look srgb on}: the exact sRGB curve for texture decode and output encode, as Source's hardware sRGB does; off is pow 2.2. */
     public static volatile boolean srgbCurve = true;
 
-    private record Textures(int cubes, int settings, int details) {}
+    private record Textures(int cubes, int settings, int details, int warps) {}
 
     /** Each map's light table to its map, for draws that only know the table; identity keys. */
     private static final Map<LightTable, BundleMap> MAPS = java.util.Collections.synchronizedMap(new IdentityHashMap<>());
@@ -75,18 +75,26 @@ public final class SurfaceEffects {
         return -(materialId + 1) & 0xFFFF;
     }
 
+    /** The material a row names ({@link #row}), or null for 0 or a row out of range. */
+    static BundleMaterial materialOfRow(BundleMap map, int row) {
+        int id = -(short) row - 1;
+        return row == 0 || id < 0 || id >= map.materials().size() ? null : map.materials().get(id);
+    }
+
     /** Binds the map's cubemaps, settings and detail atlas for a draw lit by {@code table}; render thread. */
     static void bind(LightTable table, net.minecraft.client.renderer.ShaderInstance shader) {
         BundleMap map = table == null ? null : MAPS.get(table);
         Textures textures = map == null ? null : TEXTURES.computeIfAbsent(map, SurfaceEffects::upload);
         RenderSystem.setShaderTexture(5, textures == null ? 0 : textures.cubes());
         RenderSystem.setShaderTexture(6, textures == null ? 0 : textures.settings());
+        RenderSystem.setShaderTexture(10, textures == null ? 0 : textures.warps());
         int active = GlStateManager._getActiveTexture();
         GlStateManager._activeTexture(org.lwjgl.opengl.GL13.GL_TEXTURE0 + DETAIL_UNIT);
         GL11.glBindTexture(GL30.GL_TEXTURE_2D_ARRAY, textures == null ? 0 : textures.details());
         GlStateManager._activeTexture(active);
         shader.safeGetUniform("DetailArray").set(DETAIL_UNIT);
         shader.safeGetUniform("SurfaceToggles").set(enabled ? 1f : 0f, detailOn ? 1f : 0f, blendOn ? 1f : 0f, selfillumOn ? 1f : 0f);
+        shader.safeGetUniform("PhongToggles").set(PropLights.phongOn ? 1f : 0f, PropLights.rimOn ? 1f : 0f, PropLights.propLightsOn ? 1f : 0f, 0f);
         shader.safeGetUniform("DebugToggles").set(lightOnly ? 1f : 0f, ditherAll ? 1f : 0f, srgbCurve ? 1f : 0f, 0f);
     }
 
@@ -96,6 +104,7 @@ public final class SurfaceEffects {
             GlStateManager._deleteTexture(textures.cubes());
             GlStateManager._deleteTexture(textures.settings());
             if (textures.details() != 0) GlStateManager._deleteTexture(textures.details());
+            if (textures.warps() != 0) GlStateManager._deleteTexture(textures.warps());
         }
         TEXTURES.clear();
         MAPS.clear();
@@ -156,6 +165,8 @@ public final class SurfaceEffects {
 
         Map<String, float[]> tiles = new java.util.HashMap<>();
         int detailTexture = uploadDetails(map, tiles);
+        Map<String, float[]> warpTiles = new java.util.HashMap<>();
+        int warpTexture = uploadWarps(map, warpTiles);
 
         List<BundleMaterial> materials = map.materials();
         int rows = Math.max(1, (materials.size() + MATERIALS_PER_ROW - 1) / MATERIALS_PER_ROW);
@@ -184,6 +195,18 @@ public final class SurfaceEffects {
                         put(row, 6, detail.tint()[0], detail.tint()[1], detail.tint()[2], 0);
                     }
                     row[6 * 4 + 3] = material.blend() ? 1 : 0;
+                    BundleMaterial.Phong phong = material.phong();
+                    if (phong != null) {
+                        put(row, 8, 1, material.bump() == BundleMaterial.Bump.NORMAL ? 1 : 0, phong.halfLambert() ? 1 : 0, phong.mask().ordinal());
+                        put(row, 9, phong.exponent(), phong.exponentTexture() ? 1 : 0, phong.boost(), phong.albedoTint() ? 1 : 0);
+                        put(row, 10, phong.tint()[0], phong.tint()[1], phong.tint()[2], phong.rim() != null ? 1 : 0);
+                        put(row, 11, phong.fresnelRanges()[0], phong.fresnelRanges()[1], phong.fresnelRanges()[2], phong.rim() != null ? phong.rim().exponent() : 1);
+                        put(row, 12, phong.rim() != null ? phong.rim().boost() : 0, phong.rim() != null ? phong.rim().mask() : 0, 0, 0);
+                        float[] warp = phong.warp() == null ? null : warpTiles.get(phong.warp());
+                        if (warp != null) put(row, 13, warp[0], warp[1], warp[2], warp[3]);
+                        float[] lightWarp = phong.lightWarp() == null ? null : warpTiles.get(phong.lightWarp());
+                        if (lightWarp != null) put(row, 14, lightWarp[0], lightWarp[1], lightWarp[2], lightWarp[3]);
+                    }
                     float[] modulate = material.blendModulate() == null ? null : tiles.get(material.blendModulate());
                     if (modulate != null) put(row, 7, modulate[0], modulate[1], modulate[2], modulate[3]);
                 }
@@ -197,7 +220,7 @@ public final class SurfaceEffects {
             UnpackState.end(unpack);
             parameters(GL11.GL_NEAREST);
             GlStateManager._bindTexture(0);
-            return new Textures(cubeTexture, settingsTexture, detailTexture);
+            return new Textures(cubeTexture, settingsTexture, detailTexture, warpTexture);
         } finally {
             MemoryUtil.memFree(settings);
         }
@@ -242,6 +265,42 @@ public final class SurfaceEffects {
             GL11.glTexParameteri(GL30.GL_TEXTURE_2D_ARRAY, GL11.GL_TEXTURE_WRAP_S, GL11.GL_REPEAT);
             GL11.glTexParameteri(GL30.GL_TEXTURE_2D_ARRAY, GL11.GL_TEXTURE_WRAP_T, GL11.GL_REPEAT);
             GL11.glBindTexture(GL30.GL_TEXTURE_2D_ARRAY, 0);
+            return texture;
+        } finally {
+            MemoryUtil.memFree(pixels);
+        }
+    }
+
+    /**
+     * Puts the map's phong warp and light warp ramps on one texture, stacked, each as wide as the
+     * widest; {@code tiles} gets each one's place in texels: x, y, width, height. 0 when it has none.
+     * The shader clamps inside a ramp's own rectangle, so a ramp narrower than the sheet never
+     * reads its neighbour.
+     */
+    private static int uploadWarps(BundleMap map, Map<String, float[]> tiles) {
+        if (map.details() == null || map.details().warps().isEmpty()) return 0;
+        List<Map.Entry<String, dev.theredja.src2mc.bundle.DetailImages.Image>> images = new java.util.ArrayList<>(map.details().warps().entrySet());
+        images.sort(Map.Entry.comparingByKey());
+        int width = 1, height = 0;
+        for (var image : images) { width = Math.max(width, image.getValue().width()); height += image.getValue().height(); }
+        ByteBuffer pixels = MemoryUtil.memCalloc(width * height * 4);
+        try {
+            int y = 0;
+            for (var entry : images) {
+                var img = entry.getValue();
+                for (int row = 0; row < img.height(); row++) {
+                    pixels.put(((y + row) * width) * 4, img.rgba(), row * img.width() * 4, img.width() * 4);
+                }
+                tiles.put(entry.getKey(), new float[] {0, y, img.width(), img.height()});
+                y += img.height();
+            }
+            int texture = GlStateManager._genTexture();
+            GlStateManager._bindTexture(texture);
+            int unpack = UnpackState.begin(4);
+            GL11.glTexImage2D(GL11.GL_TEXTURE_2D, 0, GL11.GL_RGBA8, width, height, 0, GL11.GL_RGBA, GL11.GL_UNSIGNED_BYTE, pixels);
+            UnpackState.end(unpack);
+            parameters(GL11.GL_LINEAR);
+            GlStateManager._bindTexture(0);
             return texture;
         } finally {
             MemoryUtil.memFree(pixels);

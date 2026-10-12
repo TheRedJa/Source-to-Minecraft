@@ -38,6 +38,10 @@ pub struct AtlasPage {
     /// The page's blend layer, when a texture on it has one (version 3).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub blend_mips: Option<Vec<AtlasMip>>,
+    /// The page's phong layer, when a texture on it has a phong exponent
+    /// texture (version 4).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phong_mips: Option<Vec<AtlasMip>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -129,6 +133,14 @@ pub struct MapMetadata {
     /// when no material reflects a cubemap.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cubemaps: Option<String>,
+    /// Canonical `maps/<map-id>/worldlights.s2wlit` path (section 27); absent
+    /// when the map has no world lights.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worldlights: Option<String>,
+    /// Canonical `maps/<map-id>/sunvis.s2sun` path (section 28); present with
+    /// `worldlights`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sunvis: Option<String>,
     /// Canonical `maps/<map-id>/screens.json` path (section 26); absent when
     /// the map has no vgui_screen with a known panel.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -174,6 +186,54 @@ pub struct MaterialReference {
     /// texture's alpha.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selfillum: Option<[f64; 3]>,
+    /// `$phong` of a VertexLitGeneric material (format section 6).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phong: Option<PhongReference>,
+}
+
+/// `$phong` as VertexLitGeneric's phong shader draws it. `exponent` 0 takes
+/// the exponent from the red channel of the texture's phong layer, `1 + 149
+/// * red`; the layer's green is the albedo-tint mask and its alpha the rim
+/// mask. `warp` and `light_warp` are content IDs of `details/<id>.png`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PhongReference {
+    pub exponent: f64,
+    /// The texture's atlas regions carry a phong layer, its
+    /// `$phongexponenttexture` at the texture's output size.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub exponent_texture: bool,
+    pub boost: f64,
+    pub fresnel_ranges: [f64; 3],
+    pub tint: [f64; 3],
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub albedo_tint: bool,
+    pub mask: PhongMask,
+    pub half_lambert: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warp: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub light_warp: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rim: Option<RimReference>,
+}
+
+/// `$rimlight`: exponent, boost, and how much the phong layer's alpha masks
+/// the rim (`lerp(1, alpha, mask)`).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct RimReference {
+    pub exponent: f64,
+    pub boost: f64,
+    pub mask: f64,
+}
+
+/// Where the phong strength comes from: the bump layer's alpha, the base
+/// texture's alpha, or the base texture's luminance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PhongMask {
+    NormalAlpha,
+    BaseAlpha,
+    BaseLuminance,
 }
 
 /// A detail texture: content ID of its `details/<id>.png`, repeats per base
@@ -326,7 +386,7 @@ impl Campaign {
 impl AtlasMetadata {
     pub fn encode(&self) -> Result<Vec<u8>> {
         ensure!(
-            self.format == "src2mc-atlas" && self.version == 3,
+            self.format == "src2mc-atlas" && self.version == 4,
             "invalid atlas schema"
         );
         ensure!(
@@ -353,7 +413,9 @@ impl AtlasMetadata {
                 page.mips.len() == usize::from(self.max_mip_level) + 1,
                 "atlas mip chain is incomplete"
             );
-            for layer in [&page.bump_mips, &page.blend_mips].into_iter().flatten() {
+            for layer in [&page.bump_mips, &page.blend_mips, &page.phong_mips]
+                .into_iter()
+                .flatten() {
                 ensure!(
                     layer.len() == page.mips.len(),
                     "atlas layer mip chain is incomplete"
@@ -365,6 +427,7 @@ impl AtlasMetadata {
                 .enumerate()
                 .chain(page.bump_mips.iter().flatten().enumerate())
                 .chain(page.blend_mips.iter().flatten().enumerate())
+                .chain(page.phong_mips.iter().flatten().enumerate())
             {
                 validate_content_id(&mip.content_id)?;
                 ensure!(
@@ -396,7 +459,7 @@ impl AtlasMetadata {
 impl MapMetadata {
     pub fn encode(mut self) -> Result<Vec<u8>> {
         ensure!(
-            self.format == "src2mc-map" && self.version == 1,
+            self.format == "src2mc-map" && self.version == 2,
             "invalid map schema"
         );
         validate_id(&self.map_id, "map")?;
@@ -531,6 +594,28 @@ impl MaterialReference {
             !self.blend || self.texture.is_some(),
             "a blend layer needs the texture it is drawn with"
         );
+        if let Some(phong) = &mut self.phong {
+            ensure!(
+                !phong.exponent_texture || self.texture.is_some(),
+                "a phong layer needs the texture it is drawn with"
+            );
+            for id in [&phong.warp, &phong.light_warp].into_iter().flatten() {
+                validate_content_id(id)?;
+            }
+            for value in phong
+                .fresnel_ranges
+                .iter_mut()
+                .chain(phong.tint.iter_mut())
+                .chain([&mut phong.exponent, &mut phong.boost])
+            {
+                *value = canonical_f64(*value)?;
+            }
+            if let Some(rim) = &mut phong.rim {
+                for value in [&mut rim.exponent, &mut rim.boost, &mut rim.mask] {
+                    *value = canonical_f64(*value)?;
+                }
+            }
+        }
         if let Some(envmap) = &mut self.envmap {
             for value in envmap
                 .tint
@@ -681,7 +766,7 @@ mod tests {
     fn map_normalizes_floats_and_requires_model_order() {
         let mut map = MapMetadata {
             format: "src2mc-map",
-            version: 1,
+            version: 2,
             map_id: "d1_01".into(),
             source_name: "d1_01".into(),
             units_per_block: 32.0,
@@ -703,6 +788,7 @@ mod tests {
                 blend_modulate: None,
                 detail: None,
                 selfillum: None,
+                phong: None,
             }],
             models: vec![
                 ModelReference {
@@ -736,6 +822,8 @@ mod tests {
             particles: None,
             look: None,
             cubemaps: None,
+            worldlights: None,
+            sunvis: None,
             screens: None,
             diagnostics: "maps/d1_01/diagnostics.json".into(),
         };

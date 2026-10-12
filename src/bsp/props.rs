@@ -36,6 +36,9 @@ pub struct Prop {
     /// A `prop_static`'s index in the static prop lump, which names the
     /// `.vhv` vrad lit it in; `None` for an entity's prop.
     pub static_index: Option<usize>,
+    /// Where the engine lights the model, when the map sets one explicitly
+    /// (world space); otherwise the model's `illumposition` placed on the prop.
+    pub lighting_origin: Option<Vec3>,
 }
 
 /// Not solid at all; the player walks through it in the game.
@@ -114,6 +117,9 @@ pub fn extract(map: &crate::bsp::Map) -> Vec<Prop> {
                 color: prop.color,
                 entity: None,
                 static_index: Some(index),
+                lighting_origin: prop
+                    .lighting_origin
+                    .map(|o| Vec3::new(f64::from(o[0]), f64::from(o[1]), f64::from(o[2]))),
             })
         })
         .collect()
@@ -178,6 +184,7 @@ pub fn extract_entities(bsp: &vbsp::Bsp) -> Vec<Prop> {
                 color,
                 entity: Some(index),
                 static_index: None,
+                lighting_origin: None,
             })
         })
         .collect()
@@ -244,6 +251,7 @@ mod tests {
             color: [255; 3],
             entity: None,
             static_index: None,
+            lighting_origin: None,
         }
     }
 

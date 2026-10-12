@@ -704,6 +704,7 @@ mod tests {
             blend_modulate: None,
             detail: None,
             selfillum: None,
+            phong: None,
             base_texture: "x/y".into(),
             alpha_test,
             translucent,

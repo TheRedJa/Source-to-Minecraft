@@ -82,6 +82,9 @@ pub struct Model {
     /// The rotation `parts` were turned by from the model's own space, row
     /// major: animation, which works in the model's own space, undoes it.
     pub root: [[f64; 3]; 3],
+    /// The header's `illumposition` (`$illumposition`), in the model's own
+    /// space before `root`: where the engine samples the light a model wears.
+    pub illum: Vec3,
 }
 
 impl Model {
@@ -240,7 +243,11 @@ impl<'a> Models<'a> {
             .and_then(|data| vmdl::Vtx::read(&data).ok())?;
 
         let hardware = hardware_vertices(&mdl, &vtx);
-        Some(self.flatten(vmdl::Model::from_parts(mdl, vtx, vvd), &hardware))
+        let illum = mdl.header.illumination_position;
+        let illum = Vec3::new(illum.x as f64, illum.y as f64, illum.z as f64);
+        let mut model = self.flatten(vmdl::Model::from_parts(mdl, vtx, vvd), &hardware);
+        model.illum = illum;
+        Some(model)
     }
 
     /// Turn a parsed model into triangles grouped by material.
@@ -348,6 +355,7 @@ impl<'a> Models<'a> {
             root: std::array::from_fn(|row| {
                 std::array::from_fn(|column| f64::from(root[column][row]))
             }),
+            illum: Vec3::ZERO,
         }
     }
 

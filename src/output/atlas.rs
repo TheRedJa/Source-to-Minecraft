@@ -128,6 +128,9 @@ pub struct ImageAsset {
     /// Its blend layer (a blended displacement's second texture), the same
     /// size: written at the same place on the page's blend page.
     pub blend: Option<RgbaImage>,
+    /// Its phong layer (a model material's `$phongexponenttexture`), the same
+    /// size: written at the same place on the page's phong page.
+    pub phong: Option<RgbaImage>,
 }
 
 #[derive(Debug)]
@@ -140,6 +143,10 @@ pub struct PageImages {
     /// The page's blend layer, when a texture on it has one: the same layout,
     /// transparent black elsewhere.
     pub blend_mips: Option<Vec<RgbaImage>>,
+    /// The page's phong layer, when a texture on it has one: the same layout,
+    /// white (`255` everywhere: exponent 150, full albedo tint and rim mask)
+    /// elsewhere.
+    pub phong_mips: Option<Vec<RgbaImage>>,
 }
 
 /// A tangent-space normal pointing straight out of the surface.
@@ -277,6 +284,16 @@ pub fn build_pages(layout: &Layout, assets: &[ImageAsset]) -> Result<Vec<PageIma
         .iter()
         .filter_map(|asset| Some((asset.content_id.as_str(), asset.blend.as_ref()?)))
         .collect();
+    let phongs: BTreeMap<_, _> = assets
+        .iter()
+        .filter_map(|asset| Some((asset.content_id.as_str(), asset.phong.as_ref()?)))
+        .collect();
+    for (id, phong) in &phongs {
+        ensure!(
+            phong.dimensions() == by_id[id].dimensions(),
+            "phong layer size differs from its texture"
+        );
+    }
     for (id, blend) in &blends {
         ensure!(
             blend.dimensions() == by_id[id].dimensions(),
@@ -316,6 +333,7 @@ pub fn build_pages(layout: &Layout, assets: &[ImageAsset]) -> Result<Vec<PageIma
             let mut page = RgbaImage::from_pixel(PAGE_SIZE, PAGE_SIZE, Rgba([0, 0, 0, 0]));
             let mut bump_page: Option<RgbaImage> = None;
             let mut blend_page: Option<RgbaImage> = None;
+            let mut phong_page: Option<RgbaImage> = None;
             for region in layout.regions.iter().filter(|r| r.page == page_index) {
                 blit(&mut page, by_id[region.content_id.as_str()], region);
                 if let Some(bump) = bumps.get(region.content_id.as_str()) {
@@ -328,6 +346,12 @@ pub fn build_pages(layout: &Layout, assets: &[ImageAsset]) -> Result<Vec<PageIma
                         .get_or_insert_with(|| RgbaImage::from_pixel(PAGE_SIZE, PAGE_SIZE, Rgba([0, 0, 0, 0])));
                     blit(blend_page, blend, region);
                 }
+                if let Some(phong) = phongs.get(region.content_id.as_str()) {
+                    let phong_page = phong_page.get_or_insert_with(|| {
+                        RgbaImage::from_pixel(PAGE_SIZE, PAGE_SIZE, Rgba([255; 4]))
+                    });
+                    blit(phong_page, phong, region);
+                }
             }
             let bump_mips = bump_page.map(|bump_page| {
                 let mut mips = vec![bump_page];
@@ -337,6 +361,12 @@ pub fn build_pages(layout: &Layout, assets: &[ImageAsset]) -> Result<Vec<PageIma
             });
             let blend_mips = blend_page.map(|blend_page| {
                 let mut mips = vec![blend_page];
+                let smaller = smaller_mips(&mips[0]);
+                mips.extend(smaller);
+                mips
+            });
+            let phong_mips = phong_page.map(|phong_page| {
+                let mut mips = vec![phong_page];
                 let smaller = smaller_mips(&mips[0]);
                 mips.extend(smaller);
                 mips
@@ -355,6 +385,7 @@ pub fn build_pages(layout: &Layout, assets: &[ImageAsset]) -> Result<Vec<PageIma
                 mips,
                 bump_mips,
                 blend_mips,
+                phong_mips,
             }
         })
         .collect())
@@ -611,6 +642,7 @@ mod tests {
                 image,
                 bump: None,
                 blend: None,
+                phong: None,
             }],
         )
         .unwrap();
@@ -629,12 +661,14 @@ mod tests {
                     image: RgbaImage::from_pixel(8, 8, Rgba([1, 1, 1, 255])),
                     bump: Some(bump),
                     blend: None,
+                    phong: None,
                 },
                 ImageAsset {
                     content_id: "b".into(),
                     image: RgbaImage::from_pixel(8, 8, Rgba([2, 2, 2, 255])),
                     bump: None,
                     blend: None,
+                    phong: None,
                 },
             ],
         )
@@ -649,6 +683,33 @@ mod tests {
                 assert_eq!(at, [128, 128, 255, 255]);
             }
         }
+    }
+
+    #[test]
+    fn a_phong_layer_lands_where_its_texture_does_and_defaults_to_white() {
+        let asset = |id: &str, phong| ImageAsset {
+            content_id: id.into(),
+            image: RgbaImage::from_pixel(8, 8, Rgba([1, 1, 1, 255])),
+            bump: None,
+            blend: None,
+            phong,
+        };
+        let layout = pack(&[texture("a", 8, 8), texture("b", 8, 8)]).unwrap();
+        let pages = build_pages(
+            &layout,
+            &[
+                asset("a", Some(RgbaImage::from_pixel(8, 8, Rgba([10, 20, 30, 40])))),
+                asset("b", None),
+            ],
+        )
+        .unwrap();
+        let phong_mips = pages[0].phong_mips.as_ref().unwrap();
+        assert_eq!(phong_mips.len(), pages[0].mips.len());
+        for region in &layout.regions {
+            let at = phong_mips[0].get_pixel(region.allocation.x, region.allocation.y).0;
+            assert_eq!(at, if region.content_id == "a" { [10, 20, 30, 40] } else { [255; 4] });
+        }
+        assert!(pages[0].bump_mips.is_none());
     }
 
     #[test]

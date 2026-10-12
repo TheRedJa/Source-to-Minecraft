@@ -64,6 +64,70 @@ pub struct MaterialAssets {
     /// which glows by its base texture's alpha. A model's `$selfillummask` or
     /// `$selfillumfresnel` glow is not carried yet.
     pub selfillum: Option<[f32; 3]>,
+    /// `$phong` of a `VertexLitGeneric` material that Source draws with its
+    /// phong shader; see [`Phong`].
+    pub phong: Option<Phong>,
+}
+
+/// A `VertexLitGeneric` material's phong specular and rim light, as
+/// `phong_ps20b.fxc` combines them. Only present when Source would pick the
+/// phong shader: `$phong` set and a `$lightwarptexture`, `$basemapalphaphongmask`
+/// or `$bumpmap` given. The bump map, when there is one, is `bump_map` of the
+/// material.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Phong {
+    /// `$phongexponent` when it is set and not zero; `0` takes the exponent
+    /// from `exponent_texture`'s red channel, `1 + 149 * red`.
+    pub exponent: f32,
+    /// `$phongexponenttexture`, relative to `materials/`: red the exponent,
+    /// green the albedo-tint mask, alpha the rim mask.
+    pub exponent_texture: Option<String>,
+    /// `$phongboost`, default 1.
+    pub boost: f32,
+    /// `$phongfresnelranges`: Fresnel at grazing, head-on and in between;
+    /// default `[0 0.5 1]`.
+    pub fresnel_ranges: [f32; 3],
+    /// `$phongtint`, default white. White with `albedo_tint`.
+    pub tint: [f32; 3],
+    /// The specular is tinted by `lerp(1, base colour, exponent texture
+    /// green)`. Source does this only for a `$phongtint` of all zeros, with an
+    /// exponent texture and `$phongalbedotint` not 0 (default 1).
+    pub albedo_tint: bool,
+    /// Where the specular strength comes from.
+    pub mask: PhongMask,
+    /// Half-Lambert diffuse for the phong term: not `$phongdisablehalflambert`.
+    pub half_lambert: bool,
+    /// `$phongwarptexture`: a 2D ramp over (n.h, Fresnel) replacing the
+    /// specular falloff and Fresnel.
+    pub warp: Option<String>,
+    /// `$lightwarptexture`: a 1D ramp over the diffuse term.
+    pub light_warp: Option<String>,
+    /// `$rimlight`.
+    pub rim: Option<Rim>,
+}
+
+/// The phong strength mask, in Source's precedence: luminance over base alpha
+/// over the bump map's alpha.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PhongMask {
+    /// The bump map's alpha (1 without a bump map).
+    NormalAlpha,
+    /// `$basemapalphaphongmask`: the base texture's alpha.
+    BaseAlpha,
+    /// `$basemapluminancephongmask`: the base texture's luminance.
+    BaseLuminance,
+}
+
+/// `$rimlight`: a Fresnel-weighted glow at silhouettes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Rim {
+    /// `$rimlightexponent`, at least 1, default 4.
+    pub exponent: f32,
+    /// `$rimlightboost`, default 1.
+    pub boost: f32,
+    /// `$rimmask` with an exponent texture, else 0: how much the exponent
+    /// texture's alpha masks the rim, `lerp(1, alpha, mask)`.
+    pub mask: f32,
 }
 
 /// A detail texture as LightmappedGeneric combines it.
@@ -109,6 +173,70 @@ pub enum EnvmapMask {
     BaseAlpha,
     /// `$normalmapalphaenvmapmask`: the bump map's alpha.
     NormalAlpha,
+}
+
+/// The phong shader's parameters of a material, when Source would use it
+/// (`WantsPhongShader`): `$phong` set and one of a light warp, a base-alpha
+/// phong mask or a bump map given.
+fn phong_of(vmt: &Vmt) -> Option<Phong> {
+    if vmt.shader != "vertexlitgeneric" || !vmt.flag("$phong") {
+        return None;
+    }
+    let path = |key: &str| {
+        vmt.get(key)
+            .map(|v| v.trim().trim_matches('"').replace('\\', "/"))
+            .filter(|v| !v.is_empty())
+    };
+    let light_warp = path("$lightwarptexture");
+    let base_alpha = vmt.flag("$basemapalphaphongmask");
+    if light_warp.is_none() && !base_alpha && path("$bumpmap").is_none() {
+        return None;
+    }
+    let exponent_texture = path("$phongexponenttexture");
+    let tint = vmt.get("$phongtint").and_then(vector3).unwrap_or([1.0; 3]);
+    // Source tints with white where no tint is set, and by the albedo only
+    // where an all-zero tint meets an exponent texture.
+    let zero_tint = tint == [0.0; 3];
+    let albedo_tint = zero_tint
+        && exponent_texture.is_some()
+        && vmt.get("$phongalbedotint").and_then(scalar).is_none_or(|v| v != 0.0);
+    Some(Phong {
+        exponent: vmt
+            .get("$phongexponent")
+            .and_then(scalar)
+            .unwrap_or(0.0),
+        boost: vmt.get("$phongboost").and_then(scalar).unwrap_or(1.0),
+        fresnel_ranges: vmt
+            .get("$phongfresnelranges")
+            .and_then(vector3)
+            .unwrap_or([0.0, 0.5, 1.0]),
+        tint: if zero_tint { [1.0; 3] } else { tint },
+        albedo_tint,
+        mask: if vmt.flag("$basemapluminancephongmask") {
+            PhongMask::BaseLuminance
+        } else if base_alpha {
+            PhongMask::BaseAlpha
+        } else {
+            PhongMask::NormalAlpha
+        },
+        half_lambert: !vmt.flag("$phongdisablehalflambert"),
+        warp: path("$phongwarptexture"),
+        light_warp,
+        rim: vmt.flag("$rimlight").then(|| Rim {
+            exponent: vmt
+                .get("$rimlightexponent")
+                .and_then(scalar)
+                .unwrap_or(4.0)
+                .max(1.0),
+            boost: vmt.get("$rimlightboost").and_then(scalar).unwrap_or(1.0),
+            mask: if exponent_texture.is_some() {
+                vmt.get("$rimmask").and_then(scalar).unwrap_or(0.0)
+            } else {
+                0.0
+            },
+        }),
+        exponent_texture,
+    })
 }
 
 /// A `$` vector value: `[x y z]` as written, `{r g b}` as 0-255 colour, or one
@@ -452,6 +580,14 @@ impl<'a> Materials<'a> {
             .get("$bumpmap")
             .map(|v| v.trim().trim_matches('"').replace('\\', "/"))
             .filter(|v| !v.is_empty() && lightmapped && !vmt.flag("$nodiffusebumplighting"));
+        let phong = phong_of(&vmt);
+        // A phong material's bump map is its normal map and phong mask.
+        let bump_map = bump_map.or_else(|| {
+            phong.as_ref()?;
+            vmt.get("$bumpmap")
+                .map(|v| v.trim().trim_matches('"').replace('\\', "/"))
+                .filter(|v| !v.is_empty())
+        });
         let envmap = vmt
             .get("$envmap")
             .map(|v| v.trim().trim_matches('"').replace('\\', "/"))
@@ -532,7 +668,8 @@ impl<'a> Materials<'a> {
                         && !vmt.flag("$selfillumfresnel")))
                 .then(|| vmt.get("$selfillumtint").and_then(vector3).unwrap_or([1.0; 3])),
             envmap,
-            ssbump: bump_map.is_some() && vmt.flag("$ssbump"),
+            ssbump: bump_map.is_some() && lightmapped && vmt.flag("$ssbump"),
+            phong,
             bump_map,
             base_texture,
             alpha_test: vmt.flag("$alphatest"),
@@ -665,6 +802,72 @@ mod tests {
         assert_eq!(vmt.get("$basetexture"), Some("Concrete/concretewall001a"));
         assert_eq!(vmt.get("$surfaceprop"), Some("concrete"));
         assert_eq!(vmt.get("$detailblendfactor"), Some(".6"));
+    }
+
+    #[test]
+    fn phong_needs_a_bump_map_a_base_alpha_mask_or_a_light_warp() {
+        let phong = |extra: &str| {
+            phong_of(&parse(&format!(
+                r#""VertexLitGeneric" {{ "$basetexture" "a/b" {extra} }}"#
+            )))
+        };
+        assert!(phong(r#""$phong" 1"#).is_none());
+        assert!(phong(r#""$bumpmap" "a/b_n""#).is_none());
+        assert!(phong(r#""$phong" 1 "$bumpmap" "a/b_n""#).is_some());
+        assert!(phong(r#""$phong" 1 "$basemapalphaphongmask" 1"#).is_some());
+        assert!(phong(r#""$phong" 1 "$lightwarptexture" "a/ramp""#).is_some());
+        let lightmapped = parse(r#""LightmappedGeneric" { "$phong" 1 "$bumpmap" "a/b_n" }"#);
+        assert!(phong_of(&lightmapped).is_none());
+    }
+
+    #[test]
+    fn phong_reads_defaults_and_overrides() {
+        let phong = |extra: &str| {
+            phong_of(&parse(&format!(
+                r#""VertexLitGeneric" {{ "$phong" 1 "$bumpmap" "a/b_n" {extra} }}"#
+            )))
+            .unwrap()
+        };
+        let plain = phong("");
+        assert_eq!(plain.exponent, 0.0);
+        assert_eq!(plain.boost, 1.0);
+        assert_eq!(plain.fresnel_ranges, [0.0, 0.5, 1.0]);
+        assert_eq!(plain.tint, [1.0; 3]);
+        assert!(!plain.albedo_tint && plain.half_lambert && plain.rim.is_none());
+        assert_eq!(plain.mask, PhongMask::NormalAlpha);
+
+        let set = phong(
+            r#""$phongexponent" 20 "$phongboost" 2.5 "$phongtint" "[1 0.5 0.25]"
+            "$phongdisablehalflambert" 1 "$basemapluminancephongmask" 1
+            "$basemapalphaphongmask" 1 "$rimlight" 1 "$rimlightexponent" 0.5"#,
+        );
+        assert_eq!((set.exponent, set.boost), (20.0, 2.5));
+        assert_eq!(set.tint, [1.0, 0.5, 0.25]);
+        assert!(!set.half_lambert);
+        assert_eq!(set.mask, PhongMask::BaseLuminance);
+        let rim = set.rim.unwrap();
+        assert_eq!((rim.exponent, rim.boost, rim.mask), (1.0, 1.0, 0.0));
+    }
+
+    #[test]
+    fn phong_tints_by_albedo_only_for_a_zero_tint_with_an_exponent_texture() {
+        let phong = |extra: &str| {
+            phong_of(&parse(&format!(
+                r#""VertexLitGeneric" {{ "$phong" 1 "$bumpmap" "a/b_n" {extra} }}"#
+            )))
+            .unwrap()
+        };
+        let texture = r#""$phongexponenttexture" "a/b_exp""#;
+        assert!(!phong(texture).albedo_tint, "no $phongtint tints white");
+        assert!(phong(&format!(r#"{texture} "$phongtint" "[0 0 0]""#)).albedo_tint);
+        assert!(!phong(r#""$phongtint" "[0 0 0]""#).albedo_tint);
+        assert_eq!(phong(r#""$phongtint" "[0 0 0]""#).tint, [1.0; 3]);
+        let off = phong(&format!(
+            r#"{texture} "$phongtint" "[0 0 0]" "$phongalbedotint" 0"#
+        ));
+        assert!(!off.albedo_tint);
+        let rim = phong(&format!(r#"{texture} "$rimlight" 1 "$rimmask" 1"#)).rim.unwrap();
+        assert_eq!(rim.mask, 1.0);
     }
 
     /// Real materials mix quoted and bare tokens and use `//` comments.

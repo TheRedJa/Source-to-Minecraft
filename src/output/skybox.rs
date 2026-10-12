@@ -509,6 +509,7 @@ pub fn build(
             color: raw.color,
             entity: None,
             static_index: Some(lump_index),
+            lighting_origin: None,
         };
         let vhv = map
             .bsp

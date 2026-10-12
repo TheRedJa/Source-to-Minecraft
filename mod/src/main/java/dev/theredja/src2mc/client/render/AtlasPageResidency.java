@@ -52,12 +52,14 @@ public final class AtlasPageResidency implements AutoCloseable {
     private long decodeFailures;
     private final List<PageKey> readyPages = new ArrayList<>();
     private DynamicTexture placeholderTexture;
-    private DynamicTexture flatBumpTexture;
+    private DynamicTexture flatBumpTexture, whiteTexture;
 
     /** Set in a key's page for the page's bump layer. */
     static final int BUMP_LAYER = 1 << 30;
     /** Set in a key's page for the page's blend layer. */
     static final int BLEND_LAYER = 1 << 29;
+    /** Set in a key's page for the page's phong layer. */
+    static final int PHONG_LAYER = 1 << 28;
 
     /** Marks a page needed this frame and returns its texture once uploaded. */
     public Optional<ResourceLocation> request(long generation, BundleManifest bundle, AtlasIndex atlas,
@@ -77,6 +79,13 @@ public final class AtlasPageResidency implements AutoCloseable {
                                                     int page, long frame) {
         if (page < 0 || page >= atlas.pages().size() || !atlas.pages().get(page).blended()) return Optional.empty();
         return request(generation, bundle, atlas, page, frame, BLEND_LAYER);
+    }
+
+    /** The page's phong layer, as {@link #request}; empty when no texture on the page has one. */
+    public Optional<ResourceLocation> requestPhong(long generation, BundleManifest bundle, AtlasIndex atlas,
+                                                    int page, long frame) {
+        if (page < 0 || page >= atlas.pages().size() || !atlas.pages().get(page).phonged()) return Optional.empty();
+        return request(generation, bundle, atlas, page, frame, PHONG_LAYER);
     }
 
     private Optional<ResourceLocation> request(long generation, BundleManifest bundle, AtlasIndex atlas,
@@ -101,7 +110,8 @@ public final class AtlasPageResidency implements AutoCloseable {
         pendingRam += decodedBytes;
         created.decode = CompletableFuture.supplyAsync(() -> {
             AtlasIndex.Page source = atlas.pages().get(page);
-            DecodedPage decoded = decode(bundle, layer == BUMP_LAYER ? source.bumpMips() : layer == BLEND_LAYER ? source.blendMips() : source.mips(),
+            DecodedPage decoded = decode(bundle, layer == BUMP_LAYER ? source.bumpMips() : layer == BLEND_LAYER ? source.blendMips()
+                : layer == PHONG_LAYER ? source.phongMips() : source.mips(),
                 decodedBytes);
             if (created.abandoned) {
                 decoded.images.forEach(NativeImage::close);
@@ -135,7 +145,8 @@ public final class AtlasPageResidency implements AutoCloseable {
             int keyPage = item.getKey().page;
             ResourceLocation id = Src2mcIds.id("atlas/" + item.getKey().fingerprint.substring(0, 16) + "/"
                 + ((keyPage & BUMP_LAYER) != 0 ? "bump_" + (keyPage & ~BUMP_LAYER)
-                    : (keyPage & BLEND_LAYER) != 0 ? "blend_" + (keyPage & ~BLEND_LAYER) : String.valueOf(keyPage)));
+                    : (keyPage & BLEND_LAYER) != 0 ? "blend_" + (keyPage & ~BLEND_LAYER)
+                    : (keyPage & PHONG_LAYER) != 0 ? "phong_" + (keyPage & ~PHONG_LAYER) : String.valueOf(keyPage)));
             minecraft.getTextureManager().register(id, new MipTexture(decoded.images));
             entry.textureId = id;
             entry.vramBytes = decoded.bytes;
@@ -195,6 +206,18 @@ public final class AtlasPageResidency implements AutoCloseable {
             flatBumpTexture.upload();
         }
         return Src2mcIds.id("atlas_flat_bump");
+    }
+
+    /** Opaque white, for a page without a phong layer or while its layer loads: exponent 150, full tint and rim masks. */
+    public ResourceLocation whiteTexture() {
+        if (whiteTexture == null) {
+            var image = new NativeImage(1, 1, false);
+            image.setPixelRGBA(0, 0, FastColor.ABGR32.color(255, 255, 255, 255));
+            whiteTexture = new DynamicTexture(image);
+            Minecraft.getInstance().getTextureManager().register(Src2mcIds.id("atlas_white"), whiteTexture);
+            whiteTexture.upload();
+        }
+        return Src2mcIds.id("atlas_white");
     }
 
     public Stats stats() {

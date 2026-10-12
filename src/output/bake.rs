@@ -365,6 +365,7 @@ mod tests {
                 color: [255; 3],
                 entity: None,
                 static_index: None,
+                lighting_origin: None,
             };
             let origin = transform.to_block_space(prop.origin);
             let cell = [

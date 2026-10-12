@@ -76,6 +76,8 @@ public final class MoverRenderer {
         final List<dev.theredja.src2mc.world.PropStates.State> propStates;
         /** The map's baked light; null for none. */
         dev.theredja.src2mc.bundle.LightTable lightTable;
+        /** What the world lights near the mover last gave it; see {@link PropLights}. */
+        final PropLights.Moving moving = new PropLights.Moving();
         /** The light at the mover's middle, and where the mover was, when it was last lit. */
         int light = Integer.MIN_VALUE;
         Vector3d litPosition;
@@ -522,11 +524,15 @@ public final class MoverRenderer {
             // Its props take the ambient cube where its middle is now, their mover-local normals
             // turned into map axes by its rotation.
             float[] cube = null;
+            BlockPos t = resolved.placement().translation();
+            boolean lit = false;
             if (built.bounds != null) {
                 AABB box = worldBounds(pose, plotOrigin, built.bounds);
-                BlockPos t = resolved.placement().translation();
                 var centre = box.getCenter();
-                cube = BakedLighting.cube(built.lightTable, centre.x - t.getX(), centre.y - t.getY(), centre.z - t.getZ());
+                // The ambient cube and the local world lights are chosen again when it has moved a quarter block.
+                lit = PropLights.update(built.moving, resolved.map(), centre.x - t.getX(), centre.y - t.getY(), centre.z - t.getZ(), frame);
+                cube = lit && PropLights.propLightsOn ? built.moving.cube()
+                    : BakedLighting.cube(built.lightTable, centre.x - t.getX(), centre.y - t.getY(), centre.z - t.getZ());
             }
             org.joml.Matrix3f normalTurn = new org.joml.Matrix3f().set(new Quaternionf(pose.orientation()));
             Matrix4f modelView = new Matrix4f(event.getModelViewMatrix())
@@ -545,11 +551,14 @@ public final class MoverRenderer {
                 MapSurfaceRenderer.applyAtlasFilter(texture);
                 MapSurfaceRenderer.bindBumpLayer(generation.sequence(), built.bundle, built.atlas, key.page(), frame);
                 MapSurfaceRenderer.bindBlendLayer(generation.sequence(), built.bundle, built.atlas, key.page(), frame);
+                MapSurfaceRenderer.bindPhongLayer(generation.sequence(), built.bundle, built.atlas, key.page(), frame);
                 if (suppressDepthWrite) RenderSystem.depthMask(false);
                 if (faded) RenderSystem.setShaderColor(1, 1, 1, blend);
+                var shader = BakedLighting.prepare(built.lightTable, key.renderClass(), cube, normalTurn);
+                PropLights.apply(shader, built.lightTable, (float) (t.getX() - camera.x), (float) (t.getY() - camera.y), (float) (t.getZ() - camera.z),
+                    lit ? built.moving : null, frame);
                 buffer.getValue().bind();
-                buffer.getValue().drawWithShader(modelView, event.getProjectionMatrix(),
-                    BakedLighting.prepare(built.lightTable, key.renderClass(), cube, normalTurn));
+                buffer.getValue().drawWithShader(modelView, event.getProjectionMatrix(), shader);
                 if (faded) RenderSystem.setShaderColor(1, 1, 1, 1);
                 type.clearRenderState();
                 if (suppressDepthWrite) RenderSystem.depthMask(true);

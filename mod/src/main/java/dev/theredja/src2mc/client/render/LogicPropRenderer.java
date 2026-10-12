@@ -212,7 +212,11 @@ public final class LogicPropRenderer {
         BlockPos origin = BlockPos.containing(t[0], t[1], t[2]);
         Map<PageClass, PackedVertices> meshes = new HashMap<>();
         // Source lights a dynamic prop by the ambient cube where it stands.
-        float[] cube = BakedLighting.cube(map.light(), t[0], t[1], t[2]);
+        // The world lights near it join through its light set (D32): the cube it lacks the pushed-out ones of.
+        // It is lit from the point the converter chose for it, where the sun's visibility was tested.
+        double[] lit = PropLights.lightingOrigin(map, record);
+        int lightSet = PropLights.staticRow(map, record);
+        float[] cube = lightSet > 0 ? PropLights.staticCube(map, lightSet) : BakedLighting.cube(map.light(), lit[0], lit[1], lit[2]);
         float[] rgb = new float[3], baked = new float[4];
         for (var batch : PropRenderer.tessellate(bundle, map, placement, worn, mesh).entrySet()) {
             PackedVertices out = meshes.computeIfAbsent(new PageClass(batch.getKey().page(), batch.getKey().renderClass()), ignored -> new PackedVertices());
@@ -220,9 +224,9 @@ public final class LogicPropRenderer {
                 out.row(triangle.row());
                 for (PropTessellator.Vertex vertex : List.of(triangle.a(), triangle.b(), triangle.c())) {
                     dev.theredja.src2mc.bundle.LightTable.evaluate(cube, vertex.nx(), vertex.ny(), vertex.nz(), rgb);
-                    baked[0] = rgb[0]; baked[1] = rgb[1]; baked[2] = rgb[2]; baked[3] = BakedLighting.VERTEX;
+                    baked[0] = rgb[0]; baked[1] = rgb[1]; baked[2] = rgb[2]; baked[3] = lightSet > 0 ? BakedLighting.CUBE_LIT : BakedLighting.VERTEX;
                     out.add((float) (vertex.x() - origin.getX()), (float) (vertex.y() - origin.getY()), (float) (vertex.z() - origin.getZ()),
-                        (float) vertex.u(), (float) vertex.v(), (float) vertex.nx(), (float) vertex.ny(), (float) vertex.nz(), 0, color, baked);
+                        (float) vertex.u(), (float) vertex.v(), (float) vertex.nx(), (float) vertex.ny(), (float) vertex.nz(), 0, color, baked, 0, 0, lightSet);
                 }
             }
         }
@@ -291,9 +295,13 @@ public final class LogicPropRenderer {
                 type.setupRenderState();
                 MapSurfaceRenderer.applyAtlasFilter(texture);
                 if (suppressDepthWrite) com.mojang.blaze3d.systems.RenderSystem.depthMask(false);
+                MapSurfaceRenderer.bindBumpLayer(generation.sequence(), built.bundle, built.atlas, key.page(), frame);
+                MapSurfaceRenderer.bindPhongLayer(generation.sequence(), built.bundle, built.atlas, key.page(), frame);
+                var shader = BakedLighting.prepare(built.lightTable, key.renderClass(), null, null);
+                BlockPos placed = entry.getKey().placement().translation();
+                PropLights.apply(shader, built.lightTable, (float) (placed.getX() - camera.x), (float) (placed.getY() - camera.y), (float) (placed.getZ() - camera.z), null, frame);
                 buffer.getValue().bind();
-                buffer.getValue().drawWithShader(modelView, event.getProjectionMatrix(),
-                    BakedLighting.prepare(built.lightTable, key.renderClass(), null, null));
+                buffer.getValue().drawWithShader(modelView, event.getProjectionMatrix(), shader);
                 type.clearRenderState();
                 if (suppressDepthWrite) com.mojang.blaze3d.systems.RenderSystem.depthMask(true);
                 drawn++;

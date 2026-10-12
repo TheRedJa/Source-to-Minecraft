@@ -357,6 +357,17 @@ public final class MapSurfaceRenderer {
         applyAtlasFilter(bump);
     }
 
+    /** Binds the page's phong layer to sampler 9, or white without one: exponent 150, full masks. */
+    static void bindPhongLayer(long generation, dev.theredja.src2mc.bundle.BundleManifest bundle, AtlasIndex atlas, int page, long frame) {
+        ResourceLocation phong = PAGES.requestPhong(generation, bundle, atlas, page, frame).orElse(null);
+        if (phong == null) {
+            RenderSystem.setShaderTexture(9, PAGES.whiteTexture());
+            return;
+        }
+        RenderSystem.setShaderTexture(9, phong);
+        applyAtlasFilter(phong);
+    }
+
     /** Binds the page's blend layer to sampler 7, or the flat texture without one (nothing reads it then). */
     static void bindBlendLayer(long generation, dev.theredja.src2mc.bundle.BundleManifest bundle, AtlasIndex atlas, int page, long frame) {
         ResourceLocation blend = PAGES.requestBlend(generation, bundle, atlas, page, frame).orElse(null);

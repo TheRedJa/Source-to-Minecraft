@@ -564,18 +564,29 @@ public final class PropRenderer {
             // A prop without vertex light takes the ambient cube where it stands, as Source lights
             // a dynamic prop: at its origin.
             float[] cube = null;
+            // A phong prop is lit per pixel by its light set, named in the vertices' surface attribute;
+            // its baked light stays for when phong is off.
+            int lightSet = -1;
             for (var batch : tessellateProp(contributor.source, contributor.mesh).entrySet()) {
                 if (!batch.getKey().section().equals(at)) continue;
                 PackedVertices out = result.computeIfAbsent(new PageClass(batch.getKey().page(), batch.getKey().renderClass()), ignored -> new PackedVertices());
                 for (PropTessellator.Triangle triangle : batch.getValue()) {
                     out.row(triangle.row());
+                    float setRow = 0;
+                    var triangleMaterial = SurfaceEffects.materialOfRow(contributor.source.map(), triangle.row());
+                    if (triangleMaterial != null && triangleMaterial.phong() != null) {
+                        if (lightSet < 0) {
+                            lightSet = PropLights.staticRow(contributor.source.map(), contributor.source.prop());
+                        }
+                        setRow = lightSet;
+                    }
                     for (PropTessellator.Vertex vertex : List.of(triangle.a(), triangle.b(), triangle.c())) {
                         int light = sampleVertexLight(in, section.placement(), vertex, lightCache);
                         if (vertex.lit()) {
                             baked[0] = (float) vertex.r(); baked[1] = (float) vertex.g(); baked[2] = (float) vertex.b(); baked[3] = BakedLighting.VERTEX;
                         } else {
                             if (cube == null) {
-                                double[] t = contributor.source.prop().translation();
+                                double[] t = PropLights.lightingOrigin(contributor.source.map(), contributor.source.prop());
                                 cube = BakedLighting.cube(contributor.source.map().light(), t[0], t[1], t[2]);
                             }
                             float[] rgb = new float[3];
@@ -583,7 +594,7 @@ public final class PropRenderer {
                             baked[0] = rgb[0]; baked[1] = rgb[1]; baked[2] = rgb[2]; baked[3] = BakedLighting.VERTEX;
                         }
                         out.add((float) (vertex.x() - baseX), (float) (vertex.y() - baseY), (float) (vertex.z() - baseZ),
-                            (float) vertex.u(), (float) vertex.v(), (float) vertex.nx(), (float) vertex.ny(), (float) vertex.nz(), light, tint, baked);
+                            (float) vertex.u(), (float) vertex.v(), (float) vertex.nx(), (float) vertex.ny(), (float) vertex.nz(), light, tint, baked, 0, 0, setRow);
                     }
                 }
             }
@@ -777,10 +788,15 @@ public final class PropRenderer {
                 activePage = key.page();
                 activeFingerprint = mesh.bundle.fingerprint();
                 activeAtlas = mesh.atlas;
+                MapSurfaceRenderer.bindBumpLayer(generation.sequence(), mesh.bundle, mesh.atlas, key.page(), frame);
+                MapSurfaceRenderer.bindPhongLayer(generation.sequence(), mesh.bundle, mesh.atlas, key.page(), frame);
                 PERF.add(PropRenderPerf.M_STATE_SWITCHES, 1);
             }
             Matrix4f modelView = new Matrix4f(event.getModelViewMatrix()).translate((float) (mesh.origin.getX() - camera.x), (float) (mesh.origin.getY() - camera.y), (float) (mesh.origin.getZ() - camera.z));
-            mesh.buffer.bind(); mesh.buffer.drawWithShader(modelView, event.getProjectionMatrix(), BakedLighting.prepare(mesh.light, key.renderClass(), null, null));
+            var shader = BakedLighting.prepare(mesh.light, key.renderClass(), null, null);
+            BlockPos placed = key.placement().translation();
+            PropLights.apply(shader, mesh.light, (float) (placed.getX() - camera.x), (float) (placed.getY() - camera.y), (float) (placed.getZ() - camera.z), null, frame);
+            mesh.buffer.bind(); mesh.buffer.drawWithShader(modelView, event.getProjectionMatrix(), shader);
             drawCalls++;
             triangles += mesh.triangles;
         }

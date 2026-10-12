@@ -180,7 +180,7 @@ unique. Campaign and map IDs consist only of lowercase ASCII letters, digits,
 `_` and `-` so they are portable path and Minecraft resource-path components.
 Display/source names are separate and may contain other UTF-8 characters.
 
-Each `maps/<map-id>.json` has `format` `src2mc-map`, `version` 1, and these
+Each `maps/<map-id>.json` has `format` `src2mc-map`, `version` 2, and these
 fields in order:
 
 | Field | Meaning |
@@ -207,6 +207,8 @@ fields in order:
 | `particles` | optional canonical `maps/<map-id>/particles.json` path (section 23) |
 | `look` | optional canonical `maps/<map-id>/look.s2look` path (section 24) |
 | `cubemaps` | optional canonical `maps/<map-id>/cubemaps.s2cube` path (section 25); absent when no material reflects a cubemap |
+| `worldlights` | optional canonical `maps/<map-id>/worldlights.s2wlit` path (section 27); absent when the map has no world lights |
+| `sunvis` | optional canonical `maps/<map-id>/sunvis.s2sun` path (section 28); present exactly when `worldlights` is |
 | `screens` | optional canonical `maps/<map-id>/screens.json` path (section 26); absent when the map has no `vgui_screen` whose panel is defined |
 | `diagnostics` | canonical `maps/<map-id>/diagnostics.json` path |
 
@@ -221,7 +223,8 @@ only as `true`, when the Source material sets `$nocull`, and an optional
 texture's atlas regions carry a bump layer, the material's `$bumpmap` at the
 texture's output size: a tangent-space normal map, or with `$ssbump` each bump
 basis direction's share of the light. Only `LightmappedGeneric` and
-`WorldVertexTransition` materials without `$nodiffusebumplighting` have one.
+`WorldVertexTransition` materials without `$nodiffusebumplighting`, and
+`VertexLitGeneric` materials with `phong`, have one.
 A texture with a bump layer is a different logical texture from the same
 image without one; its content ID hashes the base PNG encoding followed by
 the layer's raw RGBA bytes. The layer's alpha is the material's reflection
@@ -229,6 +232,32 @@ mask: the bump map's alpha with `$normalmapalphaenvmapmask`, the mean of an
 `$envmapmask` texture's colour channels, or one minus the base texture's alpha
 with `$basealphaenvmapmask`; 255 otherwise. A reflecting material without a
 bump map but with a mask has a layer of flat normals carrying it.
+
+A `VertexLitGeneric` material that Source draws with its phong shader may have
+`phong`: `$phong` set, and one of `$lightwarptexture`, `$basemapalphaphongmask`
+or `$bumpmap` given. Its fields: `exponent`, `$phongexponent` (0 when unset or
+0: the exponent is then `1 + 149 * r` of the phong layer's red, or 150 without
+one); `exponent_texture`, present only as `true`, when the texture's atlas
+regions carry a phong layer (`$phongexponenttexture` at the texture's output
+size: red the exponent, green the albedo-tint mask, alpha the rim mask), which
+is written only when the exponent, the albedo tint or the rim mask reads it;
+`boost` (`$phongboost`, default 1); `fresnel_ranges`, three numbers
+(`$phongfresnelranges`, default `[0, 0.5, 1]`); `tint`, three numbers
+(`$phongtint`; white when unset or all zero); `albedo_tint`, present only as
+`true`: the specular is tinted by `lerp(1, base colour, phong layer green)`
+instead of `tint`, which Source does only for a `$phongtint` of all zeros with
+an exponent texture and `$phongalbedotint` not 0; `mask`, where the specular
+strength comes from: `normal_alpha` (the bump layer's alpha, 1 without a bump
+layer), `base_alpha` (`$basemapalphaphongmask`) or `base_luminance`
+(`$basemapluminancephongmask`, which wins over base alpha); `half_lambert`
+(not `$phongdisablehalflambert`); `warp`, the content ID of the
+`$phongwarptexture` as `details/<id>.png`; `light_warp`, the same for
+`$lightwarptexture`; and `rim`, for `$rimlight`: `exponent`
+(`$rimlightexponent`, at least 1, default 4), `boost` (`$rimlightboost`,
+default 1) and `mask` (`$rimmask` with an exponent texture, else 0; the rim is
+scaled by `lerp(1, phong layer alpha, mask)`). With a `mask` of
+`normal_alpha` the bump layer keeps the bump map's alpha; a phong material has
+no reflection mask, so with another `mask` it is 255. A warp is a small clamped ramp, not a repeating texture.
 
 A material may have `envmap`, its `$envmap` reflection: `cubemap`, an index
 into the map's cubemap file (section 25); `tint`, three finite numbers
@@ -252,8 +281,9 @@ detail VTF is flagged `SSBUMP`, on a bump-mapped and a flat surface) and
 material (a model's without `$selfillummask` or `$selfillumfresnel`) whose base
 VTF has an alpha channel, the base texture
 keeping its alpha. A `details/` PNG is
-RGBA, each side a power of two up to 512; the mod repeats it over the base
-texture's own coordinates.
+RGBA, each side a power of two up to 512; the mod repeats a detail or blend
+modulation over the base texture's own coordinates and samples a phong warp
+clamped.
 
 A VMT is read as the material system reads it on a DX9 system with HDR on, at
 the highest GPU level: its top-level keys, the conditional blocks that hold
@@ -271,14 +301,15 @@ The optional campaign `atlas` field is exactly `atlas.json`; it is required when
 any material has a texture. The logical ID is retained in `atlas.json`, while
 pixels live only in content-addressed `atlas/<page-mip-content-id>.png` pages.
 Thus the bundle does not duplicate a logical image as both standalone and atlas
-payloads. `atlas.json` (version 3) records the fixed 4096 page size, mip levels 0
+payloads. `atlas.json` (version 4) records the fixed 4096 page size, mip levels 0
 through 4, 16-pixel base gutter, every page mip and its dimensions, and every
 logical texture's lossless source-to-page rectangles. A page holding a texture
 with a bump layer also has `bump_mips`, a complete mip chain of the same
 layout with each such texture's bump layer at its place, gutter included, and
 the flat normal `(128, 128, 255, 255)` everywhere else. A page holding a
 texture with a blend layer has `blend_mips` the same way, transparent black
-elsewhere. A model reference
+elsewhere. A page holding a texture with a phong layer has `phong_mips` the
+same way, opaque white (255 everywhere) elsewhere. A model reference
 similarly contains its content ID, diagnostic normalized Source model path,
 a `materials` array mapping mesh material slots to map-local material IDs, an
 optional `color`, an optional `animation`, and an optional lowercase
@@ -1275,3 +1306,91 @@ are added), so no conditional or `#base` remains.
 
 The mod accepts the section and requires every image and sound `path` to exist
 and be below the map's `screens/` directory; it does not read the trees yet.
+
+## 27. World lights
+
+`maps/<map-id>/worldlights.s2wlit` holds the lights vrad compiled from the
+map's light entities (`LUMP_WORLDLIGHTS_HDR`, else `LUMP_WORLDLIGHTS`; lump
+version 0, 88 bytes a light, or 1, 100 bytes with a shadow cast offset, which
+is dropped). Source lights models with their ambient cube (section 22) plus up
+to four of these. Map metadata references it through the optional
+`worldlights` field, after `cubemaps`. Little-endian, after the magic
+`S2WLIT\0\0` and `u32` version 1: `u32` count, then per light 68 bytes:
+
+- `u8` type: 0 surface, 1 point, 2 spotlight, 3 skylight, 4 quake light,
+  5 sky ambient. All are written; sky ambient carries only its intensity.
+- `u8` flags: bit 0 the light is already in the ambient cubes
+  (`DWL_FLAGS_INAMBIENTCUBE`), bit 1 it casts entity shadows.
+- `u16` style, saturated at 65,535: 0 is always on, others are light styles
+  (switchable lights use 32 to 63).
+- 16 `f32`: origin (3), intensity (3), direction (3), `stopdot`, `stopdot2`,
+  `exponent`, `radius`, `constant`, `linear`, `quadratic`.
+
+Origin and direction are in map-local Minecraft block space, the convention of
+the ambient samples in section 22 (the same affine transform, direction
+rotated only, normalised; zero when the stored normal is zero). The direction
+is the stored `normal`: a spotlight's axis from the light towards its target;
+a skylight's direction of travel, so the direction to the light is its
+negation. `radius` and the attenuation terms are rescaled to blocks, so a
+distance `d` in blocks is used directly; the Source-unit values are `radius`
+times 32, `linear` over 32 and `quadratic` over 32 squared. `intensity` is
+linear RGB, unclamped, already scaled by vrad.
+
+Irradiance at distance `d` from a point or spot light is
+`intensity / (constant + linear * d + quadratic * d^2)`, zero beyond `radius`.
+A spotlight is further multiplied by
+`pow(saturate((cos - stopdot2) / (stopdot - stopdot2)), exponent)`, where
+`cos` is the dot product of the direction from the light to the point and the
+light's direction; `stopdot` is the cosine of the inner cone and `stopdot2`
+that of the outer. A skylight and a sky ambient light have no position or
+falloff. Light is Lambertian at a model surface: multiplied by the surface
+normal dotted with the direction to the light, clamped at 0.
+
+Fixups applied by the exporter, as the engine applies them to old data: a point
+or spot light with all three attenuation terms 0 gets `quadratic` 1; a point
+light with `exponent` 0 gets 1; a stored `radius` of 0 (no cutoff) is replaced
+by the distance at which `|intensity| / attenuation` falls below 0.015 (HDR) or
+0.03, solving the linear or quadratic term, and 2,000 Source units when there
+is no distance falloff or no solution. A map without lights has no file.
+
+## 28. Sun visibility
+
+`maps/<map-id>/sunvis.s2sun` says where the map's skylight (world light type 3,
+section 27) reaches. Source applies the sun to a model only where a ray from its
+lighting point toward the sun meets sky before anything opaque; a prop lit with
+the sun and no such test is far too bright indoors. The file is written whenever
+`worldlights.s2wlit` is, so the lighting origins are available even without a
+skylight; a map with no type 3 light has every visibility byte 0. Map metadata
+references it through the optional `sunvis` field, right after `worldlights`.
+Little-endian, after the magic `S2SUN\0\0\0` and `u32` version 1:
+
+- `u32` sample count, then that many `u8` visibilities, one per ambient sample
+  of section 22, in exactly the order section 22 stores its samples (leaf order,
+  leaf by leaf). 255 means the sun is visible, 0 not; the exporter traces one
+  ray, so only those two values occur, but a reader should treat the byte as a
+  0 to 255 fraction.
+- `u32` prop count, then that many 16-byte records, one per entry of the prop
+  placement table (section 8), in its order (ascending stable ID, the order of
+  the per-prop vertex light records of section 22; this includes entity props,
+  not only the `sprp` lump): `f32` x, y, z, the prop's lighting origin in
+  map-local Minecraft block space (the convention of section 22's sample
+  positions, 32 Source units per block); `u8` visibility as above; 3 zero bytes.
+
+Lighting origin of a prop, in Source space before conversion: the `LightingOrigin`
+of its `sprp` record when the record sets `STATIC_PROP_USE_LIGHTING_ORIGIN`
+(0x2), else the model's `illumposition` (studio header, model space, before the
+model's root transform) scaled, rotated by the prop's angles and moved to its
+origin like any model point.
+
+Trace rule, reproducing vrad's `TestLine_DoesHitSky` (`utils/vrad/trace.cpp`;
+environment built by `AddBrushesForRayTrace`): from the point, a ray of 65,536
+Source units goes along the negation of the skylight's stored direction. The
+obstacles are the world model's (model 0) brushes whose contents include any of
+`CONTENTS_SOLID` (0x1), `CONTENTS_MOVEABLE` (0x4000) or `CONTENTS_OPAQUE`
+(0x80). The sun is visible when the first brush the ray enters is entered through
+a side whose texture flags include `SURF_SKY` (0x4) or `SURF_SKY2D` (0x2) (vrad
+tests `SURF_SKY` only; the stock sky materials set both), or when it enters
+none. Entity brushes, static props and displacement surfaces do not occlude
+beyond what their brush sides do. A start point inside a brush is moved up along
++Z in Source units, one at a time, up to 16 times, until it is outside; if it is
+still inside, the visibility is 0. With several type 3 lights the first is used.

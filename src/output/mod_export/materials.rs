@@ -147,6 +147,7 @@ pub(super) fn assign_materials(
             blend_modulate: None,
             detail: None,
             selfillum: None,
+            phong: None,
         };
         let face_indices = &faces_by_material[index];
         let Some(mut material_assets) = resolver.assets(&material.name, Some(&material.raw_name))
@@ -257,21 +258,8 @@ pub(super) fn assign_materials(
                 .as_ref()
                 .and_then(|detail| decoder.header(&detail.texture))
                 .is_some_and(|h| h.flags & crate::source::vtf::FLAG_SSBUMP != 0);
-            let mut repeating = |texture: &str| -> Option<String> {
-                let header = decoder.header(texture)?;
-                let side = |n: u32| 1u32 << (n.clamp(1, 512).ilog2());
-                let (bytes, _) = produce(TextureRequest {
-                    texture: texture.to_string(),
-                    output: [side(header.size[0]), side(header.size[1])],
-                    alpha_test: false,
-                    opaque: false,
-                })?;
-                let id = bundle::content_id(&bytes);
-                details.entry(id.clone()).or_insert(bytes);
-                Some(id)
-            };
             let detail = material_assets.detail.as_ref().and_then(|detail| {
-                let texture = repeating(&detail.texture)?;
+                let texture = repeating_texture(&detail.texture, decoder, produce, &mut details)?;
                 let blend_mode = match (detail_ssbump, material_assets.bump_map.is_some()) {
                     (true, true) => 10,
                     (true, false) => 11,
@@ -289,7 +277,15 @@ pub(super) fn assign_materials(
             let blend_modulate = material_assets
                 .blend_modulate
                 .as_deref()
-                .and_then(&mut repeating);
+                .and_then(|texture| repeating_texture(texture, decoder, produce, &mut details));
+            let (phong, phong_layer) = match &material_assets.phong {
+                Some(phong) => {
+                    let (reference, layer) =
+                        phong_reference(phong, output, decoder, produce, &mut details);
+                    (Some(reference), layer)
+                }
+                None => (None, None),
+            };
             // $selfillum glows by the base texture's alpha, which an opaque
             // texture otherwise drops.
             let Some((bytes, image)) = produce(TextureRequest {
@@ -302,10 +298,14 @@ pub(super) fn assign_materials(
             }) else {
                 continue;
             };
+            // A phong mask read from the bump map's alpha keeps it too.
             let normal_alpha = matches!(
                 material_assets.envmap.as_ref().map(|e| &e.mask),
                 Some(EnvmapMask::NormalAlpha)
-            );
+            ) || material_assets
+                .phong
+                .as_ref()
+                .is_some_and(|p| p.mask == PhongMask::NormalAlpha);
             let bump_kind = bump.as_ref().map(|_| {
                 if material_assets.ssbump {
                     metadata::BumpKind::Ssbump
@@ -333,7 +333,7 @@ pub(super) fn assign_materials(
             };
             // With layers the texture is one logical texture, named by all.
             let mut bytes = bytes;
-            for extra in [&layer, &blend_image].into_iter().flatten() {
+            for extra in [&layer, &blend_image, &phong_layer].into_iter().flatten() {
                 bytes.extend_from_slice(extra.as_raw());
             }
             let bump_image = layer;
@@ -344,6 +344,7 @@ pub(super) fn assign_materials(
                 image,
                 bump_image,
                 blend_image,
+                phong_layer,
             ));
             let mut reference = reference_template.clone();
             reference.bump = bump_kind;
@@ -351,6 +352,7 @@ pub(super) fn assign_materials(
             reference.blend_modulate = blend_modulate;
             reference.detail = detail;
             reference.selfillum = material_assets.selfillum.map(|t| t.map(f64::from));
+            reference.phong = phong;
             reference.envmap = material_assets
                 .envmap
                 .as_ref()
@@ -407,6 +409,7 @@ pub(super) fn assign_materials(
             quality,
             produce,
             &mut assets_by_id,
+            &mut details,
         );
         let textured = reference.texture.is_some();
         materials.push(reference);
@@ -426,6 +429,7 @@ pub(super) fn assign_materials(
             quality,
             produce,
             &mut assets_by_id,
+            &mut details,
         );
         if reference.texture.is_some() {
             materials.push(reference);
@@ -446,6 +450,7 @@ pub(super) fn assign_materials(
             quality,
             produce,
             &mut assets_by_id,
+            &mut details,
         );
         if reference.texture.is_some() {
             materials.push(reference);
@@ -454,13 +459,14 @@ pub(super) fn assign_materials(
     }
     let textures = assets_by_id
         .into_iter()
-        .map(|(content_id, (bytes, image, bump, blend))| TextureAsset {
+        .map(|(content_id, (bytes, image, bump, blend, phong))| TextureAsset {
             room_only: !drawn_by_map.contains(&content_id),
             content_id,
             bytes,
             image,
             bump,
             blend,
+            phong,
         })
         .collect();
     ExtractedMaterials {
@@ -521,6 +527,7 @@ pub(super) fn standalone_material(
     quality: atlas::TextureQuality,
     produce: &mut dyn FnMut(TextureRequest) -> Option<(Vec<u8>, image::RgbaImage)>,
     assets_by_id: &mut TextureAssets,
+    details: &mut BTreeMap<String, Vec<u8>>,
 ) -> metadata::MaterialReference {
     let mut reference = metadata::MaterialReference {
         source_material: name.to_string(),
@@ -536,6 +543,7 @@ pub(super) fn standalone_material(
         blend_modulate: None,
         detail: None,
         selfillum: None,
+        phong: None,
     };
     let Some(mut material_assets) = resolver.assets(name, None) else {
         return reference;
@@ -569,6 +577,25 @@ pub(super) fn standalone_material(
         decision.output = atlas::fit_one_region(decision.output);
         decision.resampled = decision.output != decision.original;
     }
+    // A phong model material's normal map and phong layer, at the base
+    // texture's size, asked for before it as a lightmapped material's are.
+    let phong_assets = material_assets.phong.as_ref().filter(|_| !effect);
+    let bump = phong_assets.and_then(|_| material_assets.bump_map.as_ref()).and_then(|bump_map| {
+        produce(TextureRequest {
+            texture: bump_map.clone(),
+            output: decision.output,
+            alpha_test: false,
+            opaque: false,
+        })
+    });
+    let (phong, phong_layer) = match phong_assets {
+        Some(phong) => {
+            let (reference, layer) =
+                phong_reference(phong, decision.output, decoder, produce, details);
+            (Some(reference), layer)
+        }
+        None => (None, None),
+    };
     let Some((bytes, image)) = produce(TextureRequest {
         texture: material_assets.base_texture.clone(),
         output: decision.output,
@@ -582,10 +609,25 @@ pub(super) fn standalone_material(
         return reference;
     };
     reference.selfillum = material_assets.selfillum.map(|t| t.map(f64::from));
+    // The phong mask is the bump map's alpha only when Source reads it there.
+    let bump = bump.map(|(_, mut layer)| {
+        if phong_assets.is_some_and(|p| p.mask != PhongMask::NormalAlpha) {
+            for pixel in layer.pixels_mut() {
+                pixel[3] = 255;
+            }
+        }
+        layer
+    });
+    reference.bump = bump.as_ref().map(|_| metadata::BumpKind::Normal);
+    reference.phong = phong;
+    let mut bytes = bytes;
+    for extra in [&bump, &phong_layer].into_iter().flatten() {
+        bytes.extend_from_slice(extra.as_raw());
+    }
     let content_id = bundle::content_id(&bytes);
     assets_by_id
         .entry(content_id.clone())
-        .or_insert((bytes, image, None, None));
+        .or_insert((bytes, image, bump, None, phong_layer));
     reference.texture = Some(metadata::TextureReference {
         content_id,
         original_width: decision.original[0],
@@ -594,6 +636,86 @@ pub(super) fn standalone_material(
         output_height: decision.output[1],
     });
     reference
+}
+
+/// A texture that repeats on its own (a detail, a blend modulation or a phong
+/// warp): a power of two at most 512 a side, mipmapped by the mod. Returns the
+/// content ID of its `details/<id>.png`, kept in `details`.
+fn repeating_texture(
+    texture: &str,
+    decoder: &mut crate::source::vtf::Textures,
+    produce: &mut dyn FnMut(TextureRequest) -> Option<(Vec<u8>, image::RgbaImage)>,
+    details: &mut BTreeMap<String, Vec<u8>>,
+) -> Option<String> {
+    let header = decoder.header(texture)?;
+    let side = |n: u32| 1u32 << (n.clamp(1, 512).ilog2());
+    let (bytes, _) = produce(TextureRequest {
+        texture: texture.to_string(),
+        output: [side(header.size[0]), side(header.size[1])],
+        alpha_test: false,
+        opaque: false,
+    })?;
+    let id = bundle::content_id(&bytes);
+    details.entry(id.clone()).or_insert(bytes);
+    Some(id)
+}
+
+/// A phong material's reference, and its phong layer at `output` when the
+/// exponent texture is read for anything: the exponent, the albedo tint or
+/// the rim mask. The warps are stored in `details`.
+fn phong_reference(
+    phong: &Phong,
+    output: [u32; 2],
+    decoder: &mut crate::source::vtf::Textures,
+    produce: &mut dyn FnMut(TextureRequest) -> Option<(Vec<u8>, image::RgbaImage)>,
+    details: &mut BTreeMap<String, Vec<u8>>,
+) -> (metadata::PhongReference, Option<image::RgbaImage>) {
+    let wanted = phong.exponent == 0.0
+        || phong.albedo_tint
+        || phong.rim.as_ref().is_some_and(|rim| rim.mask > 0.0);
+    let layer = phong
+        .exponent_texture
+        .as_ref()
+        .filter(|_| wanted)
+        .and_then(|texture| {
+            produce(TextureRequest {
+                texture: texture.clone(),
+                output,
+                alpha_test: false,
+                opaque: false,
+            })
+        })
+        .map(|(_, layer)| layer);
+    let f = |v: f32| f64::from(v);
+    let mut warp = |texture: &Option<String>| {
+        texture
+            .as_deref()
+            .and_then(|texture| repeating_texture(texture, decoder, produce, details))
+    };
+    let warp_id = warp(&phong.warp);
+    let light_warp = warp(&phong.light_warp);
+    let reference = metadata::PhongReference {
+        exponent: f(phong.exponent),
+        exponent_texture: layer.is_some(),
+        boost: f(phong.boost),
+        fresnel_ranges: phong.fresnel_ranges.map(f),
+        tint: phong.tint.map(f),
+        albedo_tint: phong.albedo_tint && layer.is_some(),
+        mask: match phong.mask {
+            PhongMask::NormalAlpha => metadata::PhongMask::NormalAlpha,
+            PhongMask::BaseAlpha => metadata::PhongMask::BaseAlpha,
+            PhongMask::BaseLuminance => metadata::PhongMask::BaseLuminance,
+        },
+        half_lambert: phong.half_lambert,
+        warp: warp_id,
+        light_warp,
+        rim: phong.rim.as_ref().map(|rim| metadata::RimReference {
+            exponent: f(rim.exponent),
+            boost: f(rim.boost),
+            mask: if layer.is_some() { f(rim.mask) } else { 0.0 },
+        }),
+    };
+    (reference, layer)
 }
 
 /// Texels of stretch per block along each texture axis, measured in the

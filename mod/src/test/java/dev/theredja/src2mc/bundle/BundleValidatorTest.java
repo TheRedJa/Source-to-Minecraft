@@ -190,6 +190,37 @@ final class BundleValidatorTest {
         }
     }
 
+    /** {@code phong} is read into the material; its flags are written only as true and its keys are canonical. */
+    @Test
+    void readsPhongMaterialsAndRejectsMalformedOnes() throws Exception {
+        byte[] surfaces = surfaces(fragment((2 << 8) | (3 << 4) | 4, OWNED, 0, 0, 0, 7, 1, 0, 0, 0, 4096, 0, 0, 4096, 2048, 0));
+        String phong = "\"exponent\":20.0,\"boost\":2.0,\"fresnel_ranges\":[0.0,0.5,1.0],\"tint\":[1.0,1.0,1.0],"
+            + "\"mask\":\"base_alpha\",\"half_lambert\":true,\"rim\":{\"exponent\":4.0,\"boost\":1.0,\"mask\":0.0}";
+        Map<String, String> cases = new java.util.LinkedHashMap<>();
+        cases.put("ok", phong);
+        cases.put("layer-without-texture", "\"exponent\":0.0,\"exponent_texture\":true," + phong.substring(phong.indexOf("\"boost\"")));
+        cases.put("false-flag", phong.replace("\"mask\"", "\"albedo_tint\":false,\"mask\""));
+        cases.put("bad-mask", phong.replace("base_alpha", "sideways"));
+        cases.put("unordered", "\"boost\":2.0,\"exponent\":20.0," + phong.substring(phong.indexOf("\"fresnel_ranges\"")));
+        for (Map.Entry<String, String> entry : cases.entrySet()) {
+            Map<String, byte[]> payloads = fragmentPayloads(surfaces);
+            payloads.put("maps/d1_01.json", new String(payloads.get("maps/d1_01.json"), StandardCharsets.UTF_8)
+                .replace("\"reflectivity\":[0.5,0.5,0.5]}", "\"reflectivity\":[0.5,0.5,0.5],\"phong\":{" + entry.getValue() + "}}")
+                .getBytes(StandardCharsets.UTF_8));
+            Path bundle = directory.resolve("phong-" + entry.getKey() + ".src2mc");
+            writeBundle(bundle, 1, "hl2", payloads);
+            if (entry.getKey().equals("ok")) {
+                BundleMaterial.Phong loaded = new BundleValidator().validate(bundle).maps().getFirst().materials().getFirst().phong();
+                assertEquals(20.0F, loaded.exponent());
+                assertEquals(BundleMaterial.PhongMask.BASE_ALPHA, loaded.mask());
+                assertEquals(4.0F, loaded.rim().exponent());
+                org.junit.jupiter.api.Assertions.assertFalse(loaded.exponentTexture() || loaded.albedoTint());
+            } else {
+                assertCode(BundleErrorCode.INVALID_SCHEMA, bundle);
+            }
+        }
+    }
+
     @Test
     void rejectsMalformedSurfaceFragments() throws Exception {
         int[] triangle = {0, 0, 0, 4096, 0, 0, 4096, 4096, 0};
@@ -374,7 +405,7 @@ final class BundleValidatorTest {
         Map<String, byte[]> payloads = new TreeMap<>();
         payloads.put("campaign.json", ("{\"format\":\"src2mc-campaign-metadata\",\"version\":1,\"campaign_id\":\"hl2\","
             + "\"maps\":[{\"map_id\":\"d1_01\",\"metadata\":\"maps/d1_01.json\"}]}\n").getBytes(StandardCharsets.UTF_8));
-        payloads.put("maps/d1_01.json", ("{\"format\":\"src2mc-map\",\"version\":1,\"map_id\":\"d1_01\",\"source_name\":\"d1_01\","
+        payloads.put("maps/d1_01.json", ("{\"format\":\"src2mc-map\",\"version\":2,\"map_id\":\"d1_01\",\"source_name\":\"d1_01\","
             + "\"units_per_block\":32.0,\"cell_min\":[0,0,0],\"cell_max\":[0,0,0],\"anchor_cell\":[0,0,0],"
             + "\"surfaces\":\"maps/d1_01/surfaces.s2faces\",\"materials\":[],\"models\":[],"
             + "\"props\":\"maps/d1_01/props.s2props\",\"diagnostics\":\"maps/d1_01/diagnostics.json\"}\n").getBytes(StandardCharsets.UTF_8));

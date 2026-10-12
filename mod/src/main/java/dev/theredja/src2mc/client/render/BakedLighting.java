@@ -50,6 +50,8 @@ public final class BakedLighting {
     static final float VERTEX = 1f;
     /** {@code Baked.w}: the ambient cube of the draw, for the vertex normal. */
     static final float AMBIENT = 2f;
+    /** {@code Baked.w}: the ambient cube's light in rgb for a prop that stands still, whose light set Surface.z names. */
+    static final float CUBE_LIT = 3f;
     /**
      * {@code Baked.w}: page coordinates of a bump-mapped face's flat lightmap, its three bump
      * lightmaps {@code Baked.z} further right each, weighted by the normal map on the bump page.
@@ -170,12 +172,13 @@ public final class BakedLighting {
         java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
 
     /**
-     * A static prop's vertex light, linear RGB per mesh vertex, from its .vhv; null when it has
-     * none or the mesh does not match it, and it is lit by the ambient cube instead.
+     * The index of a prop of the map in its placement table, the one its per-prop light data
+     * (vertex light, sun visibility) is indexed by; -1 for a prop that is not one of the map's
+     * (found by identity). Any thread.
      */
-    static float[] propVertexLight(dev.theredja.src2mc.bundle.BundleMap map, dev.theredja.src2mc.bundle.BundleProp prop, int meshVertices) {
+    static int propIndex(dev.theredja.src2mc.bundle.BundleMap map, dev.theredja.src2mc.bundle.BundleProp prop) {
         LightTable table = map.light();
-        if (table == null) return null;
+        if (table == null) return -1;
         Map<dev.theredja.src2mc.bundle.BundleProp, Integer> index = PROP_INDEX.computeIfAbsent(table, ignored -> {
             Map<dev.theredja.src2mc.bundle.BundleProp, Integer> built = new IdentityHashMap<>();
             var props = map.props();
@@ -183,7 +186,18 @@ public final class BakedLighting {
             return built;
         });
         Integer at = index.get(prop);
-        byte[] raw = at == null ? null : table.propLight(at);
+        return at == null ? -1 : at;
+    }
+
+    /**
+     * A static prop's vertex light, linear RGB per mesh vertex, from its .vhv; null when it has
+     * none or the mesh does not match it, and it is lit by the ambient cube instead.
+     */
+    static float[] propVertexLight(dev.theredja.src2mc.bundle.BundleMap map, dev.theredja.src2mc.bundle.BundleProp prop, int meshVertices) {
+        LightTable table = map.light();
+        if (table == null) return null;
+        int at = propIndex(map, prop);
+        byte[] raw = at < 0 ? null : table.propLight(at);
         if (raw == null || raw.length != meshVertices * 3) return null;
         float[] light = new float[raw.length];
         for (int i = 0; i < raw.length; i++) light[i] = LightTable.vertexLight(raw[i]);
@@ -209,6 +223,9 @@ public final class BakedLighting {
         dev.theredja.src2mc.client.look.LookClient.applyFog(shader);
         // Vanilla's entity cut-out and translucent shaders cut below 0.1; solid cuts nothing.
         shader.safeGetUniform("Cutout").set(renderClass == BundleMaterial.RenderClass.SOLID ? -1f : 0.1f);
+        // No local lights until PropLights.apply names a set: row 0 is none, so a draw that does
+        // not apply never inherits the previous prop's row.
+        PropLights.reset(shader);
         shader.safeGetUniform("NormalTurn").set(normalTurn == null ? new Matrix3f() : normalTurn);
         if (cube != null) {
             String[] sides = {"AmbientPX", "AmbientNX", "AmbientPY", "AmbientNY", "AmbientPZ", "AmbientNZ"};
@@ -303,6 +320,7 @@ public final class BakedLighting {
         for (int id : TEXTURES.values()) if (id != white) GL11.glDeleteTextures(id);
         TEXTURES.clear();
         SurfaceEffects.clear();
+        PropLights.clear();
     }
 
     @SubscribeEvent
