@@ -83,6 +83,36 @@ public final class LightTable {
      * same sample weights as the cube. Both null skip it; 0 when the point has no samples.
      */
     public boolean ambientAt(double x, double y, double z, float[] cube, SunVisibilityTable sunTable, float[] sun) {
+        return ambientAt(x, y, z, cube, sunTable, sun, null);
+    }
+
+    /** The samples a cube lookup blended and their normalised weights (sum 1), reusable scratch. */
+    public static final class SampleWeights {
+        private int[] index = new int[16];
+        private float[] weight = new float[16];
+        private int count;
+
+        public int count() { return count; }
+        public int index(int i) { return index[i]; }
+        public float weight(int i) { return weight[i]; }
+
+        private void add(int sample, float w) {
+            if (count == index.length) {
+                index = java.util.Arrays.copyOf(index, count * 2);
+                weight = java.util.Arrays.copyOf(weight, count * 2);
+            }
+            index[count] = sample;
+            weight[count++] = w;
+        }
+    }
+
+    /**
+     * {@link #ambientAt(double, double, double, float[], SunVisibilityTable, float[])} that also
+     * lists the samples blended and their normalised weights into {@code weights} (cleared first;
+     * left empty when the point has no samples); null skips it.
+     */
+    public boolean ambientAt(double x, double y, double z, float[] cube, SunVisibilityTable sunTable, float[] sun, SampleWeights weights) {
+        if (weights != null) weights.count = 0;
         if (sun != null) sun[0] = 0f;
         java.util.Arrays.fill(cube, 0f);
         int leaf = leafAt(x, y, z);
@@ -110,10 +140,12 @@ public final class LightTable {
             double weight = 1.0 / (distanceSquared(i, x, y, z) * UNITS_PER_BLOCK * UNITS_PER_BLOCK + 1.0);
             total += weight;
             if (sunKnown) visible += weight * sunTable.sample(i);
+            if (weights != null) weights.add(i, (float) weight);
             for (int c = 0; c < 18; c++) cube[c] += (float) (cubes[i * 18 + c] * weight);
         }
         for (int c = 0; c < 18; c++) cube[c] /= (float) total;
         if (sunKnown) sun[0] = (float) (visible / total);
+        if (weights != null) for (int i = 0; i < weights.count; i++) weights.weight[i] /= (float) total;
         return true;
     }
 

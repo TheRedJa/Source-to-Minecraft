@@ -45,6 +45,9 @@ out vec3 blockLight;
 // What the local world lights of a cube-lit prop's light set add at this vertex, Lambert on the
 // vertex normal, as Source's vertex shader lights a non-bumped VertexLitGeneric; zero for none.
 out vec3 vertexLocal;
+// Per-vertex attenuation of the row's lights, slots 0-3 and 4-7, for a phong prop's pixels.
+out vec4 lightAtten0;
+out vec4 lightAtten1;
 
 vec3 toLinear(vec3 color) {
     return pow(max(color, vec3(0.0)), vec3(2.2));
@@ -54,28 +57,22 @@ vec4 lightTexel(int row, int texel) {
     return texelFetch(Sampler8, ivec2(texel, row), 0);
 }
 
-// One local light of a set at the point p (camera-relative): the unit direction to it and its colour
-// with distance and cone falloff; false for an empty slot or out of range. The same terms as the
-// fragment shader's localLight, here per vertex.
-bool localLight(int row, int i, vec3 p, out vec3 toLight, out vec3 color) {
+// What one local light of a set is worth at the point p (camera-relative) before the cosine term:
+// distance falloff, spot cone, radius cutoff, quake falloff; 1 for a directional light, 0 for an empty
+// slot or out of range. Source's GetVertexAttenForLight; the one function behind both the per-vertex
+// lights of a non-phong prop and the attenuation varyings a phong prop's pixels interpolate.
+float lightAtten(int row, int i, vec3 p) {
     int at = 6 + 5 * i;
     vec4 a = lightTexel(row, at);
-    toLight = vec3(0.0, 1.0, 0.0);
-    color = vec3(0.0);
-    if (a.w < 0.5) return false;
+    if (a.w < 0.5) return 0.0;
     int type = int(a.w + 0.5) - 1;
+    if (type == 3) return 1.0;
     vec4 c = lightTexel(row, at + 1);
     vec4 d = lightTexel(row, at + 2);
-    if (type == 3) {
-        toLight = -d.xyz;
-        color = c.rgb;
-        return true;
-    }
     vec3 delta = a.xyz + MapOffset - p;
     float dist = length(delta);
-    if (dist > c.w) return false;
-    toLight = delta / max(dist, 1.0e-4);
-    float cosine = -dot(toLight, d.xyz);
+    if (dist > c.w) return 0.0;
+    float cosine = -dot(delta / max(dist, 1.0e-4), d.xyz);
     float atten;
     if (type == 0) {
         atten = max(cosine, 0.0) / max(1.0, 1024.0 * dist * dist);
@@ -89,8 +86,16 @@ bool localLight(int row, int i, vec3 p, out vec3 toLight, out vec3 color) {
             atten *= cone > 0.0 ? pow(cone, d.w) : 0.0;
         }
     }
-    color = c.rgb * atten;
-    return atten > 0.0;
+    return atten;
+}
+
+// Unit direction to light i at p (directional: against its direction).
+vec3 lightDirection(int row, int i, vec3 p) {
+    int at = 6 + 5 * i;
+    vec4 a = lightTexel(row, at);
+    if (int(a.w + 0.5) - 1 == 3) return -lightTexel(row, at + 2).xyz;
+    vec3 delta = a.xyz + MapOffset - p;
+    return delta / max(length(delta), 1.0e-4);
 }
 
 void main() {
@@ -116,15 +121,27 @@ void main() {
         bakedLight = Baked;
     }
     vertexLocal = vec3(0.0);
-    if (Baked.w > 1.5 && PhongToggles.z > 0.5) {
-        int row = Baked.w > 2.5 ? int(Surface.z + 0.5) : LightRow;
+    lightAtten0 = vec4(0.0);
+    lightAtten1 = vec4(0.0);
+    {
+        // The set a prop's light is named by, as the fragment shader picks it (a phong material
+        // on a vertex-lit surface included).
+        int row = Baked.w > 2.5 ? int(Surface.z + 0.5) : Baked.w > 1.5 ? LightRow : Baked.w > 0.5 ? int(Surface.z + 0.5) : 0;
         if (row > 0) {
             vec3 n = normalize(worldNormal);
             int count = int(lightTexel(row, 0).w + 0.5);
+            bool perVertex = PhongToggles.w > 0.5;
+            bool cubeLit = Baked.w > 1.5 && PhongToggles.z > 0.5;
             for (int i = 0; i < 8; i++) {
                 if (i >= count) break;
-                vec3 l, c;
-                if (localLight(row, i, worldOffset, l, c)) vertexLocal += c * clamp(dot(n, l), 0.0, 1.0);
+                float atten = lightAtten(row, i, worldOffset);
+                if (perVertex) {
+                    if (i < 4) lightAtten0[i] = atten; else lightAtten1[i - 4] = atten;
+                }
+                if (cubeLit && atten > 0.0) {
+                    vec3 c = lightTexel(row, 7 + 5 * i).rgb * atten;
+                    vertexLocal += c * clamp(dot(n, lightDirection(row, i, worldOffset)), 0.0, 1.0);
+                }
             }
         }
     }

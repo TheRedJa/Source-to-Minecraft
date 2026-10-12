@@ -135,7 +135,7 @@ fn fixture_map(map_id: &str, source_model: &str, mesh_bytes: Vec<u8>) -> MapExpo
             color: [255; 3],
             animation: None,
             vertex_light: None,
-            sun: ([0.0; 3], 0),
+            sun: Default::default(),
         }],
         diagnostics: metadata::Diagnostics::new(Vec::new()).unwrap(),
     }
@@ -364,7 +364,7 @@ fn identical_mesh_bytes_keep_distinct_material_bindings() {
         color: [255; 3],
         animation: None,
         vertex_light: None,
-        sun: ([0.0; 3], 0),
+        sun: Default::default(),
     });
     let dir = temp_dir("material-bindings");
     let written = write_campaign(&dir, "fixture", vec![map]).unwrap();
@@ -414,7 +414,7 @@ fn logic_props_and_tints_are_written() {
         color: red,
         animation: None,
         vertex_light: None,
-        sun: ([0.0; 3], 0),
+        sun: Default::default(),
     });
     let mut shapes = BTreeMap::new();
     shapes.insert([2, 0, 0], vec![[0, 0, 0, 16, 8, 16]]);

@@ -53,9 +53,15 @@ public final class PropLights {
 
     /** {@code /src2mc_look phong|rimlight|proplights off}: read per draw by the shader. */
     public static volatile boolean phongOn = true, rimOn = true, propLightsOn = true;
+    /** {@code /src2mc_look lightatten vertex|pixel}: phong light attenuation per vertex (Source) or per pixel. */
+    public static volatile boolean lightAttenVertex = true;
+    /** {@code /src2mc_look phongdebug}: 0 off, 1 diffuse, 2 spec + rim, 3 local-light diffuse only. */
+    public static volatile int phongDebug = 0;
     /** {@code /src2mc_look sun on|off}: the skylight counts in prop lighting; see {@link #setSunOn}. */
     private static volatile boolean sunOn = true;
-    /** Bumped when the sun switch flips, so moving props select again. */
+    /** {@code /src2mc_look lightvis on|off}: lights behind walls are culled by the sun visibility file's lists; see {@link #setLightVisOn}. */
+    private static volatile boolean lightVisOn = true;
+    /** Bumped when the sun or lightvis switch flips, so moving props select again. */
     private static volatile int generation;
 
     private static final Map<BundleMap, MapLights> MAPS = new IdentityHashMap<>();
@@ -63,7 +69,8 @@ public final class PropLights {
     private static int placeholder;
     private static boolean overflowLogged;
 
-    private record Origin(double x, double y, double z, float sun) {}
+    /** {@code visList} is the prop's list in the visibility table, -1 for none (a different list is a different light set). */
+    private record Origin(double x, double y, double z, float sun, int visList) {}
 
     private static final class MapLights {
         final LightGrid grid;
@@ -75,11 +82,11 @@ public final class PropLights {
         final List<Origin> rowOrigins = new ArrayList<>();
         /** Who holds each of the moving props' rows; render thread only. */
         final Moving[] owners = new Moving[DYNAMIC_ROWS];
-        long lights, overflow;
+        long lights, overflow, culled;
         int texture, capacity, uploaded;
 
         MapLights(BundleMap map) {
-            grid = new LightGrid(LightSelection.eligible(map.worldLights()));
+            grid = new LightGrid(LightSelection.eligible(map.worldLights()), LightSelection.eligibleIndices(map.worldLights()));
             light = map.light();
             sunTable = map.sunVisibility();
         }
@@ -115,6 +122,8 @@ public final class PropLights {
         private double workX, workY, workZ;
         private final float[] workCube = new float[18], workRanks = new float[LightSelection.MAX_LOCAL], workWeights = new float[LightSelection.MAX_LOCAL], sunScratch = new float[1];
         private final Light[] workLights = new Light[LightSelection.MAX_LOCAL];
+        private final dev.theredja.src2mc.bundle.LightTable.SampleWeights workSamples = new dev.theredja.src2mc.bundle.LightTable.SampleWeights();
+        private final LightVisibility workVis = LightVisibility.ofSamples();
         private int workCount;
 
         /** The prop's cube as shown now (blended while fading), valid after {@link PropLights#update}. */
@@ -150,11 +159,13 @@ public final class PropLights {
     /**
      * The row of the light set of a static prop of the map: at its lighting origin (the sun
      * visibility file's, else its translation), with the sun visibility there for the skylight.
-     * See {@link #staticRow(BundleMap, double, double, double, float)}.
+     * See {@link #staticRow(BundleMap, double, double, double, float, int)}.
      */
     static int staticRow(BundleMap map, BundleProp prop) {
         double[] origin = lightingOrigin(map, prop);
-        return staticRow(map, origin[0], origin[1], origin[2], sunOf(map, prop));
+        SunVisibilityTable table = map.sunVisibility();
+        int list = table == null ? -1 : table.propList(BakedLighting.propIndex(map, prop));
+        return staticRow(map, origin[0], origin[1], origin[2], sunOf(map, prop), list);
     }
 
     /** Where a static prop is lit from, map-local: the sun visibility file's origin for it, else its translation. */
@@ -178,17 +189,18 @@ public final class PropLights {
      * the map has no ambient light or the texture is full. Any thread; the selection is made
      * outside the lock, so the render thread never waits on it (a rare duplicate is dropped).
      */
-    static int staticRow(BundleMap map, double x, double y, double z, float sun) {
+    static int staticRow(BundleMap map, double x, double y, double z, float sun, int visList) {
         MapLights state = state(map);
         if (state == null) return 0;
-        Origin origin = new Origin(x, y, z, sun);
+        Origin origin = new Origin(x, y, z, sun, visList);
         synchronized (state) {
             Integer known = state.byOrigin.get(origin);
             if (known != null) return known;
             if (full(state)) return overflow(state);
         }
         float[] data = new float[ROW_TEXELS * 4];
-        int count = selectStatic(state, map, origin, data);
+        int[] culled = new int[1];
+        int count = selectStatic(state, map, origin, data, culled);
         synchronized (state) {
             Integer known = state.byOrigin.get(origin);
             if (known != null) return known;
@@ -196,6 +208,7 @@ public final class PropLights {
             state.rows.add(data);
             state.rowOrigins.add(origin);
             state.lights += count;
+            state.culled += culled[0];
             int row = DYNAMIC_ROWS + state.rows.size() - 1;
             state.byOrigin.put(origin, row);
             return row;
@@ -203,12 +216,14 @@ public final class PropLights {
     }
 
     /** Selects a static origin's lights into {@code data} (a row); returns how many are local. */
-    private static int selectStatic(MapLights state, BundleMap map, Origin o, float[] data) {
+    private static int selectStatic(MapLights state, BundleMap map, Origin o, float[] data, int[] culled) {
         float[] cube = new float[18];
         boolean leaf = map.light().ambientAt(o.x(), o.y(), o.z(), cube);
         // Without ambient samples the cube-lit path is white; the lights add to that.
         if (!leaf) java.util.Arrays.fill(cube, 1f);
-        LightSelection.Result lights = LightSelection.select(state.grid, leaf, o.x(), o.y(), o.z(), sunOn ? o.sun() : 0f, cube);
+        LightVisibility vis = lightVisOn ? LightVisibility.ofList(state.sunTable, o.visList()) : null;
+        LightSelection.Result lights = LightSelection.select(state.grid, leaf, o.x(), o.y(), o.z(), sunOn ? o.sun() : 0f, vis, cube);
+        if (vis != null) culled[0] = vis.culled;
         fill(data, cube, lights.lights(), lights.weights(), lights.count());
         return lights.count();
     }
@@ -220,6 +235,19 @@ public final class PropLights {
      */
     public static void setSunOn(boolean on) {
         sunOn = on;
+        reselect();
+    }
+
+    /**
+     * {@code /src2mc_look lightvis on|off}: whether lights the visibility lists hide from a prop
+     * (behind a wall) are left out of its light set and cube. Refreshes like {@link #setSunOn}.
+     */
+    public static void setLightVisOn(boolean on) {
+        lightVisOn = on;
+        reselect();
+    }
+
+    private static void reselect() {
         generation++;
         List<MapLights> states;
         synchronized (MAPS) { states = new ArrayList<>(MAPS.values()); }
@@ -231,7 +259,13 @@ public final class PropLights {
             if (map == null) continue;
             synchronized (state) {
                 state.lights = 0;
-                for (int i = 0; i < state.rows.size(); i++) state.lights += selectStatic(state, map, state.rowOrigins.get(i), state.rows.get(i));
+                state.culled = 0;
+                int[] culled = new int[1];
+                for (int i = 0; i < state.rows.size(); i++) {
+                    culled[0] = 0;
+                    state.lights += selectStatic(state, map, state.rowOrigins.get(i), state.rows.get(i), culled);
+                    state.culled += culled[0];
+                }
                 state.uploaded = 0;
             }
         }
@@ -330,11 +364,16 @@ public final class PropLights {
             try {
                 float[] cube = moving.workCube;
                 float[] sun = moving.sunScratch;
-                boolean leaf = map.light().ambientAt(moving.workX, moving.workY, moving.workZ, cube, state.sunTable, sun);
+                boolean leaf = map.light().ambientAt(moving.workX, moving.workY, moving.workZ, cube, state.sunTable, sun, moving.workSamples);
+                LightVisibility vis = null;
+                if (lightVisOn && leaf && moving.workVis.setSamples(state.sunTable, moving.workSamples)) {
+                    vis = moving.workVis;
+                    vis.culled = 0;
+                }
                 // As staticRow: white when the map has no ambient samples.
                 if (!leaf) java.util.Arrays.fill(cube, 1f);
                 moving.workCount = LightSelection.select(state.grid, leaf, moving.workX, moving.workY, moving.workZ,
-                    sunOn && leaf ? sun[0] : 0f, cube, moving.workLights, moving.workRanks, moving.workWeights);
+                    sunOn && leaf ? sun[0] : 0f, vis, cube, moving.workLights, moving.workRanks, moving.workWeights);
             } catch (RuntimeException e) {
                 moving.workCount = 0;
                 java.util.Arrays.fill(moving.workCube, 1f);
@@ -564,12 +603,17 @@ public final class PropLights {
 
     /** Light sets of static props, the local lights they hold, and selections made for moving ones. */
     public static String status() {
-        long sets = 0, lights = 0, overflow = 0;
+        long sets = 0, lights = 0, overflow = 0, culled = 0;
+        boolean lists = false;
         synchronized (MAPS) {
-            for (MapLights state : MAPS.values()) { sets += state.rows.size(); lights += state.lights; overflow += state.overflow; }
+            for (MapLights state : MAPS.values()) {
+                sets += state.rows.size(); lights += state.lights; overflow += state.overflow; culled += state.culled;
+                lists |= state.sunTable != null && state.sunTable.hasLists();
+            }
         }
-        return String.format(java.util.Locale.ROOT, "%d light set(s), %.2f local lights each, %d re-selection(s) for moving props (%d/s, %.2f ms/s on the worker, %.2f ms/s on the render thread), sun %s%s",
+        return String.format(java.util.Locale.ROOT, "%d light set(s), %.2f local lights each, %d re-selection(s) for moving props (%d/s, %.2f ms/s on the worker, %.2f ms/s on the render thread), sun %s, lightvis %s%s%s",
             sets, sets == 0 ? 0.0 : (double) lights / sets, dynamicSelections, selectionsPerSecond, workerMsPerSecond, renderMsPerSecond, sunOn ? "on" : "off",
+            lightVisOn ? "on" : "off", !lists ? " (no visibility lists in the loaded maps)" : String.format(java.util.Locale.ROOT, " (%.2f lights culled per set avg)", sets == 0 ? 0.0 : (double) culled / sets),
             overflow == 0 ? "" : ", " + overflow + " static prop(s) over the " + (MAX_ROWS - DYNAMIC_ROWS) + "-set limit (no phong)");
     }
 }

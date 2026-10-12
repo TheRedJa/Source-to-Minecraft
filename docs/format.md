@@ -1353,28 +1353,44 @@ by the distance at which `|intensity| / attenuation` falls below 0.015 (HDR) or
 0.03, solving the linear or quadratic term, and 2,000 Source units when there
 is no distance falloff or no solution. A map without lights has no file.
 
-## 28. Sun visibility
+## 28. Sun and light visibility
 
 `maps/<map-id>/sunvis.s2sun` says where the map's skylight (world light type 3,
-section 27) reaches. Source applies the sun to a model only where a ray from its
-lighting point toward the sun meets sky before anything opaque; a prop lit with
-the sun and no such test is far too bright indoors. The file is written whenever
-`worldlights.s2wlit` is, so the lighting origins are available even without a
-skylight; a map with no type 3 light has every visibility byte 0. Map metadata
-references it through the optional `sunvis` field, right after `worldlights`.
-Little-endian, after the magic `S2SUN\0\0\0` and `u32` version 1:
+section 27) reaches, and which local lights each lit point can see. Source
+applies the sun to a model only where a ray from its lighting point toward the
+sun meets sky before anything opaque, and a local light only where nothing
+opaque stands between the point and the light's origin; a prop lit without
+these tests is far too bright indoors and glows with lamps from the next room.
+The file is written whenever `worldlights.s2wlit` is, so the lighting origins
+are available even without a skylight; a map with no type 3 light has every
+sun byte 0. Map metadata references it through the optional `sunvis` field,
+right after `worldlights`. Little-endian, after the magic `S2SUN\0\0\0` and
+`u32` version 2 (version 1 had no light count and no lists):
 
-- `u32` sample count, then that many `u8` visibilities, one per ambient sample
-  of section 22, in exactly the order section 22 stores its samples (leaf order,
-  leaf by leaf). 255 means the sun is visible, 0 not; the exporter traces one
-  ray, so only those two values occur, but a reader should treat the byte as a
-  0 to 255 fraction.
+- `u32` light count: the number of lights in `worldlights.s2wlit`, whose
+  indices the lists below use.
+- `u32` sample count, then that many `u8` sun visibilities, one per ambient
+  sample of section 22, in exactly the order section 22 stores its samples (leaf
+  order, leaf by leaf). 255 means the sun is visible, 0 not; the exporter traces
+  one ray, so only those two values occur, but a reader should treat the byte as
+  a 0 to 255 fraction.
 - `u32` prop count, then that many 16-byte records, one per entry of the prop
   placement table (section 8), in its order (ascending stable ID, the order of
   the per-prop vertex light records of section 22; this includes entity props,
   not only the `sprp` lump): `f32` x, y, z, the prop's lighting origin in
   map-local Minecraft block space (the convention of section 22's sample
-  positions, 32 Source units per block); `u8` visibility as above; 3 zero bytes.
+  positions, 32 Source units per block); `u8` sun visibility as above; 3 zero
+  bytes.
+- Then sample count + prop count light lists, the samples' first (section 22
+  order), then the props' (placement order). Each is a `u16` count `n` followed
+  by `n` `u16` light indices, ascending, without duplicates. A list holds every
+  light of type 0 (surface), 1 (point), 2 (spot) or 4 (quake), of any style,
+  whose radius reaches the point (distance to the light's origin at most its
+  radius, section 27 radius in Source units, after the load-time fixup) and
+  whose origin the point can see. A spot light's cone is not tested: the reader
+  does that. Skylights and sky ambient lights are never listed. The exporter
+  fails when there are more than 65,535 lights or a list would be longer than
+  that.
 
 Lighting origin of a prop, in Source space before conversion: the `LightingOrigin`
 of its `sprp` record when the record sets `STATIC_PROP_USE_LIGHTING_ORIGIN`
@@ -1382,7 +1398,7 @@ of its `sprp` record when the record sets `STATIC_PROP_USE_LIGHTING_ORIGIN`
 model's root transform) scaled, rotated by the prop's angles and moved to its
 origin like any model point.
 
-Trace rule, reproducing vrad's `TestLine_DoesHitSky` (`utils/vrad/trace.cpp`;
+Sun rule, reproducing vrad's `TestLine_DoesHitSky` (`utils/vrad/trace.cpp`;
 environment built by `AddBrushesForRayTrace`): from the point, a ray of 65,536
 Source units goes along the negation of the skylight's stored direction. The
 obstacles are the world model's (model 0) brushes whose contents include any of
@@ -1394,3 +1410,12 @@ none. Entity brushes, static props and displacement surfaces do not occlude
 beyond what their brush sides do. A start point inside a brush is moved up along
 +Z in Source units, one at a time, up to 16 times, until it is outside; if it is
 still inside, the visibility is 0. With several type 3 lights the first is used.
+
+Light rule, reproducing vrad's `TestLine` (same file): the segment from the
+point to the light's origin, over the same brushes, is blocked by any brush it
+enters, sky sides included (vrad adds sky faces to the ray environment as
+blockers for local lights). It ends 1 unit short of the origin, so a lamp set
+flush into a ceiling brush is not hidden by the brush it sits in; a lamp buried
+deeper is blocked, as it is in vrad. The start point is moved out of a brush as
+for the sun, and a point still inside has an empty list. Static props, which
+vrad also lets block local lights, and displacement surfaces are not traced.

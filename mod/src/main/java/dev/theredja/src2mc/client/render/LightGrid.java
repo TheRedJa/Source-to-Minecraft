@@ -24,8 +24,14 @@ final class LightGrid {
     /** Per cell, its lights' indices are {@code items[start[c] .. start[c + 1])}. */
     private final int[] start, items;
 
-    LightGrid(List<Light> lights) {
+    /** Per light, its index in the world light table (the visibility lists' numbering); null: the same as its own. */
+    private final int[] worldIndex;
+
+    LightGrid(List<Light> lights) { this(lights, null); }
+
+    LightGrid(List<Light> lights, int[] worldIndex) {
         this.lights = lights;
+        this.worldIndex = worldIndex;
         int n = lights.size();
         boolean[] ranged = new boolean[n];
         double lo0 = Double.POSITIVE_INFINITY, lo1 = lo0, lo2 = lo0, hi0 = Double.NEGATIVE_INFINITY, hi1 = hi0, hi2 = hi0;
@@ -115,6 +121,9 @@ final class LightGrid {
     }
 
     int[] items() { return items; }
+
+    /** The world light table index of grid light {@code i}. */
+    int worldIndex(int i) { return worldIndex == null ? i : worldIndex[i]; }
 
     int size() { return lights.size(); }
 }

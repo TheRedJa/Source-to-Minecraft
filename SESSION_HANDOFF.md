@@ -22,7 +22,7 @@ Part 2 (INFRA in-world main menu), all user-tested OK:
 Open: HL2/Portal menus (2D GameUI over background maps) not done; options lists on the phone not drawn (MC screens
 instead, user decision); list scrollbar not drawn; progress only recorded on level-change arrivals.
 
-## IN PROGRESS: Source look, stage 3 "models" (phong, rimlight, world lights). Stage 2 below DONE, committed 12ab766 (DEV-0.45.0)
+## DONE: Source look, stage 3 "models" (phong, rimlight, world lights). Stage 2 below DONE, committed 12ab766 (DEV-0.45.0)
 
 Research 2026-10-12 (refs R=~/projects/minecraft/tools/source_refs; ASW stdshaders S=R/asw/repo/src/materialsystem/stdshaders):
 - Phong reference = ASW only (SDK2013 has no phong PS). Gate (S/vertexlitgeneric_dx9_helper.cpp:43-66): $phong 1 and
@@ -71,7 +71,15 @@ folded into cube (istudiorender.h:215), non-phong moving props lit per vertex, 0
 lights), selection on a worker + LightGrid, toggle /src2mc_look sun.
 User test DEV-0.52.0 (2026-10-12): dark props exactly right, sun on better, highlights same, moving props OK, spikes
 gone, rim visible up close (subtle). Open: lamp light leaks through solid walls onto props (no visibility test for
-local lights; noclip has none either).
+local lights; noclip has none either). Committed be2f2a5.
+DEV-0.53.0 (built, installed, validated, NOT tested in game): section 28 v2 adds per ambient sample / per prop lists of
+visible lights (vrad TestLine rule: opaque model-0 brushes + sky block; static props/displacements not traced; segment
+ends 1 unit short of the light), BVH tracer (sunvis.rs). Mod LightVisibility weights lights (props: own list;
+moving: sample weights), hidden lights never folded into cube, toggle /src2mc_look lightvis. Offline furnace dark third
+still ~2x vhv (cube coarseness), visibility removed half the remaining excess.
+User 2026-10-12: lightvis fixes the wall leak; transitions great; ceiling-light hotspots on big phong props fixed by
+per-vertex light attenuation like Source's phong_vs20 (DEV-0.54.0, toggles lightatten vertex|pixel, phongdebug);
+user: "Looks good now". Stage 3 phong/rim/world lights user-confirmed.
 Test bundles now grouped (2026-10-12): source_refs/tools/export_all.sh exports + installs infra (main_menu, office, tunnel4,
 furnace, metro, waterplant; 2.4 GB), portal (escape_02, testchmb_a_00), portal2 (wakeup, bts4, a3_01, a3_end); old
 per-map exports deleted. All validated (big bundles need `./gradlew -I ~/projects/minecraft/tools/source_refs/tools/bigheap.gradle` with Test maxHeapSize 12g).

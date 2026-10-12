@@ -53,8 +53,14 @@ public final class LookCommands {
             .then(onOff(literal("rimlight"), value -> dev.theredja.src2mc.client.render.PropLights.rimOn = value, "phong rim light"))
             .then(onOff(literal("proplights"), value -> dev.theredja.src2mc.client.render.PropLights.propLightsOn = value, "world lights on non-phong moving props (phong always uses them)"))
             .then(onOff(literal("sun"), value -> dev.theredja.src2mc.client.render.PropLights.setSunOn(value), "skylight on props (off: excluded everywhere)"))
+            .then(onOff(literal("lightvis"), value -> dev.theredja.src2mc.client.render.PropLights.setLightVisOn(value), "hide lights behind walls from props (visibility lists)"))
             .then(onOff(literal("srgb"), value -> dev.theredja.src2mc.client.render.SurfaceEffects.srgbCurve = value, "exact sRGB curve"))
             .then(onOff(literal("dither"), value -> dev.theredja.src2mc.client.render.SurfaceEffects.ditherAll = value, "dither on every path"))
+            .then(literal("lightatten")
+                .then(literal("vertex").executes(context -> { dev.theredja.src2mc.client.render.PropLights.lightAttenVertex = true; return reply(context.getSource(), "src2mc phong light attenuation per vertex (Source)"); }))
+                .then(literal("pixel").executes(context -> { dev.theredja.src2mc.client.render.PropLights.lightAttenVertex = false; return reply(context.getSource(), "src2mc phong light attenuation per pixel"); })))
+            .then(literal("phongdebug")
+                .then(phongDebug("off", 0)).then(phongDebug("diffuse", 1)).then(phongDebug("spec", 2)).then(phongDebug("lights", 3)))
             .then(literal("bump")
                 .then(literal("on").executes(context -> bump(context.getSource(), true)))
                 .then(literal("off").executes(context -> bump(context.getSource(), false))))
@@ -92,6 +98,13 @@ public final class LookCommands {
         return reply(source, value == -1 ? "src2mc film grain scale back to the map's own" : "src2mc film grain scale held at " + value);
     }
 
+    private static LiteralArgumentBuilder<CommandSourceStack> phongDebug(String name, int mode) {
+        return literal(name).executes(context -> {
+            dev.theredja.src2mc.client.render.PropLights.phongDebug = mode;
+            return reply(context.getSource(), "src2mc phong debug " + name);
+        });
+    }
+
     private static int status(CommandSourceStack source) {
         LookClient.Frame frame = LookClient.frame();
         StringBuilder text = new StringBuilder("src2mc look: post ").append(SourcePost.enabled ? "on" : "off")
@@ -112,6 +125,8 @@ public final class LookCommands {
             .append(", phong ").append(dev.theredja.src2mc.client.render.PropLights.phongOn ? "on" : "off")
             .append(", rimlight ").append(dev.theredja.src2mc.client.render.PropLights.rimOn ? "on" : "off")
             .append(", proplights (non-phong) ").append(dev.theredja.src2mc.client.render.PropLights.propLightsOn ? "on" : "off")
+            .append(", lightatten ").append(dev.theredja.src2mc.client.render.PropLights.lightAttenVertex ? "vertex" : "pixel")
+            .append(", phongdebug ").append(new String[] {"off", "diffuse", "spec", "lights"}[dev.theredja.src2mc.client.render.PropLights.phongDebug])
             .append("\n").append(SourcePost.status());
         if (IrisCompat.shaderPackInUse()) text.append("\na shader pack is in use, which skips Source's post-processing");
         if (frame == null) {

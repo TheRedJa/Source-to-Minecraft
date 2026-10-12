@@ -71,6 +71,8 @@ flat in int envRow;
 in vec3 surface;
 in vec3 blockLight;
 in vec3 vertexLocal;
+in vec4 lightAtten0;
+in vec4 lightAtten1;
 
 out vec4 fragColor;
 
@@ -141,6 +143,26 @@ bool localLight(int row, int i, vec3 p, out vec3 toLight, out vec3 color) {
     }
     color = c.rgb * atten;
     return atten > 0.0;
+}
+
+// localLight with the attenuation the vertex shader computed and interpolated (Source's phong), the
+// direction still per pixel; PhongToggles.w 0 evaluates it all per pixel instead.
+bool phongLight(int row, int i, vec3 p, out vec3 toLight, out vec3 color) {
+    if (PhongToggles.w < 0.5) return localLight(row, i, p, toLight, color);
+    float atten = i < 4 ? lightAtten0[i] : lightAtten1[i - 4];
+    int at = 6 + 5 * i;
+    vec4 a = lightTexel(row, at);
+    toLight = vec3(0.0, 1.0, 0.0);
+    color = vec3(0.0);
+    if (a.w < 0.5 || atten <= 0.0) return false;
+    if (int(a.w + 0.5) - 1 == 3) {
+        toLight = -lightTexel(row, at + 2).xyz;
+    } else {
+        vec3 delta = a.xyz + MapOffset - p;
+        toLight = delta / max(length(delta), 1.0e-4);
+    }
+    color = lightTexel(row, at + 1).rgb * atten;
+    return true;
 }
 
 // A phong warp or light warp ramp at uv, clamped inside its own rectangle of the sheet: tile is its
@@ -304,6 +326,7 @@ void main() {
 
     vec3 light = bakedLight.w < 0.5 ? lightmap(layer.xyz, detailWeights) : bakedLight.rgb;
     vec3 phongSpecular = vec3(0.0);
+    vec3 localDiffuse = vec3(0.0);
     if (phong) {
         vec4 s9 = setting(9), s10 = setting(10), s11 = setting(11), s12 = setting(12), s13 = setting(13), s14 = setting(14);
         vec3 n = normalize(tbn * tangentNormal);
@@ -326,11 +349,13 @@ void main() {
         for (int i = 0; i < 8; i++) {
             if (i >= lightCount) break;
             vec3 l, c;
-            if (!localLight(lightRow, i, worldOffset, l, c)) continue;
+            if (!phongLight(lightRow, i, worldOffset, l, c)) continue;
             float nDotL = dot(n, l);
             float lit = halfLambert ? clamp(nDotL * 0.5 + 0.5, 0.0, 1.0) : clamp(nDotL, 0.0, 1.0);
             // A light warp ramps the unsquared half-Lambert term; without one it is squared.
-            light += c * (s14.z > 0.5 ? 2.0 * warp(s14, vec2(lit, 0.5)) : vec3(halfLambert ? lit * lit : lit));
+            vec3 term = c * (s14.z > 0.5 ? 2.0 * warp(s14, vec2(lit, 0.5)) : vec3(halfLambert ? lit * lit : lit));
+            light += term;
+            localDiffuse += term;
             float lDotR = clamp(dot(reflected, l), 0.0, 1.0);
             float highlight = lDotR > 0.0 ? pow(lDotR, exponent) : 0.0;
             vec3 s = vec3(highlight);
@@ -362,7 +387,10 @@ void main() {
     }
     if (mode == 5 || mode == 6) diffuse += factor * detail.rgb;
     vec3 color = diffuse * Exposure + base * blockLight + phongSpecular * Exposure;
-    if (effects) {
+    if (phong && DebugToggles.w > 0.5) {
+        // /src2mc_look phongdebug: one term of the phong path alone.
+        color = (DebugToggles.w < 1.5 ? diffuse : DebugToggles.w < 2.5 ? phongSpecular : localDiffuse) * Exposure;
+    } else if (effects) {
         color += reflection(tangentNormal, tbn, layer.a) * Exposure;
     }
     if (SourceFog.w > 0.5) {

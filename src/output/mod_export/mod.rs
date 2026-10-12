@@ -152,9 +152,9 @@ pub struct Prop {
     /// A static prop's `.vhv` light, one colour per mesh vertex (format
     /// section 22); `None` lights it by the ambient cube.
     pub vertex_light: Option<Vec<[u8; 3]>>,
-    /// Lighting origin in block space and the sun's visibility there
+    /// Lighting origin in block space and the sun and lights visible there
     /// (format section 28).
-    pub sun: ([f32; 3], u8),
+    pub sun: crate::output::sunvis::PropSun,
 }
 
 /// A prop the map's logic changes (format section 18).
@@ -245,8 +245,10 @@ pub struct LightExport {
     pub ambient: Option<crate::output::light::AmbientExport>,
     /// The encoded world lights (section 27); empty when the map has none.
     pub world_lights: Vec<u8>,
-    /// The sun's visibility at each ambient sample (section 28).
-    pub sun_samples: Vec<u8>,
+    /// What each ambient sample sees of the sun and the local lights (section 28).
+    /// How many world lights section 27 holds, which the visibility lists index.
+    pub light_count: usize,
+    pub sun_samples: Vec<crate::output::sunvis::PointVisibility>,
 }
 
 /// One moving entity, cut out of the world and moved into cells of its own.
@@ -745,6 +747,7 @@ pub fn from_conversion(
         sky,
         skybox: skybox_table,
         light: Some(LightExport {
+            light_count: map.world_lights.len(),
             sun_samples: sun_samples(&sun_tracer, map, &ambient),
             ambient,
             atlas: light_atlas,
@@ -763,13 +766,13 @@ pub fn from_conversion(
     })
 }
 
-/// The sun's visibility per section 22 ambient sample, or none when the
+/// The sun and light visibility per section 22 ambient sample, or none when the
 /// section has no samples.
 fn sun_samples(
     tracer: &crate::output::sunvis::SunTracer,
     map: &crate::bsp::Map,
     ambient: &Option<crate::output::light::AmbientExport>,
-) -> Vec<u8> {
+) -> Vec<crate::output::sunvis::PointVisibility> {
     if ambient.is_some() {
         crate::output::sunvis::sample_visibility(tracer, map)
     } else {

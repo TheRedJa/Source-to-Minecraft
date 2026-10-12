@@ -267,7 +267,7 @@ final class BundleSchemaValidator {
             String sunPath = exactPath(map, "sunvis", prefix + "sunvis.s2sun");
             referenced.add(sunPath);
             ZipEntry sunEntry = required(entries, sunPath);
-            limit(sunEntry.getSize(), 16L + 2L * SunVisibilityTable.MAX_ENTRIES + 16L * SunVisibilityTable.MAX_ENTRIES, "sun visibility file size");
+            limit(sunEntry.getSize(), 20L + 2L * SunVisibilityTable.MAX_ENTRIES + 16L * SunVisibilityTable.MAX_ENTRIES + (1L << 30), "sun visibility file size");
             try {
                 sunVisibility = SunVisibilityTable.parse(zip.getInputStream(sunEntry).readAllBytes());
             } catch (IllegalArgumentException e) {
@@ -276,6 +276,10 @@ final class BundleSchemaValidator {
             if (light == null) fail(BundleErrorCode.INVALID_SCHEMA, "sun visibility requires the map's light data");
             if (sunVisibility.sampleCount() != light.sampleCount()) fail(BundleErrorCode.INVALID_SCHEMA, "sun visibility sample count does not match the light data");
             if (sunVisibility.propCount() != propRecords.size()) fail(BundleErrorCode.INVALID_SCHEMA, "sun visibility prop count does not match the placement table");
+            if (sunVisibility.hasLists()) {
+                int worldLightCount = worldLights == null ? 0 : worldLights.lights().size();
+                if (sunVisibility.lightCount() != worldLightCount) fail(BundleErrorCode.INVALID_SCHEMA, "sun visibility light count " + sunVisibility.lightCount() + " does not match the world light table's " + worldLightCount);
+            }
         }
         String screens = null;
         if (map.has("screens")) {

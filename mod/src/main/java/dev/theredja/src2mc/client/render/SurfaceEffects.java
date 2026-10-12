@@ -94,8 +94,8 @@ public final class SurfaceEffects {
         GlStateManager._activeTexture(active);
         shader.safeGetUniform("DetailArray").set(DETAIL_UNIT);
         shader.safeGetUniform("SurfaceToggles").set(enabled ? 1f : 0f, detailOn ? 1f : 0f, blendOn ? 1f : 0f, selfillumOn ? 1f : 0f);
-        shader.safeGetUniform("PhongToggles").set(PropLights.phongOn ? 1f : 0f, PropLights.rimOn ? 1f : 0f, PropLights.propLightsOn ? 1f : 0f, 0f);
-        shader.safeGetUniform("DebugToggles").set(lightOnly ? 1f : 0f, ditherAll ? 1f : 0f, srgbCurve ? 1f : 0f, 0f);
+        shader.safeGetUniform("PhongToggles").set(PropLights.phongOn ? 1f : 0f, PropLights.rimOn ? 1f : 0f, PropLights.propLightsOn ? 1f : 0f, PropLights.lightAttenVertex ? 1f : 0f);
+        shader.safeGetUniform("DebugToggles").set(lightOnly ? 1f : 0f, ditherAll ? 1f : 0f, srgbCurve ? 1f : 0f, PropLights.phongDebug);
     }
 
     /** Drops every map's textures; a new bundle generation brings new tables. */

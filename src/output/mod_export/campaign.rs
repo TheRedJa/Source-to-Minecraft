@@ -3,8 +3,8 @@
 use super::*;
 
 /// Logical textures by content ID: image, bump, blend, phong, and room-only.
-/// A prop's lighting origin in block space and the sun's visibility there.
-type SunRecord = ([f32; 3], u8);
+/// A prop's lighting origin in block space and the sun and lights it sees.
+type SunRecord = crate::output::sunvis::PropSun;
 
 type AtlasAssets = BTreeMap<
     String,
@@ -215,10 +215,10 @@ pub fn write_campaign(
         let has_world_lights = map.light.as_ref().is_some_and(|l| !l.world_lights.is_empty());
         if let Some(light) = map.light.as_ref().filter(|_| has_world_lights) {
             archive.add(format!("{prefix}/worldlights.s2wlit"), light.world_lights.clone())?;
-            let props: Vec<SunRecord> = prop_light.iter().map(|(_, _, sun)| *sun).collect();
+            let props: Vec<SunRecord> = prop_light.iter().map(|(_, _, sun)| sun.clone()).collect();
             archive.add(
                 format!("{prefix}/sunvis.s2sun"),
-                crate::output::sunvis::encode(&light.sun_samples, &props)?,
+                crate::output::sunvis::encode(light.light_count, &light.sun_samples, &props)?,
             )?;
         }
         let has_occlusion = map.occlusion.is_some();

@@ -207,4 +207,94 @@ final class LightSelectionTest {
         assertEquals(0.5f, LightSelection.fresnel(1f - (float) Math.sqrt(0.5), ranges), 1e-5f);
         assertTrue(LightSelection.fresnel(0.5f, ranges) < 0.5f);
     }
+
+    private static dev.theredja.src2mc.bundle.SunVisibilityTable table(int[]... lists) {
+        // Lists: samples first (two), then one prop; built through the v2 constructor.
+        int[] offsets = new int[lists.length + 1];
+        int total = 0;
+        for (int[] list : lists) total += list.length;
+        char[] indices = new char[total];
+        int n = 0;
+        for (int i = 0; i < lists.length; i++) {
+            for (int light : lists[i]) indices[n++] = (char) light;
+            offsets[i + 1] = n;
+        }
+        return new dev.theredja.src2mc.bundle.SunVisibilityTable(new byte[2], new float[3], new byte[1], 8, offsets, indices);
+    }
+
+    @Test
+    void aHiddenLightIsNeitherLocalNorInTheCube() {
+        // Two lights 1 and 2 blocks away; the prop's list holds only world light 1 (the second).
+        List<Light> lights = List.of(point(1, 0, 0, 1, 0, 0), point(0, 2, 0, 1, 0, 0));
+        float[] cube = new float[18];
+        LightVisibility vis = LightVisibility.ofList(table(new int[0], new int[0], new int[] {1}), 2);
+        LightSelection.Result result = LightSelection.select(new LightGrid(lights), true, 0, 0, 0, 1f, vis, cube);
+        assertEquals(1, result.count());
+        assertEquals(2f, result.lights()[0].origin()[1]);
+        assertEquals(1, vis.culled);
+        assertEquals(0f, cube[0]);
+    }
+
+    @Test
+    void aHiddenLightPushedOutOfTheSlotsDoesNotLeakIntoTheCube() {
+        // Five lights; the farthest (x = 5, world index 4) is hidden: it would have joined the cube.
+        List<Light> lights = List.of(point(1, 0, 0, 1, 0, 0), point(2, 0, 0, 1, 0, 0), point(3, 0, 0, 1, 0, 0),
+            point(4, 0, 0, 1, 0, 0), point(5, 0, 0, 1, 0, 0));
+        float[] visible = new float[18], hidden = new float[18];
+        LightSelection.select(new LightGrid(lights), true, 0, 0, 0, 1f, null, visible);
+        assertTrue(visible[0] > 0f);
+        LightVisibility vis = LightVisibility.ofList(table(new int[0], new int[0], new int[] {0, 1, 2, 3}), 2);
+        LightSelection.select(new LightGrid(lights), true, 0, 0, 0, 1f, vis, hidden);
+        assertEquals(0f, hidden[0]);
+    }
+
+    @Test
+    void gridIndicesMapToWorldLightIndices() {
+        // Grid light 0 is world light 5, grid light 1 is world light 6; only 6 is visible.
+        List<Light> lights = List.of(point(1, 0, 0, 1, 0, 0), point(2, 0, 0, 1, 0, 0));
+        dev.theredja.src2mc.bundle.SunVisibilityTable table = new dev.theredja.src2mc.bundle.SunVisibilityTable(
+            new byte[0], new float[3], new byte[1], 8, new int[] {0, 1}, new char[] {6});
+        LightSelection.Result result = LightSelection.select(new LightGrid(lights, new int[] {5, 6}), true, 0, 0, 0, 1f,
+            LightVisibility.ofList(table, 0), new float[18]);
+        assertEquals(1, result.count());
+        assertEquals(2f, result.lights()[0].origin()[0]);
+    }
+
+    @Test
+    void movingPropsWeightLightsByTheSamplesThatSeeThem() {
+        // Samples at x 1 and 3 weigh 0.5 each at x 2; only sample 0 sees world light 0.
+        dev.theredja.src2mc.bundle.LightTable light = new dev.theredja.src2mc.bundle.LightTable(List.of(), 0, new float[] {1, 0, 0, 0},
+            new int[] {-1, -2}, new int[] {0, 0}, new int[] {2, 0}, new float[] {1, 0, 0, 3, 0, 0}, new float[36], new byte[0][]);
+        dev.theredja.src2mc.bundle.SunVisibilityTable table = new dev.theredja.src2mc.bundle.SunVisibilityTable(
+            new byte[2], new float[3], new byte[1], 8, new int[] {0, 1, 1, 1}, new char[] {0});
+        dev.theredja.src2mc.bundle.LightTable.SampleWeights samples = new dev.theredja.src2mc.bundle.LightTable.SampleWeights();
+        float[] cube = new float[18];
+        light.ambientAt(2, 0, 0, cube, table, new float[1], samples);
+        LightVisibility vis = LightVisibility.ofSamples();
+        assertTrue(vis.setSamples(table, samples));
+        assertEquals(0.5f, vis.weight(0), 1e-5f);
+        assertEquals(0f, vis.weight(1));
+        // The weight scales the rank and the intensity the row holds.
+        List<Light> lights = List.of(point(1, 0, 0, 1, 0, 0));
+        LightSelection.Result result = LightSelection.select(new LightGrid(lights), true, 0, 0, 0, 1f, vis, new float[18]);
+        assertEquals(0.5f, result.weights()[0], 1e-5f);
+    }
+
+    @Test
+    void aFoldedLightIsScaledByItsVisibleShare() {
+        List<Light> lights = List.of(point(1, 0, 0, 1, 0, 0), point(2, 0, 0, 1, 0, 0), point(3, 0, 0, 1, 0, 0),
+            point(4, 0, 0, 1, 0, 0), point(5, 0, 0, 1, 0, 0));
+        dev.theredja.src2mc.bundle.LightTable light = new dev.theredja.src2mc.bundle.LightTable(List.of(), 0, new float[] {1, 0, 0, 0},
+            new int[] {-1, -2}, new int[] {0, 0}, new int[] {2, 0}, new float[] {1, 0, 0, 3, 0, 0}, new float[36], new byte[0][]);
+        // Light 4 (the one folded) is seen by sample 0 only; the others by both.
+        dev.theredja.src2mc.bundle.SunVisibilityTable table = new dev.theredja.src2mc.bundle.SunVisibilityTable(
+            new byte[2], new float[3], new byte[1], 8, new int[] {0, 5, 9, 9}, new char[] {0, 1, 2, 3, 4, 0, 1, 2, 3});
+        dev.theredja.src2mc.bundle.LightTable.SampleWeights samples = new dev.theredja.src2mc.bundle.LightTable.SampleWeights();
+        light.ambientAt(2, 0, 0, new float[18], table, new float[1], samples);
+        LightVisibility vis = LightVisibility.ofSamples();
+        vis.setSamples(table, samples);
+        float[] cube = new float[18];
+        LightSelection.select(new LightGrid(lights), true, 0, 0, 0, 1f, vis, cube);
+        assertEquals(0.5f / 25f, cube[0], 1e-6f);
+    }
 }

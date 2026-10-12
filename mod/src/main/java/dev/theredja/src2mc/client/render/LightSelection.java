@@ -42,9 +42,22 @@ final class LightSelection {
         List<Light> lights = new ArrayList<>();
         if (table == null) return lights;
         for (Light light : table.lights()) {
-            if (light.style() == 0 && light.type() != WorldLightTable.TYPE_SKY_AMBIENT) lights.add(light);
+            if (isEligible(light)) lights.add(light);
         }
         return lights;
+    }
+
+    /** The world light table index of each light {@link #eligible} returns, in its order. */
+    static int[] eligibleIndices(WorldLightTable table) {
+        if (table == null) return new int[0];
+        int[] indices = new int[table.lights().size()];
+        int n = 0;
+        for (int i = 0; i < indices.length; i++) if (isEligible(table.lights().get(i))) indices[n++] = i;
+        return java.util.Arrays.copyOf(indices, n);
+    }
+
+    private static boolean isEligible(Light light) {
+        return light.style() == 0 && light.type() != WorldLightTable.TYPE_SKY_AMBIENT;
     }
 
     /**
@@ -54,9 +67,14 @@ final class LightSelection {
      * the skylight is weighted by.
      */
     static Result select(LightGrid grid, boolean leafCube, double x, double y, double z, float sun, float[] cube) {
+        return select(grid, leafCube, x, y, z, sun, null, cube);
+    }
+
+    /** {@link #select} with {@code vis} deciding how much of each non-sky light reaches the point (null: all of it). */
+    static Result select(LightGrid grid, boolean leafCube, double x, double y, double z, float sun, LightVisibility vis, float[] cube) {
         Light[] slots = new Light[MAX_LOCAL];
         float[] weights = new float[MAX_LOCAL];
-        int count = select(grid, leafCube, x, y, z, sun, cube, slots, new float[MAX_LOCAL], weights);
+        int count = select(grid, leafCube, x, y, z, sun, vis, cube, slots, new float[MAX_LOCAL], weights);
         return count == 0 ? Result.NONE : new Result(slots, weights, count);
     }
 
@@ -65,22 +83,22 @@ final class LightSelection {
      * {@link #MAX_LOCAL} long each, overwritten), for the moving props; returns how many of
      * {@code slots} are set.
      */
-    static int select(LightGrid grid, boolean leafCube, double x, double y, double z, float sun, float[] cube,
+    static int select(LightGrid grid, boolean leafCube, double x, double y, double z, float sun, LightVisibility vis, float[] cube,
                       Light[] slots, float[] ranks, float[] weights) {
         java.util.Arrays.fill(slots, null);
         java.util.Arrays.fill(ranks, 0f);
         java.util.Arrays.fill(weights, 0f);
-        for (int always : grid.always) consider(grid.lights.get(always), leafCube, x, y, z, sun, cube, slots, ranks, weights);
+        for (int always : grid.always) consider(grid.lights.get(always), grid.worldIndex(always), vis, leafCube, x, y, z, sun, cube, slots, ranks, weights);
         int[] items = grid.items();
         for (int n = grid.cellStart(x, y, z), end = grid.cellEnd(x, y, z); n < end; n++) {
-            consider(grid.lights.get(items[n]), leafCube, x, y, z, sun, cube, slots, ranks, weights);
+            consider(grid.lights.get(items[n]), grid.worldIndex(items[n]), vis, leafCube, x, y, z, sun, cube, slots, ranks, weights);
         }
         int count = 0;
         while (count < MAX_LOCAL && slots[count] != null) count++;
         return count;
     }
 
-    private static void consider(Light light, boolean leafCube, double x, double y, double z, float sun, float[] cube,
+    private static void consider(Light light, int worldIndex, LightVisibility vis, boolean leafCube, double x, double y, double z, float sun, float[] cube,
                                  Light[] slots, float[] ranks, float[] weights) {
         if (leafCube && (light.flags() & WorldLightTable.FLAG_IN_AMBIENT_CUBE) != 0) return;
         float weight = 1f;
@@ -92,6 +110,11 @@ final class LightSelection {
         // Out of range falls to 0 below anyway; skipped before the square root and the gray.
         if (light.type() != WorldLightTable.TYPE_SKYLIGHT && light.type() != WorldLightTable.TYPE_QUAKE
             && dx * dx + dy * dy + dz * dz > (double) light.radius() * light.radius()) return;
+        if (vis != null && light.type() != WorldLightTable.TYPE_SKYLIGHT) {
+            // Behind a wall, in the cube as much as in a slot: the visible share scales intensity and rank.
+            weight = vis.weight(worldIndex);
+            if (!(weight > 0f)) return;
+        }
         float rank = (float) (distanceFalloff(light, dx, dy, dz) * weight
             * (light.intensity()[0] * GRAY[0] + light.intensity()[1] * GRAY[1] + light.intensity()[2] * GRAY[2]));
         if (!(rank > 0f)) return;
