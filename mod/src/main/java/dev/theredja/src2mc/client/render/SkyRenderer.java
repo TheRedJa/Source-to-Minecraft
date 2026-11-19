@@ -60,7 +60,6 @@ public final class SkyRenderer {
     private static boolean enabled = true, roomEnabled = true;
     /** Each map's 3D skybox, cut on a worker, then uploaded. Keyed by identity: see BundleMap#hashCode. */
     private static final Map<BundleMap, RoomSlot> ROOMS = new java.util.IdentityHashMap<>();
-    private static RoomTarget roomTarget;
     private static VertexBuffer cube;
     private static int drawnRooms;
     private static String roomState = "none";
@@ -119,21 +118,37 @@ public final class SkyRenderer {
      * the map, so a tower standing out through a sky brush stays whole, while the world the map was
      * placed in stays hidden behind the sky.
      */
-    private static final DepthSnapshot BEFORE_MAP = new DepthSnapshot(), AFTER_MAP = new DepthSnapshot(), BEFORE_GLASS = new DepthSnapshot();
-    /** How many of the three snapshots this frame has taken, in order; the sky is drawn only after all three. */
-    private static int snapshots;
+    private static final class ViewSky {
+        final DepthSnapshot beforeMap = new DepthSnapshot(), afterMap = new DepthSnapshot(), beforeGlass = new DepthSnapshot();
+        /** How many of the three snapshots this frame has taken, in order; the sky is drawn only after all three. */
+        int snapshots;
+        RoomTarget room;
+    }
+
+    /** The player's view and the camera views ({@link dev.theredja.src2mc.client.view.SecondaryView}) each keep their own. */
+    private static final ViewSky MAIN_SKY = new ViewSky(), SECONDARY_SKY = new ViewSky();
+
+    private static ViewSky sky() { return dev.theredja.src2mc.client.view.SecondaryView.active() ? SECONDARY_SKY : MAIN_SKY; }
+
+    /** The target the current view draws into. */
+    private static com.mojang.blaze3d.pipeline.RenderTarget viewTarget() {
+        return dev.theredja.src2mc.client.view.SecondaryView.active() ? dev.theredja.src2mc.client.view.SecondaryView.target()
+            : Minecraft.getInstance().getMainRenderTarget();
+    }
 
     @SubscribeEvent(priority = EventPriority.HIGHEST)
     public static void beforeMap(RenderLevelStageEvent event) {
         if (event.getStage() != MapSurfaceRenderer.opaqueStage() || IrisCompat.renderingShadowPass()) return;
-        snapshots = 0;
-        if (prepare() && copy(BEFORE_MAP)) snapshots = 1;
+        ViewSky sky = sky();
+        sky.snapshots = 0;
+        if (prepare() && copy(sky.beforeMap)) sky.snapshots = 1;
     }
 
     @SubscribeEvent(priority = EventPriority.LOWEST)
     public static void afterMap(RenderLevelStageEvent event) {
         if (event.getStage() != MapSurfaceRenderer.opaqueStage() || IrisCompat.renderingShadowPass()) return;
-        if (snapshots == 1 && copy(AFTER_MAP)) snapshots = 2;
+        ViewSky sky = sky();
+        if (sky.snapshots == 1 && copy(sky.afterMap)) sky.snapshots = 2;
     }
 
     /**
@@ -143,9 +158,11 @@ public final class SkyRenderer {
     @SubscribeEvent(priority = EventPriority.HIGHEST)
     public static void beforeGlass(RenderLevelStageEvent event) {
         if (event.getStage() != RenderLevelStageEvent.Stage.AFTER_PARTICLES || IrisCompat.renderingShadowPass()) return;
-        if (snapshots != 2 || !copy(BEFORE_GLASS)) return;
-        snapshots = 3;
-        if (!IrisCompat.shaderPackInUse()) draw(event, true);
+        ViewSky sky = sky();
+        if (sky.snapshots != 2 || !copy(sky.beforeGlass)) return;
+        sky.snapshots = 3;
+        // A camera's view is drawn outside the shader pack's pipeline, so it takes the plain path.
+        if (!IrisCompat.shaderPackInUse() || dev.theredja.src2mc.client.view.SecondaryView.active()) draw(event, true);
     }
 
     /**
@@ -156,12 +173,13 @@ public final class SkyRenderer {
     @SubscribeEvent
     public static void afterLevel(RenderLevelStageEvent event) {
         if (event.getStage() != RenderLevelStageEvent.Stage.AFTER_LEVEL) return;
-        if (snapshots == 3 && IrisCompat.shaderPackInUse()) {
+        if (dev.theredja.src2mc.client.view.SecondaryView.active()) return;
+        if (MAIN_SKY.snapshots == 3 && IrisCompat.shaderPackInUse()) {
             Minecraft.getInstance().getMainRenderTarget().bindWrite(true);
             draw(event, false);
         }
-        if (snapshots == 3) costFrames++;
-        snapshots = 0;
+        if (MAIN_SKY.snapshots == 3) costFrames++;
+        MAIN_SKY.snapshots = 0;
     }
 
     /** CPU nanoseconds spent on the snapshots, the room and the faces since the last status, over {@link #costFrames}. */
@@ -171,7 +189,7 @@ public final class SkyRenderer {
         long start = System.nanoTime();
         GpuTimer.begin(GpuTimer.Phase.SKY_SNAPSHOTS);
         try {
-            return snapshot.copy(Minecraft.getInstance().getMainRenderTarget());
+            return snapshot.copy(viewTarget());
         } finally {
             GpuTimer.end(GpuTimer.Phase.SKY_SNAPSHOTS);
             snapshotNanos += System.nanoTime() - start;
@@ -228,9 +246,9 @@ public final class SkyRenderer {
                 }
                 RenderSystem.enableCull();
                 RenderSystem.disableBlend();
-                RenderSystem.setShaderTexture(SNAPSHOT_SLOT, BEFORE_MAP.texture());
-                RenderSystem.setShaderTexture(SNAPSHOT_SLOT + 1, AFTER_MAP.texture());
-                RenderSystem.setShaderTexture(SNAPSHOT_SLOT + 2, BEFORE_GLASS.texture());
+                RenderSystem.setShaderTexture(SNAPSHOT_SLOT, sky().beforeMap.texture());
+                RenderSystem.setShaderTexture(SNAPSHOT_SLOT + 1, sky().afterMap.texture());
+                RenderSystem.setShaderTexture(SNAPSHOT_SLOT + 2, sky().beforeGlass.texture());
                 stateSet = true;
             }
             for (int side = 0; side < textures.length; side++) RenderSystem.setShaderTexture(side, textures[side]);
@@ -244,7 +262,7 @@ public final class SkyRenderer {
                 roomNanos += System.nanoTime() - roomStart;
             }
             if (room) {
-                RenderSystem.setShaderTexture(ROOM_SLOT, roomTarget.color);
+                RenderSystem.setShaderTexture(ROOM_SLOT, sky().room.color);
                 // The room pass left its own state; the faces' is set again.
                 RenderSystem.disableBlend();
                 RenderSystem.enableCull();
@@ -312,8 +330,10 @@ public final class SkyRenderer {
             }
         }
         if (slot.scene == null) { roomState = slot.failed ? "failed" : "building"; return false; }
-        var main = Minecraft.getInstance().getMainRenderTarget();
-        if (roomTarget == null) roomTarget = new RoomTarget();
+        var main = viewTarget();
+        ViewSky sky = sky();
+        if (sky.room == null) sky.room = new RoomTarget();
+        RoomTarget roomTarget = sky.room;
         int previousRead = org.lwjgl.opengl.GL11.glGetInteger(org.lwjgl.opengl.GL30.GL_READ_FRAMEBUFFER_BINDING);
         int previousDraw = org.lwjgl.opengl.GL11.glGetInteger(org.lwjgl.opengl.GL30.GL_DRAW_FRAMEBUFFER_BINDING);
         int[] viewport = new int[4];

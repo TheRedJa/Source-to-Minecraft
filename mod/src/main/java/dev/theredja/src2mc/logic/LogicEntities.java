@@ -52,8 +52,32 @@ final class LogicEntities {
             case "env_soundscape" -> new SoundEntities.Soundscape(map, index, entity);
             case "infra_music" -> new SoundEntities.Music(map, index, entity);
             case "logic_choreographed_scene" -> new SoundEntities.Scene(map, index, entity);
+            case "env_microphone" -> new SoundEntities.Microphone(map, index, entity);
+            case "light_dynamic" -> new DynamicLight(map, index, entity);
             case "point_viewcontrol" -> new MenuEntities.ViewControl(map, index, entity);
             case "vgui_screen" -> new MenuEntities.VguiScreen(map, index, entity);
+            case "point_teleport" -> new PlayerEntities.PointTeleport(map, index, entity);
+            case "trigger_teleport", "trigger_teleport_relative" -> new Triggers.Teleport(map, index, entity);
+            case "trigger_push" -> new Triggers.Push(map, index, entity);
+            case "trigger_wind" -> new Triggers.Wind(map, index, entity);
+            case "trigger_hurt" -> new Triggers.Hurt(map, index, entity);
+            case "trigger_look" -> new Triggers.Look(map, index, entity);
+            case "player_speedmod" -> new PlayerEntities.SpeedMod(map, index, entity);
+            case "point_playermoveconstraint" -> new PlayerEntities.MoveConstraint(map, index, entity);
+            case "func_train" -> new Trains.Train(map, index, entity);
+            case "path_corner" -> new Trains.PathCorner(map, index, entity);
+            case "env_global" -> new GlobalStates.EnvGlobal(map, index, entity);
+            case "math_remap" -> new MathRemap(map, index, entity);
+            case "logic_autosave" -> new Autosave(map, index, entity);
+            case "logic_achievement" -> new Achievement(map, index, entity);
+            case "script_intro" -> new CameraEntities.ScriptIntro(map, index, entity);
+            case "point_camera" -> new CameraEntities.PointCamera(map, index, entity);
+            case "func_monitor" -> new CameraEntities.Monitor(map, index, entity);
+            case "env_zoom" -> new ScreenEffects.Zoom(map, index, entity);
+            case "env_starfield" -> new ScreenEffects.Starfield(map, index, entity);
+            case "env_credits" -> new ScreenEffects.Credits(map, index, entity);
+            case "env_message" -> new ScreenEffects.Message(map, index, entity);
+            case "env_hudhint" -> new ScreenEffects.HudHint(map, index, entity);
             default -> new LogicEntity(map, index, entity);
         };
     }
@@ -120,12 +144,104 @@ final class LogicEntities {
         @Override void activate() { nextThink = map.time() + 0.2; }
 
         @Override void think() {
-            // A globalstate gate needs env_global, which is not run here; such an auto fires as if it were on.
+            // CLogicAuto::Think: with a globalstate set, it fires only while that state is on.
+            String gate = key("globalstate", "");
+            if (!gate.isEmpty() && !GlobalStates.isOn(map, gate)) return;
             if (map.loadType() == MapLogic.LoadType.TRANSITION) fire("onmaptransition", null, null);
             else fire("onnewgame", null, null);
             fire("onmapspawn", null, null);
             if (hasSpawnFlags(FIRE_ONCE)) remove();
         }
+    }
+
+    /**
+     * {@code CMathRemap}: maps the value that comes in from one range onto another. The input range
+     * is put in order, the output range is not; out-of-range input is dropped or extrapolated as
+     * the spawn flags say. Values are single precision, as in Source.
+     */
+    static final class MathRemap extends LogicEntity {
+        private static final int IGNORE_OUT_OF_RANGE = 1, CLAMP_OUTPUT = 2;
+        private float in1, in2, out1, out2;
+        private boolean enabled = true;
+
+        MathRemap(MapLogic map, int index, LogicTable.Entity entity) { super(map, index, entity); }
+
+        @Override void spawn() {
+            in1 = (float) number("in1", 0);
+            in2 = (float) number("in2", 0);
+            out1 = (float) number("out1", 0);
+            out2 = (float) number("out2", 0);
+            // An empty input range is made 0 to 1; a backwards one is turned round.
+            if (in1 == in2) { in1 = 0; in2 = 1; }
+            if (in1 > in2) { float swap = in1; in1 = in2; in2 = swap; }
+            enabled = true;
+        }
+
+        @Override boolean accept(String input, String value, Actor activator, LogicEntity caller) {
+            switch (input) {
+                case "enable" -> enabled = true;
+                case "disable" -> enabled = false;
+                case "invalue" -> {
+                    float in = (float) Variant.number(value);
+                    float clamped = Math.max(in1, Math.min(in2, in));
+                    if (clamped != in && hasSpawnFlags(IGNORE_OUT_OF_RANGE)) return true;
+                    float out = out1 + (((in - in1) * (out2 - out1)) / (in2 - in1));
+                    if (hasSpawnFlags(CLAMP_OUTPUT)) out = Math.max(out1, Math.min(out2, out));
+                    if (enabled) fire("outvalue", activator, Variant.of(out));
+                }
+                default -> { return false; }
+            }
+            return true;
+        }
+
+        @Override void save(CompoundTag tag) { super.save(tag); tag.putBoolean("enabled", enabled); }
+        @Override void load(CompoundTag tag) { super.load(tag); enabled = !tag.contains("enabled") || tag.getBoolean("enabled"); }
+        @Override String state() { return (enabled ? "enabled " : "disabled ") + Variant.of(in1) + ".." + Variant.of(in2) + " to " + Variant.of(out1) + ".." + Variant.of(out2); }
+    }
+
+    /**
+     * {@code CLogicAutosave}: the engine's autosave has no counterpart here, so its inputs are taken
+     * and do nothing: {@code Save}, {@code SaveDangerous} and {@code SetMinHitpointsThreshold}.
+     */
+    static final class Autosave extends LogicEntity {
+        Autosave(MapLogic map, int index, LogicTable.Entity entity) { super(map, index, entity); }
+
+        @Override boolean accept(String input, String value, Actor activator, LogicEntity caller) {
+            return switch (input) {
+                case "save", "savedangerous", "setminhitpointsthreshold" -> true;
+                default -> false;
+            };
+        }
+    }
+
+    /**
+     * {@code CLogicAchievement}: fires {@code OnFired} on {@code FireEvent} while enabled and with an
+     * event name set, whatever the name. Marking the achievement (names beginning
+     * {@code ACHIEVEMENT_EVENT_}) is Steam's and is not done.
+     */
+    static final class Achievement extends LogicEntity {
+        private boolean disabled;
+
+        Achievement(MapLogic map, int index, LogicTable.Entity entity) { super(map, index, entity); }
+
+        @Override void spawn() { disabled = flag("startdisabled"); }
+
+        @Override boolean accept(String input, String value, Actor activator, LogicEntity caller) {
+            switch (input) {
+                case "enable" -> disabled = false;
+                case "disable" -> disabled = true;
+                case "toggle" -> disabled = !disabled;
+                case "fireevent" -> {
+                    if (!disabled && !key("achievementevent", "").isEmpty()) fire("onfired", activator, null);
+                }
+                default -> { return false; }
+            }
+            return true;
+        }
+
+        @Override void save(CompoundTag tag) { super.save(tag); tag.putBoolean("disabled", disabled); }
+        @Override void load(CompoundTag tag) { super.load(tag); disabled = tag.getBoolean("disabled"); }
+        @Override String state() { return disabled ? "disabled" : "enabled"; }
     }
 
     /** {@code CLogicBranch}; listeners hear of every change through a direct event, as in Source. */

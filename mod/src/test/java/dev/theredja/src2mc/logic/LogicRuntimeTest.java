@@ -889,9 +889,13 @@ final class LogicRuntimeTest {
             for (int i = 0; i < map.logic().entities().size(); i++) {
                 LogicTable.Scene scene = logic.scene(logic.entity(i));
                 if (!(logic.entity(i) instanceof SoundEntities.Scene) || scene == null || logic.entity(i).removed) continue;
-                for (LogicTable.SceneEvent event : scene.events()) if (event.speaks() && map.audio() != null && map.audio().script(event.script()) != null) expected++;
                 logic.queue(0, null, logic.entity(i), "Start", null, player, null);
                 seconds(logic, scene.length() + 1);
+                // A scene its own trigger paused (resumed later by the game, e.g. ai_script_conditions)
+                // owes only the lines up to the pause.
+                double played = ((SoundEntities.Scene) logic.entity(i)).elapsed();
+                for (LogicTable.SceneEvent event : scene.events())
+                    if (event.speaks() && event.start() <= played + 1e-6 && map.audio() != null && map.audio().script(event.script()) != null) expected++;
                 for (LogicNetwork.SoundEvent event : logic.drainUpdate(false).events()) if (event.voice()) voices++;
             }
             System.out.println(map.mapId() + ": scene lines " + voices + " of " + expected);

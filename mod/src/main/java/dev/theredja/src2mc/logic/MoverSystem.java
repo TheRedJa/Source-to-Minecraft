@@ -40,6 +40,7 @@ import net.minecraft.nbt.NbtUtils;
 import net.minecraft.nbt.Tag;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.util.Mth;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
@@ -165,8 +166,74 @@ public final class MoverSystem {
 
     // ---- Keeping the sub-levels in step with the placements.
 
+    /**
+     * Keeps a mover's chunks block-ticking: Sable holds a sub-level unloaded unless every chunk under it is
+     * ({@code PhysicsChunkTicketManager.isChunkLoadedEnough}, {@code SubLevelHoldingChunk.canLoadSubLevel}), and an
+     * unloaded mover cannot be moved by its logic. A region ticket of distance 1 makes its own chunk block-ticking
+     * ({@code DistanceManager.addRegionTicket}: level 33 - 1).
+     */
+    private static final net.minecraft.server.level.TicketType<ChunkPos> MOVER_TICKET =
+        net.minecraft.server.level.TicketType.create("src2mc_mover", java.util.Comparator.comparingLong(ChunkPos::toLong));
+    private static final Map<net.minecraft.resources.ResourceKey<net.minecraft.world.level.Level>, it.unimi.dsi.fastutil.longs.LongOpenHashSet>
+        TICKETED = new HashMap<>();
+
+    /**
+     * Tickets the chunks under every mover of a map whose logic runs, where its logic puts it and where its sub-level
+     * last was, as Source keeps a whole map's movers live: a train far from the player still runs its path, and is
+     * where the logic says when a {@code point_teleport} puts the player into it. Tickets of maps no longer running go.
+     */
+    private static void updateTickets(ServerLevel level) {
+        it.unimi.dsi.fastutil.longs.LongOpenHashSet wanted = new it.unimi.dsi.fastutil.longs.LongOpenHashSet();
+        java.util.Set<Long> running = new HashSet<>();
+        for (MapLogic logic : LogicSystem.runningMaps(level)) running.add(logic.placement.anchorWorld().asLong());
+        if (!running.isEmpty()) {
+            for (MoverRegistry.Instance instance : MoverRegistry.instances(false)) {
+                if (!running.contains(instance.anchor())) continue;
+                MoverRegistry.Resolved resolved = MoverRegistry.resolve(level, instance.subLevel());
+                if (resolved == null || resolved.placement() == null) continue;
+                Live live = LIVE.get(instance.subLevel());
+                addChunks(wanted, resolved, poseAt(level, instance, 1.0));
+                addChunks(wanted, resolved, live != null && live.pose != null ? live.pose : MoverPose.IDENTITY);
+            }
+        }
+        it.unimi.dsi.fastutil.longs.LongOpenHashSet held = TICKETED.computeIfAbsent(level.dimension(), ignored -> new it.unimi.dsi.fastutil.longs.LongOpenHashSet());
+        if (held.equals(wanted)) return;
+        var chunks = level.getChunkSource();
+        for (long chunk : held.toLongArray()) {
+            if (wanted.contains(chunk)) continue;
+            ChunkPos pos = new ChunkPos(chunk);
+            chunks.removeRegionTicket(MOVER_TICKET, pos, 1, pos);
+            held.remove(chunk);
+        }
+        for (long chunk : wanted) {
+            if (!held.add(chunk)) continue;
+            ChunkPos pos = new ChunkPos(chunk);
+            chunks.addRegionTicket(MOVER_TICKET, pos, 1, pos);
+        }
+    }
+
+    /** The chunks under a mover's compiled box moved by {@code pose}, one block around as Sable checks. */
+    private static void addChunks(it.unimi.dsi.fastutil.longs.LongOpenHashSet into, MoverRegistry.Resolved resolved, MoverPose pose) {
+        MoverTable.Mover mover = resolved.mover();
+        double[] origin = entityOrigin(resolved.map(), mover);
+        BlockPos t = resolved.placement().translation();
+        double minX = Double.MAX_VALUE, maxX = -Double.MAX_VALUE, minZ = Double.MAX_VALUE, maxZ = -Double.MAX_VALUE;
+        Quaterniond rotation = pose.rotation();
+        for (int c = 0; c < 8; c++) {
+            Vector3d p = new Vector3d(mover.originX() + ((c & 1) == 0 ? 0 : mover.sizeX()), mover.originY() + ((c & 2) == 0 ? 0 : mover.sizeY()),
+                mover.originZ() + ((c & 4) == 0 ? 0 : mover.sizeZ())).sub(origin[0], origin[1], origin[2]);
+            rotation.transform(p).add(origin[0] + pose.x() + t.getX(), origin[1] + pose.y() + t.getY(), origin[2] + pose.z() + t.getZ());
+            minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x); minZ = Math.min(minZ, p.z); maxZ = Math.max(maxZ, p.z);
+        }
+        int x0 = Mth.floor(minX - 1) >> 4, x1 = Mth.floor(maxX + 1) >> 4, z0 = Mth.floor(minZ - 1) >> 4, z1 = Mth.floor(maxZ + 1) >> 4;
+        // A runaway pose (bad data) must not ticket half the world.
+        if ((long) (x1 - x0 + 1) * (z1 - z0 + 1) > 256) return;
+        for (int x = x0; x <= x1; x++) for (int z = z0; z <= z1; z++) into.add(ChunkPos.asLong(x, z));
+    }
+
     public static void onServerTick(ServerTickEvent.Post event) {
         for (ServerLevel level : event.getServer().getAllLevels()) updateStates(level);
+        for (ServerLevel level : event.getServer().getAllLevels()) updateTickets(level);
         BundleGeneration generation = Src2mc.bundles().active();
         long epoch = PlacementIndex.epoch();
         boolean changed = epoch != ensureEpoch || generation.sequence() != ensureGeneration;
@@ -547,6 +614,62 @@ public final class MoverSystem {
         return new double[]{mover.originX() + mover.sizeX() / 2.0, mover.originY() + mover.sizeY() / 2.0, mover.originZ() + mover.sizeZ() / 2.0};
     }
 
+    /** How far outside a map's box a sub-level's centre may be and still count as in the map. */
+    private static final int SAME_MAP_MARGIN = 16;
+
+    /**
+     * Whether Sable sends the sub-level centred at {@code x, y, z} to {@code player} whatever its tracking range
+     * ({@code SableTrackingMixin}): both are inside one placed map. Source networks a map's movers to the player
+     * wherever they are, and a player put into a far train by {@code point_teleport} must find it already there.
+     */
+    public static boolean sameMap(net.minecraft.world.entity.player.Player player, double x, double y, double z) {
+        if (!(player.level() instanceof ServerLevel level)) return false;
+        BlockPos at = player.blockPosition();
+        for (MapPlacement placement : PlacementSavedData.get(level).index().view()) {
+            if (!placement.contains(at)) continue;
+            BlockPos min = placement.worldMin(), max = placement.worldMax();
+            if (x >= min.getX() - SAME_MAP_MARGIN && x <= max.getX() + 1 + SAME_MAP_MARGIN
+                && y >= min.getY() - SAME_MAP_MARGIN && y <= max.getY() + 1 + SAME_MAP_MARGIN
+                && z >= min.getZ() - SAME_MAP_MARGIN && z <= max.getZ() + 1 + SAME_MAP_MARGIN) return true;
+        }
+        return false;
+    }
+
+    /**
+     * After a teleport: when the player now stands inside a mover, attaches them to its sub-level the way Sable puts a
+     * player onto a moving sub-level when they respawn there ({@code PlayerFreezeExtension.sable$freezeTo} plus
+     * {@code ClientboundFreezePlayerPacket}). The client holds the player until that sub-level has arrived, then puts
+     * them at the same point of it and lets it carry them, so a train that starts as the player lands takes them along.
+     * The smallest mover whose blocks' box holds the point is taken.
+     */
+    public static void freezeOnto(ServerPlayer player) {
+        if (!(player.level() instanceof ServerLevel level)) return;
+        ServerSubLevelContainer container = SubLevelContainer.getContainer(level);
+        if (container == null) return;
+        Vector3d world = new Vector3d(player.getX(), player.getY() + 0.1, player.getZ());
+        ServerSubLevel best = null;
+        Vector3d bestLocal = null;
+        long bestVolume = Long.MAX_VALUE;
+        for (MoverRegistry.Instance instance : MoverRegistry.instances(false)) {
+            if (!(container.getSubLevel(instance.subLevel()) instanceof ServerSubLevel subLevel) || subLevel.isRemoved()) continue;
+            Vector3d local = subLevel.logicalPose().transformPositionInverse(new Vector3d(world));
+            var box = subLevel.getPlot().getBoundingBox();
+            if (local.x < box.minX() || local.x > box.maxX() + 1 || local.y < box.minY() || local.y > box.maxY() + 1
+                || local.z < box.minZ() || local.z > box.maxZ() + 1) continue;
+            long volume = (long) (box.maxX() - box.minX() + 1) * (box.maxY() - box.minY() + 1) * (box.maxZ() - box.minZ() + 1);
+            if (volume < bestVolume) {
+                best = subLevel;
+                bestLocal = local;
+                bestVolume = volume;
+            }
+        }
+        if (best == null) return;
+        bestLocal.y -= 0.1;
+        ((dev.ryanhcode.sable.mixinterface.player_freezing.PlayerFreezeExtension) player).sable$freezeTo(best.getUniqueId(), bestLocal);
+        player.connection.send(new net.minecraft.network.protocol.common.ClientboundCustomPayloadPacket(
+            new dev.ryanhcode.sable.network.packets.tcp.ClientboundFreezePlayerPacket(best.getUniqueId(), bestLocal)));
+    }
+
     // ---- Moving them.
 
     /** The pose the mover's entity has now: its logic's, else where the map compiled it. */
@@ -739,6 +862,7 @@ public final class MoverSystem {
 
     public static void onServerStopped(net.neoforged.neoforge.event.server.ServerStoppedEvent event) {
         LIVE.clear();
+        TICKETED.clear();
         MOUNT_BLOCKS.clear();
         mountVersion = Long.MIN_VALUE;
         HANDED_OVER.clear();

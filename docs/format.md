@@ -676,7 +676,8 @@ Source places in the world as one point (`)` or `(` before the name) and
 files with more than two channels are mixed down to mono; other stereo files
 stay stereo, which Source plays unpanned. Whether a sound loops comes from
 the WAV's first `cue ` point, or its first `smpl` loop: Source loops a file
-from that frame to its end, and plays a file with neither once.
+from that frame to its end, and plays a file with neither once. MP3 sounds
+(Half-Life 2's music) are decoded the same way and never loop.
 
 ## 16. Logic table
 
@@ -702,6 +703,8 @@ these fields in order:
 | `strings` | optional; localized texts of the `#` tokens the map's HUD texts name |
 | `engine_entities` | optional; entities the game's own code creates in the map |
 | `engine_events` | optional; inputs the game's own code queues as the map spawns |
+| `titles` | optional; the `scripts/titles.txt` messages the map's `env_message` entities name |
+| `credits` | optional; `scripts/credits.txt` for the map's `env_credits` |
 
 | Record | Fields, in order |
 | --- | --- |
@@ -738,10 +741,15 @@ as long as at least one of its brushes encloses a volume. `bounds` is the box
 around the brushes' own vertices.
 
 A `logic_choreographed_scene` (or `scripted_scene`, its older name) whose
-`SceneFile` resolves to a text `.vcd`, in the map's pakfile or the game, has
-a `scene`; entities naming the same file share it. Compiled scenes
-(`scenes.image`) are not read, so a game that ships only those has no scenes,
-and each missing file is a `LOGIC_SCENE_UNAVAILABLE` warning. Only `speak`
+`SceneFile` resolves to a text `.vcd`, in the map's pakfile or the game, or
+else to a compiled scene in the game's `scenes/scenes.image` (all Half-Life 2
+and Portal ship), has a `scene`; entities naming the same file share it. A
+compiled scene is looked up by the CRC-32 of its lowercase, backslashed name
+from `scenes\` on with a `.vcd` extension, and read as
+`CChoreoScene::RestoreFromBinaryBuffer` reads it, LZMA included; one that
+does not read is a `LOGIC_SCENE_MALFORMED` warning, and a file found nowhere a
+`LOGIC_SCENE_UNAVAILABLE` warning. Both forms keep the same events by the same
+rules. Only `speak`
 and `firetrigger` events are kept; scene `length` is the latest end or start
 of any event in the file. An event whose time is not finite or beyond a day is
 dropped, starts below 0 become 0, and a speak event's `end` is at least its
@@ -757,10 +765,60 @@ strings (`\"`, `\\`, `\n`, `\t`) are resolved; keys starting with `[`
 
 `strings` holds the texts of the tokens a `game_text`'s `message`, a `SetText`
 output parameter or an engine event's `SetText` parameter names with a leading
-`#`, as `g_pVGuiLocalize->Find` gives the HUD: read from every loose
-`resource/*_english.txt` of the search path, in path order, the first file to
-define a token winning. A `#` token they lack, and any other text, is shown
-as written. It is absent when no token resolves.
+`#`, as `g_pVGuiLocalize->Find` gives the HUD, and the `message` of every
+`env_hudhint`, which names its token without the `#` (`Valve_Hint_Jump`; the
+client passes the keyvalue to `Find` as written, `hud_hintdisplay.cpp`
+`SetHintText`). It is read from every loose `resource/*_english.txt` of the
+search path, in path order, then from `valve_english.txt`, `hl2_english.txt`
+and `gameui_english.txt` when an archive holds them, the first file to define a
+token winning. A line's trailing `[$SYMBOL]` conditional is applied for a
+Windows PC (`Valve_Hint_Movement` has an `[$X360]` and a `[$WIN32]` text) and
+dropped from the key. A `#` token they lack, and any other text, is shown as
+written. It is absent when no token resolves. Hint texts are kept verbatim,
+including their `%+jump%`-style binding placeholders, which the runtime
+replaces with the player's key names. The tokens used by Half-Life 2's
+`d1_trainstation_01` to `_06` are `Valve_Hint_USEPickup`, `_Ladder`, `_Jump`,
+`_Movement`, `_Interact`, `_ThrowHeld`, `_HEVcharger`, `_Sprint`, `_Flashlight`,
+`_Zoom` and `_Attack`.
+
+`titles` has one entry per distinct `message` of an `env_message` entity (case
+insensitive, one leading `#` dropped, as `CHudMessage::MessageAdd` does before
+`TextMessageGet`) that `scripts/titles.txt` defines, in first-use order; a name
+the file lacks is left out, as the client drops an unknown message. Each entry
+has, in order: `name`, as the file writes it; `x` and `y`, screen fractions 0
+to 1 where -1 centers; `effect`, 0 fade in/out, 1 flicker, 2 write out;
+`color1` and `color2`, `[r, g, b, a]` bytes (the main color and the effect's
+highlight color); `fadein`, `fadeout`, `holdtime` and `fxtime` in seconds; and
+`text`, the body with its lines joined by `\n`. A body naming a `#` token is
+stored as the token's localized text (the `strings` lookup) and as written when
+the token is unknown. The file's loader is engine code outside the SDK; the
+format followed is the GoldSrc/Source `titles.txt` as Xash3D FWGS reads it
+(`engine/client/titles.c`): `$position x y`, `$effect n`, `$color r g b`,
+`$color2 r g b`, `$fadein`, `$fadeout`, `$holdtime` and `$fxtime` set the
+values of every message that follows until set again, `//` starts a comment
+line, a message is a name line and a `{ ... }` body, and unknown directives
+(`$boxcolor`, `$boxsize`, `$clearmessage`) are skipped. Values before any
+directive are 0; the alpha of both colors is 255 unless `$color` gives a fourth
+number. Unverified against the closed engine: the defaults, the alpha, and
+whether the engine keeps a CR or trailing spaces of a body line.
+
+`credits` is present when the map has an `env_credits` and the game has
+`scripts/credits.txt`. It is the file read as the client's `CHudCredits` reads
+it (`hud_credits.cpp`): `params` holds `CreditsParams` with lowercase keys and
+the values as written (strings, such as `"color": "255 255 255 128"`, the
+client converts); `intro` and `outro` are `IntroCreditsNames` and
+`OutroCreditsNames` in file order, each entry `{name, font}` with the name as
+written (`" "` is a blank line, repeats kept) and the scheme font it is drawn
+in. Optional `logo_image` is the path, relative to the map's directory
+(`logic/credits_logo.png`, a bundle payload the table references), of the logo
+as a PNG: the `params.logo` string (and `logo2` below it) drawn in white with
+coverage as alpha, each line centered, in the scheme font `WeaponIcons` of
+`resource/ClientScheme.res` (the `ClientTitleFont` of episodic games is not
+used), which is the glyph font `HalfLife2` (`resource/HALFLIFE2.ttf`) at its
+`tall` pixels per line. The font is matched to the `CustomFontFiles` entry by
+file name. It is absent when the scheme or font file is missing. The font
+scale (`tall` taken as the pixel height of ascent plus descent) is unverified
+against the engine's rasterizer.
 
 `engine_entities` are entity records like `entities`, for entities that are
 in no lump but that the game's code creates in every map; the runtime gives

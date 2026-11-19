@@ -190,7 +190,7 @@ final class BundleSchemaValidator {
         if (map.has("logic")) {
             String logicPath = exactPath(map, "logic", prefix + "logic.json");
             referenced.add(logicPath);
-            logic = validateLogic(json(zip, required(entries, logicPath), logicPath));
+            logic = validateLogic(json(zip, required(entries, logicPath), logicPath), entries, prefix, referenced);
         }
         if (audio != null && logic != null) {
             for (AudioTable.Emitter emitter : audio.emitters()) if (emitter.entity() >= logic.entities().size()) fail(BundleErrorCode.INVALID_REFERENCE, "soundscape entity out of range");
@@ -1333,9 +1333,10 @@ final class BundleSchemaValidator {
     }
 
     /** Parses and validates the optional logic table (format.md section 16). */
-    private static LogicTable validateLogic(JsonObject root) throws BundleValidationException {
+    private static LogicTable validateLogic(JsonObject root, Map<String, ZipEntry> entries, String prefix, Set<String> referenced)
+        throws BundleValidationException {
         List<String> rootKeys = new ArrayList<>(List.of("format", "version", "source_origin", "entities", "volumes", "scenes", "captions"));
-        for (String optional : List.of("strings", "engine_entities", "engine_events")) if (root.has(optional)) rootKeys.add(optional);
+        for (String optional : List.of("strings", "engine_entities", "engine_events", "titles", "credits")) if (root.has(optional)) rootKeys.add(optional);
         keys(root, rootKeys.toArray(String[]::new));
         format(root, "src2mc-logic", "logic.json");
         double[] sourceOrigin = vector3d(root.get("source_origin"), "source_origin");
@@ -1428,7 +1429,72 @@ final class BundleSchemaValidator {
                 engineEvents.add(new LogicTable.EngineEvent(string(event, "target"), string(event, "input"), string(event, "parameter"), delay));
             }
         }
-        return new LogicTable(sourceOrigin, entities, volumes, scenes, captions, strings, engineEntities, engineEvents);
+        List<LogicTable.Title> titles = new ArrayList<>();
+        if (root.has("titles")) {
+            JsonArray titleArray = array(root, "titles");
+            limit(titleArray.size(), BundleLimits.MAX_LOGIC_RECORDS, "title count");
+            Set<String> names = new java.util.HashSet<>();
+            for (JsonElement element : titleArray) {
+                JsonObject title = object(element, "title");
+                keys(title, "name", "x", "y", "effect", "color1", "color2", "fadein", "fadeout", "holdtime", "fxtime", "text");
+                String name = string(title, "name");
+                if (name.isEmpty() || !names.add(name.toLowerCase(java.util.Locale.ROOT))) fail(BundleErrorCode.DUPLICATE_IDENTITY, "title names are unique and not empty");
+                titles.add(new LogicTable.Title(name, (float) finiteNumber(title.get("x"), "title x"), (float) finiteNumber(title.get("y"), "title y"),
+                    uintIndex(title.get("effect"), "title effect"), titleColor(title.get("color1")), titleColor(title.get("color2")),
+                    (float) finiteNumber(title.get("fadein"), "title fadein"), (float) finiteNumber(title.get("fadeout"), "title fadeout"),
+                    (float) finiteNumber(title.get("holdtime"), "title holdtime"), (float) finiteNumber(title.get("fxtime"), "title fxtime"),
+                    string(title, "text")));
+            }
+        }
+        LogicTable.Credits credits = null;
+        if (root.has("credits")) {
+            JsonObject object = object(root.get("credits"), "credits");
+            List<String> creditKeys = new ArrayList<>(List.of("params", "intro", "outro"));
+            if (object.has("logo_image")) creditKeys.add("logo_image");
+            keys(object, creditKeys.toArray(String[]::new));
+            Map<String, String> params = new java.util.LinkedHashMap<>();
+            for (Map.Entry<String, JsonElement> entry : object(object.get("params"), "credits params").entrySet()) {
+                if (!entry.getKey().equals(entry.getKey().toLowerCase(java.util.Locale.ROOT))) fail(BundleErrorCode.INVALID_SCHEMA, "credits params keys are lowercase");
+                params.put(entry.getKey(), text(entry.getValue(), "credits param"));
+            }
+            limit(params.size(), BundleLimits.MAX_LOGIC_RECORDS, "credits params count");
+            String logoImage = null;
+            if (object.has("logo_image")) {
+                String logo = string(object, "logo_image");
+                if (!logo.equals("logic/credits_logo.png")) fail(BundleErrorCode.INVALID_REFERENCE, "non-canonical credits logo path");
+                logoImage = prefix + logo;
+                referenced.add(logoImage);
+                required(entries, logoImage);
+            }
+            credits = new LogicTable.Credits(params, creditNames(object, "intro"), creditNames(object, "outro"), logoImage);
+        }
+        return new LogicTable(sourceOrigin, entities, volumes, scenes, captions, strings, engineEntities, engineEvents, titles, credits);
+    }
+
+    /** An {@code [r, g, b, a]} array of canonical bytes, packed {@code 0xAARRGGBB}. */
+    private static int titleColor(JsonElement value) throws BundleValidationException {
+        if (value == null || !value.isJsonArray() || value.getAsJsonArray().size() != 4) fail(BundleErrorCode.INVALID_SCHEMA, "title color must be four channels");
+        JsonArray channels = value.getAsJsonArray();
+        int packed = 0;
+        int[] shifts = {16, 8, 0, 24};
+        for (int i = 0; i < 4; i++) {
+            int channel = uintIndex(channels.get(i), "title color channel");
+            if (channel > 255) fail(BundleErrorCode.INVALID_SCHEMA, "title color channel out of range");
+            packed |= channel << shifts[i];
+        }
+        return packed;
+    }
+
+    private static List<LogicTable.CreditName> creditNames(JsonObject credits, String key) throws BundleValidationException {
+        JsonArray array = array(credits, key);
+        limit(array.size(), BundleLimits.MAX_LOGIC_RECORDS, "credits " + key + " count");
+        List<LogicTable.CreditName> names = new ArrayList<>(array.size());
+        for (JsonElement element : array) {
+            JsonObject entry = object(element, "credit name");
+            keys(entry, "name", "font");
+            names.add(new LogicTable.CreditName(string(entry, "name"), string(entry, "font")));
+        }
+        return names;
     }
 
     /** A {@code token}/{@code text} array as a map: tokens unique and lowercase. */

@@ -12,8 +12,8 @@ package dev.theredja.src2mc.client.audio;
  * <p>The SDK's {@code soundflags.h} and {@code sound.cpp} state the reference values; the shape of
  * the curve past them is the engine's, which is not in the public SDK.
  */
-final class SourceFalloff {
-    static final double UNITS_PER_BLOCK = 32.0;
+public final class SourceFalloff {
+    public static final double UNITS_PER_BLOCK = 32.0;
     private static final double REFERENCE_DB = 60.0;
     private static final double REFERENCE_DISTANCE = 36.0;
     private static final double MIN_GAIN = 0.01;
@@ -21,7 +21,7 @@ final class SourceFalloff {
     private SourceFalloff() {}
 
     /** Gain 0..1 at {@code blocks} from the sound. */
-    static double gain(double soundLevel, double blocks) {
+    public static double gain(double soundLevel, double blocks) {
         if (soundLevel <= 0) return 1.0;
         double distanceMultiplier = Math.pow(10.0, (REFERENCE_DB - soundLevel) / 20.0) / REFERENCE_DISTANCE;
         double relative = blocks * UNITS_PER_BLOCK * distanceMultiplier;

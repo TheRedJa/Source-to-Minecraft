@@ -67,6 +67,8 @@ public final class LevelChangeClient {
     private static final long READY_TIMEOUT_NANOS = 45_000_000_000L;
     /** Ticks (0.5 s) with nothing pending that count as ready. */
     private static final int READY_STABLE_TICKS = 10;
+    /** Blocks around the arriving player within which the loading screen waits for movers (Sable sub-levels) to arrive. */
+    private static final double MOVER_WAIT_RADIUS = 64;
 
     /** A new world that says nothing for this long after the player joined has failed. */
     private static final long SERVER_SILENCE_NANOS = 60_000_000_000L;
@@ -283,11 +285,13 @@ public final class LevelChangeClient {
         }
         int surfaces = MapSurfaceRenderer.pendingLoads(minecraft.level);
         int props = PropRenderer.pendingLoads(minecraft.level);
+        int movers = minecraft.player == null ? 0
+            : dev.theredja.src2mc.client.render.MoverRenderer.pendingNear(minecraft.level, minecraft.player.position(), MOVER_WAIT_RADIUS);
         long waited = System.nanoTime() - finishingSince;
         boolean known = surfaces >= 0 && props >= 0;
-        int pending = known ? surfaces + props : -1;
+        int pending = known ? surfaces + props + movers : -1;
         lastPending = "surface regions+atlas pages=" + (surfaces < 0 ? "no render pass yet" : surfaces)
-            + ", props=" + (props < 0 ? "no render pass yet" : props);
+            + ", props=" + (props < 0 ? "no render pass yet" : props) + ", movers near=" + movers;
         if (known) {
             peakPending = Math.max(peakPending, pending);
             // Work keeps arriving while builds run (new roots, light), so the raw fraction goes back

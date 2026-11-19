@@ -32,6 +32,7 @@ public abstract class GameRendererLookMixin {
         target = "Lnet/minecraft/client/renderer/GameRenderer;renderLevel(Lnet/minecraft/client/DeltaTracker;)V",
         shift = At.Shift.AFTER))
     private void src2mc$sourcePost(DeltaTracker deltaTracker, boolean renderLevel, CallbackInfo info) {
+        dev.theredja.src2mc.client.view.IntroView.composite();
         SourcePost.afterLevel();
     }
 }

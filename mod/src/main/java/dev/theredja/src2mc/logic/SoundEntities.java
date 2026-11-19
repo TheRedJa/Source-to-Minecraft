@@ -2,6 +2,7 @@ package dev.theredja.src2mc.logic;
 
 import dev.theredja.src2mc.bundle.AudioTable;
 import dev.theredja.src2mc.bundle.LogicTable;
+import dev.theredja.src2mc.client.audio.SourceFalloff;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -295,6 +296,9 @@ final class SoundEntities {
 
         Scene(MapLogic map, int index, LogicTable.Entity entity) { super(map, index, entity); }
 
+        /** Seconds of the scene played so far; a paused scene stops counting. */
+        double elapsed() { return elapsed; }
+
         @Override boolean accept(String input, String value, Actor by, LogicEntity caller) {
             switch (input) {
                 case "start" -> {
@@ -370,15 +374,16 @@ final class SoundEntities {
             String actor = event.actor();
             UUID speaker = null;
             double[] at = null;
+            LogicEntity source = null;
             if (actor.equals("player") || actor.equals("!player")) {
                 PlayerActor player = map.player(activator);
                 if (player != null) speaker = player.id();
             } else {
-                LogicEntity entity = actorEntity(actor);
-                if (entity != null) at = entity.position();
+                source = actorEntity(actor);
+                if (source != null) at = source.position();
             }
             double duration = event.end() > event.start() ? event.end() - event.start() : -1;
-            long id = map.emitSound(event.script(), at, speaker, event.caption(), duration, -1);
+            long id = map.emitSound(event.script(), at, speaker, event.caption(), duration, -1, true, source);
             if (id > 0) voices.add(id);
             map.speaking(actor, duration > 0 ? duration : 0);
         }
@@ -418,6 +423,119 @@ final class SoundEntities {
 
         @Override String state() {
             return waiting ? "waiting for its actors" : playing ? String.format(Locale.ROOT, "playing at %.1fs%s", elapsed, paused ? ", paused" : "") : "idle";
+        }
+    }
+
+    /**
+     * {@code CEnvMicrophone} (envmicrophone.cpp), its routing half: a sound played within {@code MaxRange} of the
+     * measure target (the {@code target} entity, else the microphone) plays again at the {@code SpeakerName} entity, as
+     * loud as it arrived at the measure target ({@code SoundPlayed}, {@code CanHearSound}). Not carried: the sampling of
+     * AI sounds behind {@code SoundLevel} and {@code OnHeardSound} (there is no AI sound system), and the speaker's DSP
+     * preset (reverb comes from Sound Physics). A sound with neither an origin nor a speaking player is not heard;
+     * Source would hear it at distance 0, but here such a sound is one meant to play everywhere.
+     */
+    static final class Microphone extends LogicEntity {
+        private static final int SWALLOW_ROUTED_SOUNDS = 0x10, IGNORE_NONATTENUATED = 0x40;
+        private boolean disabled;
+        private String speakerName;
+        private boolean speakerChanged;
+        private LogicEntity measureTarget;
+        private LogicEntities.Filter listenFilter;
+        /** The last routed copy, stopped by Disable. */
+        private long lastSound = -1;
+
+        Microphone(MapLogic map, int index, LogicTable.Entity entity) { super(map, index, entity); }
+
+        @Override void spawn() {
+            disabled = flag("startdisabled");
+            speakerName = blankToNull(key("speakername", ""));
+        }
+
+        /** {@code Activate}: the listen filter and the measure target, the microphone itself when that is missing. */
+        @Override void activate() {
+            String filter = blankToNull(key("listenfilter", ""));
+            listenFilter = filter != null && map.findFirst(filter, this, null, this) instanceof LogicEntities.Filter found ? found : null;
+            String target = blankToNull(key("target", ""));
+            LogicEntity found = target == null ? null : map.findFirst(target, this, null, this);
+            measureTarget = found != null && found.position() != null ? found : this;
+        }
+
+        @Override boolean accept(String input, String value, Actor activator, LogicEntity caller) {
+            switch (input) {
+                case "enable" -> disabled = false;
+                case "disable" -> {
+                    disabled = true;
+                    map.stopSound(lastSound);
+                    lastSound = -1;
+                }
+                case "setspeakername" -> {
+                    speakerName = blankToNull(value);
+                    speakerChanged = true;
+                }
+                default -> { return false; }
+            }
+            return true;
+        }
+
+        /**
+         * {@code SoundPlayed}: routes a sound played at map-local {@code at} (or by player {@code speaker}) to the
+         * speaker. True when the microphone swallows the original.
+         */
+        boolean hear(AudioTable.Script script, double[] at, UUID speaker, String caption, double duration, double volume,
+                     boolean voice, LogicEntity source, long originalId) {
+            if (disabled || speakerName == null || removed) return false;
+            double soundLevel = (script.soundLevel().low() + script.soundLevel().high()) / 2;
+            if (hasSpawnFlags(IGNORE_NONATTENUATED) && soundLevel <= 0) return false;
+            if (listenFilter != null && (source == null || !listenFilter.passes(this, source))) return false;
+            double[] origin = at != null ? at : map.playerCentre(speaker == null ? null : new PlayerActor(speaker));
+            double[] measure = (measureTarget == null ? this : measureTarget).position();
+            if (origin == null || measure == null) return false;
+            double blocks = Math.sqrt(square(origin[0] - measure[0]) + square(origin[1] - measure[1]) + square(origin[2] - measure[2]));
+            double maxRange = number("maxrange", 0);
+            if (maxRange > 0 && blocks * SourceFalloff.UNITS_PER_BLOCK > maxRange) return false;
+            double gain = (volume >= 0 ? volume : 1) * SourceFalloff.gain(soundLevel, blocks);
+            if (gain <= 0) return false;
+            // The speaker is looked up on the first routed sound, so it can be !player; a missing one ends the routing.
+            double[] speakerAt = null;
+            UUID speakerPlayer = null;
+            if (speakerName.equalsIgnoreCase("!player")) {
+                PlayerActor player = map.player(null);
+                if (player != null) speakerPlayer = player.id();
+            } else {
+                LogicEntity entity = map.findFirst(speakerName, this, null, this);
+                if (entity != null) speakerAt = entity.position();
+            }
+            if (speakerAt == null && speakerPlayer == null) {
+                dev.theredja.src2mc.Src2mc.LOGGER.warn("src2mc logic: env_microphone {} names a speaker that does not exist: {}", name(), speakerName);
+                speakerName = null;
+                return false;
+            }
+            lastSound = map.emitRouted(script, speakerAt, speakerPlayer, caption, duration, gain, voice, originalId);
+            fire("onroutedsound", this, null);
+            return hasSpawnFlags(SWALLOW_ROUTED_SOUNDS);
+        }
+
+        private static double square(double value) { return value * value; }
+
+        private static String blankToNull(String value) { return value == null || value.isBlank() ? null : value.trim(); }
+
+        @Override void save(CompoundTag tag) {
+            super.save(tag);
+            tag.putBoolean("disabled", disabled);
+            if (speakerChanged || speakerName == null) tag.putString("speaker", speakerName == null ? "" : speakerName);
+        }
+
+        @Override void load(CompoundTag tag) {
+            super.load(tag);
+            disabled = tag.getBoolean("disabled");
+            if (tag.contains("speaker")) {
+                speakerName = blankToNull(tag.getString("speaker"));
+                speakerChanged = true;
+            }
+        }
+
+        @Override String state() {
+            return (disabled ? "disabled" : "enabled") + ", speaker " + (speakerName == null ? "none" : speakerName);
         }
     }
 }

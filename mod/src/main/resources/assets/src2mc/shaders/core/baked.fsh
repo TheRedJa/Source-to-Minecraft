@@ -50,6 +50,59 @@ uniform vec3 SourceFogColor;
 
 // Half a step of 8-bit noise, fixed to the screen (interleaved gradient noise): breaks up the
 // bands smooth fog leaves in dark scenes once the frame is stored at 8 bits.
+// light_dynamic's dlights (client/render/DynamicLights): per light, columns position (camera-relative)
+// and radius, linear colour and flags (1 no world, 2 no model), direction and cos of the outer cone
+// half-angle (-2 for a point light), cos of the inner one. DLightMode picks the falloff, which is the
+// engine's and not public: 1 linear 1 - d/r, 2 quadratic 1 - (d/r)^2.
+uniform int DLightCount;
+uniform float DLightMode;
+uniform mat4 DLight0;
+uniform mat4 DLight1;
+uniform mat4 DLight2;
+uniform mat4 DLight3;
+uniform mat4 DLight4;
+uniform mat4 DLight5;
+uniform mat4 DLight6;
+uniform mat4 DLight7;
+
+mat4 dlight(int i) {
+    if (i == 0) return DLight0;
+    if (i == 1) return DLight1;
+    if (i == 2) return DLight2;
+    if (i == 3) return DLight3;
+    if (i == 4) return DLight4;
+    if (i == 5) return DLight5;
+    if (i == 6) return DLight6;
+    return DLight7;
+}
+
+// The dlights' light at camera-relative point p with unit normal n: models (props) take Lambert's
+// cosine, the world's lightmapped faces only the distance, as Quake's lightmap dlights did.
+vec3 dynamicLight(vec3 p, vec3 n, bool model) {
+    vec3 sum = vec3(0.0);
+    for (int i = 0; i < 8; i++) {
+        if (i >= DLightCount) break;
+        mat4 l = dlight(i);
+        int flags = int(l[1].w + 0.5);
+        if (model ? (flags / 2) % 2 == 1 : flags % 2 == 1) continue;
+        vec3 d = l[0].xyz - p;
+        float dist = length(d);
+        float r = l[0].w;
+        if (r <= 0.0 || dist >= r) continue;
+        float x = dist / r;
+        float atten = DLightMode > 1.5 ? 1.0 - x * x : 1.0 - x;
+        vec3 toLight = dist > 1.0e-4 ? d / dist : n;
+        if (l[2].w > -1.5) {
+            float cosAngle = dot(-toLight, l[2].xyz);
+            float spread = max(l[3].x - l[2].w, 1.0e-4);
+            atten *= clamp((cosAngle - l[2].w) / spread, 0.0, 1.0);
+        }
+        if (model) atten *= max(dot(n, toLight), 0.0);
+        sum += l[1].rgb * atten;
+    }
+    return sum;
+}
+
 float dither() {
     return (fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715)))) - 0.5) / 255.0;
 }
@@ -377,6 +430,10 @@ void main() {
         // A cube-lit prop in the world's lights: the cube in its rgb plus the local lights the
         // vertex shader summed, Lambert per vertex as in Source.
         light += vertexLocal;
+    }
+    if (DLightCount > 0) {
+        vec3 dn = dot(worldNormal, worldNormal) > 0.0 ? normalize(worldNormal) : vec3(0.0, 1.0, 0.0);
+        light += dynamicLight(worldOffset, dn, bakedLight.w > 0.5);
     }
     if (DebugToggles.x > 0.5) base = vec3(0.5);
     vec3 diffuse = base * light;

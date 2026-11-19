@@ -717,6 +717,14 @@ public final class MapSurfaceRenderer {
 
     @SubscribeEvent(priority = EventPriority.HIGHEST)
     public static void render(RenderLevelStageEvent event) {
+        if (dev.theredja.src2mc.client.view.SecondaryView.active()) {
+            // A camera's view: draw only what the main pass kept for it, with none of the frame's bookkeeping.
+            Minecraft minecraft = Minecraft.getInstance();
+            if (minecraft.level == null || generationSequence < 0) return;
+            if (event.getStage() == opaqueStage) draw(event, Src2mc.bundles().active(), false, false);
+            else if (event.getStage() == RenderLevelStageEvent.Stage.AFTER_PARTICLES) draw(event, Src2mc.bundles().active(), true, false);
+            return;
+        }
         boolean shadowPass = IrisCompat.renderingShadowPass();
         if (shadowPass) SHADOW_STAGES_SEEN.add(event.getStage().toString());
         if (event.getStage() == opaqueStage) {
@@ -727,7 +735,7 @@ public final class MapSurfaceRenderer {
         }
     }
 
-    static RenderLevelStageEvent.Stage opaqueStage() { return opaqueStage; }
+    public static RenderLevelStageEvent.Stage opaqueStage() { return opaqueStage; }
 
     /** The frame count atlas page residency is stamped with; other renderers sharing the pages use it too. */
     public static long currentFrame() { return frame; }
@@ -830,6 +838,8 @@ public final class MapSurfaceRenderer {
         int cameraSectionX = SectionPos.blockToSectionCoord(camera.x);
         int cameraSectionZ = SectionPos.blockToSectionCoord(camera.z);
         int distance = minecraft.options.getEffectiveRenderDistance() + 1;
+        // Cameras drawn this frame besides the player's (point_camera, script_intro) keep their regions built too.
+        List<net.minecraft.world.phys.Vec3> views = dev.theredja.src2mc.client.view.SecondaryView.interestPoints();
         List<BuildCandidate> candidates = new ArrayList<>();
         for (MapPlacement placement : placements) {
             var located = generation.findLocatedMap(placement.campaignId(), placement.mapId()).orElse(null);
@@ -837,16 +847,26 @@ public final class MapSurfaceRenderer {
             BundleMap map = located.map();
             for (RegionEntry entry : regionEntries(placement, map)) {
                 // Regions span several sections: keep one while any of its sections is in range.
-                if (sectionGap(cameraSectionX, entry.minSectionX, entry.maxSectionX) > distance
-                    || sectionGap(cameraSectionZ, entry.minSectionZ, entry.maxSectionZ) > distance) continue;
+                boolean main = sectionGap(cameraSectionX, entry.minSectionX, entry.maxSectionX) <= distance
+                    && sectionGap(cameraSectionZ, entry.minSectionZ, entry.maxSectionZ) <= distance;
+                boolean secondary = false;
+                for (var view : views) {
+                    int viewX = SectionPos.blockToSectionCoord(view.x), viewZ = SectionPos.blockToSectionCoord(view.z);
+                    if (sectionGap(viewX, entry.minSectionX, entry.maxSectionX) <= distance
+                        && sectionGap(viewZ, entry.minSectionZ, entry.maxSectionZ) <= distance) { secondary = true; break; }
+                }
+                if (!main && !secondary) continue;
                 RegionKey regionKey = entry.key;
                 if (BUILT_REGIONS.containsKey(regionKey)) {
                     BUILT_REGIONS.put(regionKey, frame);
                 } else if (!IN_FLIGHT.containsKey(regionKey)) {
                     candidates.add(new BuildCandidate(located.bundle(), map, entry, distanceSquared(entry.bounds, camera)));
                 }
-                if (pvsCulling && !regionPvsVisible(map, placement, entry.group.clusters())) { pvsRejectedRegions++; continue; }
                 Map<PageClass, Mesh> meshes = REGION_MESHES.get(regionKey);
+                // A camera's view has no PVS of its own here: the frustum culls it.
+                if (secondary && meshes != null) for (Mesh mesh : meshes.values()) mesh.lastSecondaryFrame = frame;
+                if (!main) continue;
+                if (pvsCulling && !regionPvsVisible(map, placement, entry.group.clusters())) { pvsRejectedRegions++; continue; }
                 if (meshes != null) for (Mesh mesh : meshes.values()) mesh.lastVisibleFrame = frame;
             }
         }
@@ -968,6 +988,7 @@ public final class MapSurfaceRenderer {
 
     private static void draw(RenderLevelStageEvent event, BundleGeneration generation, boolean translucent, boolean shadowPass) {
         if (!BakedLighting.ready()) return;
+        boolean secondaryView = dev.theredja.src2mc.client.view.SecondaryView.active();
         long started = System.nanoTime();
         var camera = event.getCamera().getPosition();
         List<DrawItem> drawItems = new ArrayList<>();
@@ -983,8 +1004,9 @@ public final class MapSurfaceRenderer {
                 // Never the event's frustum here; see shadowFrustum().
                 if (casterFrustum != null && !casterFrustum.isVisible(mesh.bounds)) { shadowRejectedFrustum++; continue; }
             } else {
-                if (mesh.lastVisibleFrame != frame) continue;
-                if (frustumCulling && !event.getFrustum().isVisible(mesh.bounds)) { STATS.frustumRejected++; continue; }
+                if ((secondaryView ? mesh.lastSecondaryFrame : mesh.lastVisibleFrame) != frame) continue;
+                if (secondaryView ? !event.getFrustum().isVisible(mesh.bounds)
+                    : frustumCulling && !event.getFrustum().isVisible(mesh.bounds)) { if (!secondaryView) STATS.frustumRejected++; continue; }
             }
             drawItems.add(new DrawItem(key, mesh, nearestDistanceSquared(mesh.bounds, camera)));
         }
@@ -1029,7 +1051,7 @@ public final class MapSurfaceRenderer {
                 activeMesh = mesh;
                 activeClass = key.renderClass;
                 activePage = key.page;
-                if (!shadowPass) STATS.stateSwitches++;
+                if (!shadowPass && !secondaryView) STATS.stateSwitches++;
             }
             Matrix4f modelView = new Matrix4f(event.getModelViewMatrix()).translate(
                 (float) (mesh.origin.getX() - camera.x),
@@ -1044,7 +1066,9 @@ public final class MapSurfaceRenderer {
             if (suppressDepthWrite) RenderSystem.depthMask(true);
         }
         VertexBuffer.unbind();
-        if (shadowPass) {
+        if (secondaryView) {
+            return;
+        } else if (shadowPass) {
             STATS.shadowTriangles += triangles;
         } else {
             STATS.draws += drawItems.size();
@@ -1536,6 +1560,8 @@ public final class MapSurfaceRenderer {
          * then: 36 is vanilla NEW_ENTITY, anything larger is Iris's extended entity format. */
         final int vertexSize; final boolean builtWithShaders;
         long lastVisibleFrame;
+        /** The last main-pass frame a secondary view (camera, intro) was near this mesh; -1 for never. */
+        long lastSecondaryFrame = -1;
         Mesh(BundleManifest bundle, AtlasIndex atlas, VertexBuffer buffer, BlockPos origin, AABB bounds, long triangles, long frame,
              long bakeEpoch, boolean bakeCovered, int skyMin, int skyMax, int vertexSize, boolean builtWithShaders) {
             this.bundle = bundle; this.atlas = atlas; this.buffer = buffer; this.origin = origin; this.bounds = bounds; this.triangles = triangles; this.lastVisibleFrame = frame;

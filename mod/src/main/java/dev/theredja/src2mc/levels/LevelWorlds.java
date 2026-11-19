@@ -203,8 +203,11 @@ public final class LevelWorlds {
             yRot = xRot = 0;
             type = MapLogic.LoadType.TRANSITION;
         } else {
-            var start = map.logic().entities().stream()
-                .filter(entity -> entity.classname().equals("info_player_start") && entity.origin() != null).findFirst().orElse(null);
+            // FindPlayerStart (player.cpp:4900): the first start flagged Master (spawnflag 1), else the first.
+            var starts = map.logic().entities().stream()
+                .filter(entity -> entity.classname().equals("info_player_start") && entity.origin() != null).toList();
+            var start = starts.stream().filter(entity -> (spawnFlags(entity) & 1) != 0).findFirst()
+                .orElse(starts.isEmpty() ? null : starts.getFirst());
             if (start == null) {
                 fail(player, placement.mapId() + " has no info_player_start", failMode(pending, restoreMode));
                 return;
@@ -220,6 +223,7 @@ public final class LevelWorlds {
             player.teleportTo(level, position.x, position.y, position.z, yRot, xRot);
             player.setDeltaMovement(motion);
             player.hurtMarked = true;
+            dev.theredja.src2mc.logic.MoverSystem.freezeOnto(player);
         }
         player.setGameMode(restoreMode);
         // The client is still behind its loading screen: the map's clock waits for its ready report (the menu has none).
@@ -266,6 +270,17 @@ public final class LevelWorlds {
         Src2mc.LOGGER.error("src2mc level change failed: {}", message);
         if (restoreMode != null) player.setGameMode(restoreMode);
         PacketDistributor.sendToPlayer(player, new LevelNetwork.LoadedPayload(false, message));
+    }
+
+    /** An entity's {@code spawnflags}; 0 when absent or not a number. */
+    private static int spawnFlags(dev.theredja.src2mc.bundle.LogicTable.Entity entity) {
+        String value = entity.value("spawnflags");
+        if (value == null) return 0;
+        try {
+            return Integer.parseInt(value.trim());
+        } catch (NumberFormatException e) {
+            return 0;
+        }
     }
 
     /** A {@code pitch yaw roll} keyvalue; missing parts are 0. */

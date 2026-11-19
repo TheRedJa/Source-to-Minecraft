@@ -226,6 +226,7 @@ public final class BakedLighting {
         // No local lights until PropLights.apply names a set: row 0 is none, so a draw that does
         // not apply never inherits the previous prop's row.
         PropLights.reset(shader);
+        DynamicLights.apply(shader);
         shader.safeGetUniform("NormalTurn").set(normalTurn == null ? new Matrix3f() : normalTurn);
         if (cube != null) {
             String[] sides = {"AmbientPX", "AmbientNX", "AmbientPY", "AmbientNY", "AmbientPZ", "AmbientNZ"};

@@ -21,7 +21,7 @@ import net.neoforged.neoforge.network.PacketDistributor;
  * {@code /src2mc menu <campaign> [map]}: takes the player into the world of a campaign's menu map, as a level
  * change without a landmark does (the player spawns at {@code info_player_start}), but as a fresh player: nothing
  * of the old world's player is carried over. Without a map it is the campaign's map that has an INFRA main-menu
- * panel in its screens table.
+ * panel in its screens table. A named map without such a panel is entered as a new game instead.
  */
 public final class MenuCommand {
     private MenuCommand() {}
@@ -76,7 +76,10 @@ public final class MenuCommand {
                 : "src2mc menu: `" + campaign + "` has no map `" + mapId + "`"));
             return 0;
         }
-        LevelTransition.set(new LevelTransition.Pending(LevelTransition.Kind.MENU, bundle.campaignId(), map.mapId(), null, Vec3.ZERO,
+        // A map without a main-menu panel is no menu: it is entered as a new game, so the player plays it (not spectating).
+        ScreensData screens = ScreensData.of(bundle, map);
+        LevelTransition.Kind kind = screens != null && screens.hasMainPanel() ? LevelTransition.Kind.MENU : LevelTransition.Kind.NEW_GAME;
+        LevelTransition.set(new LevelTransition.Pending(kind, bundle.campaignId(), map.mapId(), null, Vec3.ZERO,
             player.getYRot(), player.getXRot(), Vec3.ZERO, null));
         PacketDistributor.sendToPlayer(player, new LevelNetwork.ChangePayload(bundle.campaignId(), map.mapId()));
         source.sendSuccess(() -> Component.literal("src2mc menu: opening " + map.mapId() + " of " + bundle.campaignId()), false);

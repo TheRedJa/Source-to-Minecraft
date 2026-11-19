@@ -105,7 +105,8 @@ public final class LogicPropRenderer {
 
     @SubscribeEvent
     public static void render(RenderLevelStageEvent event) {
-        boolean timed = event.getStage() == MapSurfaceRenderer.opaqueStage() || event.getStage() == RenderLevelStageEvent.Stage.AFTER_PARTICLES;
+        boolean timed = (event.getStage() == MapSurfaceRenderer.opaqueStage() || event.getStage() == RenderLevelStageEvent.Stage.AFTER_PARTICLES)
+            && !dev.theredja.src2mc.client.view.SecondaryView.active();
         GpuTimer.Phase phase = IrisCompat.renderingShadowPass() ? GpuTimer.Phase.LOGIC_PROPS_SHADOW : GpuTimer.Phase.LOGIC_PROPS;
         if (timed) GpuTimer.begin(phase);
         try {
@@ -118,7 +119,7 @@ public final class LogicPropRenderer {
     private static void renderStage(RenderLevelStageEvent event) {
         boolean shadowPass = IrisCompat.renderingShadowPass();
         if (event.getStage() == MapSurfaceRenderer.opaqueStage()) {
-            if (!shadowPass) prepare();
+            if (!shadowPass && !dev.theredja.src2mc.client.view.SecondaryView.active()) prepare();
             draw(event, false);
         } else if (event.getStage() == RenderLevelStageEvent.Stage.AFTER_PARTICLES && !shadowPass) {
             draw(event, true);
@@ -164,7 +165,7 @@ public final class LogicPropRenderer {
                 if (record == null) continue;
                 double[] t = record.translation();
                 double dx = placement.translation().getX() + t[0] - camera.x, dz = placement.translation().getZ() + t[2] - camera.z;
-                if (dx * dx + dz * dz > reach * reach) continue;
+                if (dx * dx + dz * dz > reach * reach && !dev.theredja.src2mc.client.view.SecondaryView.within(camera.x + dx, camera.z + dz, reach)) continue;
                 Key key = new Key(placement, prop.entity());
                 wanted.add(key);
                 Built built = BUILT.get(key);

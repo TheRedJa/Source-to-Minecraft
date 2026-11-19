@@ -202,6 +202,13 @@ public final class PropRenderer {
 
     @SubscribeEvent(priority = EventPriority.LOWEST)
     public static void render(RenderLevelStageEvent event) {
+        if (dev.theredja.src2mc.client.view.SecondaryView.active()) {
+            // A camera's view: draw the aggregates there are, no residency, occlusion queries or frame advance.
+            if (Minecraft.getInstance().level == null || generationSequence < 0 || !renderingEnabled) return;
+            if (event.getStage() == MapSurfaceRenderer.opaqueStage()) draw(event, Src2mc.bundles().active(), false, false);
+            else if (event.getStage() == RenderLevelStageEvent.Stage.AFTER_PARTICLES) draw(event, Src2mc.bundles().active(), true, false);
+            return;
+        }
         boolean shadowPass = IrisCompat.renderingShadowPass();
         if (event.getStage() == MapSurfaceRenderer.opaqueStage()) {
             if (shadowPass) drawShadowPass(event, false); else renderOpaque(event);
@@ -336,10 +343,15 @@ public final class PropRenderer {
         int[] root = prop.rootCell();
         BlockPos position = placement.translation().offset(root[0], root[1], root[2]);
         int chunkX = SectionPos.blockToSectionCoord(position.getX()), chunkZ = SectionPos.blockToSectionCoord(position.getZ());
-        if (!window.holds(chunkX, chunkZ) || clientLevel.isOutsideBuildHeight(position)) return RootStatus.UNLOADED;
+        if (clientLevel.isOutsideBuildHeight(position)) return RootStatus.UNLOADED;
+        // Where a camera's view looks at chunks the client does not have, the root counts as standing, as the
+        // surface renderer counts an absent chunk's surface cells as present.
+        boolean viewed = dev.theredja.src2mc.client.view.SecondaryView.near(position.getX(), position.getZ(),
+            Minecraft.getInstance().options.getEffectiveRenderDistance() + 1);
+        if (!window.holds(chunkX, chunkZ)) return viewed ? RootStatus.ACTIVE : RootStatus.UNLOADED;
         // Without creating one: a prop alone never loads a client chunk.
         var chunk = clientLevel.getChunkSource().getChunk(chunkX, chunkZ, false);
-        if (chunk == null) return RootStatus.UNLOADED;
+        if (chunk == null) return viewed ? RootStatus.ACTIVE : RootStatus.UNLOADED;
         if (!chunk.getBlockState(position).is(Src2mcWorldContent.PROP_ROOT.get())) return RootStatus.MISSING;
         BlockEntity blockEntity = chunk.getBlockEntity(position, net.minecraft.world.level.chunk.LevelChunk.EntityCreationType.IMMEDIATE);
         if (!(blockEntity instanceof Src2mcDataBlockEntity data)) return RootStatus.SCHEMA;
@@ -356,13 +368,17 @@ public final class PropRenderer {
         return prop.stableId().equals(data.payloadString("stable_id")) ? RootStatus.ACTIVE : RootStatus.IDENTITY;
     }
 
+    private static int lastScanViews;
+
     private static void buildVisibleProps(BundleGeneration generation, Minecraft minecraft, List<MapPlacement> placements) {
         var camera = minecraft.gameRenderer.getMainCamera().getPosition();
         int cameraSectionX = SectionPos.blockToSectionCoord(camera.x), cameraSectionZ = SectionPos.blockToSectionCoord(camera.z);
         // With nothing left to register and the camera in the same section, the walk over every
         // prop of every placement only restamps residency, which has 600 frames of grace. It
         // still runs on the frames the roots are rechecked, which is when new roots appear.
-        boolean moved = cameraSectionX != lastScanSectionX || cameraSectionZ != lastScanSectionZ;
+        int views = dev.theredja.src2mc.client.view.SecondaryView.interestPoints().hashCode();
+        boolean moved = cameraSectionX != lastScanSectionX || cameraSectionZ != lastScanSectionZ || views != lastScanViews;
+        lastScanViews = views;
         if (!moved && nearbyUnbuilt == 0 && REGISTERING.isEmpty() && frame % ROOT_RECHECK_FRAMES != 1) return;
         lastScanSectionX = cameraSectionX; lastScanSectionZ = cameraSectionZ;
         int distance = minecraft.options.getEffectiveRenderDistance() + 1;
@@ -380,7 +396,9 @@ public final class PropRenderer {
                 double[] translation = prop.translation();
                 int sx = SectionPos.blockToSectionCoord(placement.translation().getX() + translation[0]);
                 int sz = SectionPos.blockToSectionCoord(placement.translation().getZ() + translation[2]);
-                if (Math.abs(sx - cameraSectionX) > distance || Math.abs(sz - cameraSectionZ) > distance) continue;
+                if ((Math.abs(sx - cameraSectionX) > distance || Math.abs(sz - cameraSectionZ) > distance)
+                    && !dev.theredja.src2mc.client.view.SecondaryView.near(placement.translation().getX() + translation[0],
+                        placement.translation().getZ() + translation[2], distance)) continue;
                 // Residency follows render distance, not the camera frustum. Looking away must not
                 // make a nearby prop expire and slowly rebuild when the player turns around.
                 if (BUILT_PROPS.contains(key)) { LAST_VISIBLE.put(key, frame); nearbyBuilt++; continue; }
@@ -724,6 +742,7 @@ public final class PropRenderer {
 
     private static void draw(RenderLevelStageEvent event, BundleGeneration generation, boolean translucent, boolean shadowPass) {
         if (!BakedLighting.ready()) return;
+        boolean secondaryView = dev.theredja.src2mc.client.view.SecondaryView.active();
         long started = System.nanoTime();
         var camera = event.getCamera().getPosition();
         List<Map.Entry<AggregateKey, Mesh>> visible = new ArrayList<>();
@@ -735,7 +754,7 @@ public final class PropRenderer {
             if (mesh == null || (key.renderClass() == BundleMaterial.RenderClass.TRANSLUCENT) != translucent) continue;
             // PVS answers "can the player's BSP leaf see this", which is the wrong question for a
             // shadow caster: geometry the player cannot see still casts shadows the player can.
-            if (!shadowPass && MapSurfaceRenderer.pvsCulling() && CameraVisibility.row() != null && key.placement().equals(CameraVisibility.placement())) {
+            if (!shadowPass && !secondaryView && MapSurfaceRenderer.pvsCulling() && CameraVisibility.row() != null && key.placement().equals(CameraVisibility.placement())) {
                 short[] clusters = CameraVisibility.table().sectionClusters(key.sectionX(), key.sectionY(), key.sectionZ());
                 if (!CameraVisibility.table().visible(CameraVisibility.row(), clusters)) { PERF.add(PropRenderPerf.M_PVS_REJECTED, 1); continue; }
             }
@@ -744,17 +763,17 @@ public final class PropRenderer {
                 shadowConsidered++;
                 if (!MapSurfaceRenderer.withinShadowDistance(mesh.bounds, camera)) { shadowRejectedDistance++; continue; }
                 if (casterFrustum != null && !casterFrustum.isVisible(mesh.bounds)) { shadowRejectedFrustum++; continue; }
-            } else if (MapSurfaceRenderer.frustumCulling() && !event.getFrustum().isVisible(mesh.bounds)) continue;
+            } else if ((secondaryView || MapSurfaceRenderer.frustumCulling()) && !event.getFrustum().isVisible(mesh.bounds)) continue;
             // Translucent props draw at AFTER_PARTICLES, when the depth buffer already holds glass,
             // water, entities and particles; a query there would cull props behind any of them.
-            if (!shadowPass && !translucent) {
+            if (!shadowPass && !translucent && !secondaryView) {
                 queryCandidates.add(new OcclusionCuller.Candidate<>(key, mesh.bounds, mesh.triangles));
                 if (OCCLUSION.shouldCull(key, mesh.bounds, view, mesh.triangles)) continue;
             }
             visible.add(Map.entry(key, mesh));
         }
         if (shadowPass) shadowDrawn += visible.size();
-        if (!shadowPass && !translucent) OCCLUSION.issue(queryCandidates, view, event.getModelViewMatrix(), event.getProjectionMatrix());
+        if (!shadowPass && !translucent && !secondaryView) OCCLUSION.issue(queryCandidates, view, event.getModelViewMatrix(), event.getProjectionMatrix());
         if (translucent) visible.sort(Comparator.<Map.Entry<AggregateKey, Mesh>>comparingDouble(item -> -distanceSquared(item.getValue().bounds, camera)));
         // Nearest first within a render-state group, so the depth test rejects hidden pixels early.
         else if (MapSurfaceRenderer.sortedDraws()) visible.sort(Comparator.<Map.Entry<AggregateKey, Mesh>>comparingInt(item -> item.getKey().renderClass().ordinal())

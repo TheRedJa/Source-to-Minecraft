@@ -59,6 +59,8 @@ public final class LookCommands {
             .then(literal("lightatten")
                 .then(literal("vertex").executes(context -> { dev.theredja.src2mc.client.render.PropLights.lightAttenVertex = true; return reply(context.getSource(), "src2mc phong light attenuation per vertex (Source)"); }))
                 .then(literal("pixel").executes(context -> { dev.theredja.src2mc.client.render.PropLights.lightAttenVertex = false; return reply(context.getSource(), "src2mc phong light attenuation per pixel"); })))
+            .then(literal("dlight")
+                .then(dlight("off", 0)).then(dlight("linear", 1)).then(dlight("quadratic", 2)))
             .then(literal("phongdebug")
                 .then(phongDebug("off", 0)).then(phongDebug("diffuse", 1)).then(phongDebug("spec", 2)).then(phongDebug("lights", 3)))
             .then(literal("bump")
@@ -72,6 +74,15 @@ public final class LookCommands {
                 .then(argument("scale", FloatArgumentType.floatArg(0.01f, 64f))
                     .executes(context -> held(context.getSource(), FloatArgumentType.getFloat(context, "scale")))))
             .then(literal("status").executes(context -> status(context.getSource()))));
+    }
+
+    /** The falloff of {@code light_dynamic}'s lights (the engine's is not public), or none. */
+    private static LiteralArgumentBuilder<CommandSourceStack> dlight(String name, int mode) {
+        return literal(name).executes(context -> {
+            dev.theredja.src2mc.client.render.DynamicLights.mode = mode;
+            return reply(context.getSource(), "src2mc dynamic lights " + name + " (" + dev.theredja.src2mc.client.render.DynamicLights.lightsLastFrame()
+                + " lit last frame)");
+        });
     }
 
     /** {@code on} and {@code off} under {@code node}. */

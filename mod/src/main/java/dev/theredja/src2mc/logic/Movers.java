@@ -707,7 +707,7 @@ final class Movers {
      * collides only with {@code solidity} 2; enabled it collides unless {@code solidity} is 1.
      * Shown and hidden through its sub-level, which carries it whether it moves or not.
      */
-    static final class Brush extends LogicEntity {
+    static class Brush extends LogicEntity {
         private boolean disabled;
         private int solidity;
 

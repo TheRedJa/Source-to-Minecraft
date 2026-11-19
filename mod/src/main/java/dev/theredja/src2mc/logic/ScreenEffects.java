@@ -5,6 +5,9 @@ import dev.theredja.src2mc.bundle.LogicTable;
 import io.netty.handler.codec.DecoderException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
 import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.network.codec.StreamCodec;
 import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
@@ -81,6 +84,108 @@ public final class ScreenEffects {
         @Override public Type<? extends CustomPacketPayload> type() { return TYPE; }
     }
 
+    /** {@code HudText}'s slot: a message that takes the first free of sixteen, not one of {@code game_text}'s channels. */
+    public static final int CHANNEL_HUDTEXT = 255;
+
+    /**
+     * {@code CBasePlayer::SetFOV}: Source's horizontal field of view at 4:3 in degrees, 0 for the
+     * player's own, reached over {@code rate} seconds (0 at once).
+     */
+    public record ZoomPayload(float fov, float rate) implements CustomPacketPayload {
+        public static final Type<ZoomPayload> TYPE = new Type<>(ResourceLocation.fromNamespaceAndPath(Src2mc.MOD_ID, "screen_zoom"));
+        public static final StreamCodec<FriendlyByteBuf, ZoomPayload> STREAM_CODEC = StreamCodec.of(
+            (buffer, p) -> { buffer.writeFloat(p.fov); buffer.writeFloat(p.rate); },
+            buffer -> new ZoomPayload(buffer.readFloat(), buffer.readFloat()));
+        @Override public Type<? extends CustomPacketPayload> type() { return TYPE; }
+    }
+
+    /** {@code C_EnvStarfield}'s networked state: whether it is on and how many particles it adds a frame. */
+    public record StarfieldPayload(boolean on, float density) implements CustomPacketPayload {
+        public static final Type<StarfieldPayload> TYPE = new Type<>(ResourceLocation.fromNamespaceAndPath(Src2mc.MOD_ID, "screen_starfield"));
+        public static final StreamCodec<FriendlyByteBuf, StarfieldPayload> STREAM_CODEC = StreamCodec.of(
+            (buffer, p) -> { buffer.writeBoolean(p.on); buffer.writeFloat(p.density); },
+            buffer -> new StarfieldPayload(buffer.readBoolean(), buffer.readFloat()));
+        @Override public Type<? extends CustomPacketPayload> type() { return TYPE; }
+    }
+
+    /** The longest logo text the credits message carries. */
+    static final int MAX_TEXT = 256;
+
+    /** {@code CreditsParams} of {@code scripts/credits.txt} as {@code CHudCredits::ReadParams} reads them; {@code color} is {@code 0xRRGGBBAA}. */
+    public record CreditsParams(float fadeIn, float fadeOut, float fadeHold, float nextFade, float pause, float logoTime, float x, float y,
+                                int color, float scrollTime, float separation, String logo, String logo2) {
+        static CreditsParams read(Map<String, String> params) {
+            return new CreditsParams(real(params, "fadeintime", 1), real(params, "fadeouttime", 2), real(params, "fadeholdtime", 3),
+                real(params, "nextfadetime", 2), real(params, "pausebetweenwaves", 2), real(params, "logotime", 2),
+                real(params, "posx", 2), real(params, "posy", 2), rgba(params.get("color")), real(params, "scrolltime", 57),
+                real(params, "separation", 5), clamp(params.getOrDefault("logo", "HALF-LIFE'")), clamp(params.getOrDefault("logo2", "")));
+        }
+
+        /** The logo texts go over the wire with a 256 character limit: a longer one would fail the whole message. */
+        private static String clamp(String text) { return text.length() > MAX_TEXT ? text.substring(0, MAX_TEXT) : text; }
+
+        private static float real(Map<String, String> params, String key, float fallback) {
+            String value = params.get(key);
+            return value == null ? fallback : (float) Variant.number(value);
+        }
+
+        void write(FriendlyByteBuf buffer) {
+            buffer.writeFloat(fadeIn); buffer.writeFloat(fadeOut); buffer.writeFloat(fadeHold); buffer.writeFloat(nextFade);
+            buffer.writeFloat(pause); buffer.writeFloat(logoTime); buffer.writeFloat(x); buffer.writeFloat(y); buffer.writeInt(color);
+            buffer.writeFloat(scrollTime); buffer.writeFloat(separation); buffer.writeUtf(logo, MAX_TEXT); buffer.writeUtf(logo2, MAX_TEXT);
+        }
+
+        static CreditsParams read(FriendlyByteBuf buffer) {
+            return new CreditsParams(buffer.readFloat(), buffer.readFloat(), buffer.readFloat(), buffer.readFloat(), buffer.readFloat(),
+                buffer.readFloat(), buffer.readFloat(), buffer.readFloat(), buffer.readInt(), buffer.readFloat(), buffer.readFloat(),
+                buffer.readUtf(MAX_TEXT), buffer.readUtf(MAX_TEXT));
+        }
+    }
+
+    /** One line of the credits and the scheme font it is drawn in. */
+    public record CreditsName(String name, String font) {}
+
+    /**
+     * {@code CreditsMsg} and {@code LogoTimeMsg}: {@code kind} 1 shows the logo for {@code logoLength} seconds (0: Source's
+     * 5), 2 rolls the intro names, 3 the outro. {@code logo} is the logo as a PNG, or empty.
+     */
+    public record CreditsPayload(int kind, float logoLength, CreditsParams params, List<CreditsName> names, byte[] logo) implements CustomPacketPayload {
+        public static final int LOGO = 1, INTRO = 2, OUTRO = 3;
+        /**
+         * The most the logo image may take. A custom payload is limited to 1 MiB in all, and the names and
+         * parameters share it, so the image gets half; a bigger one is left out and the logo drawn as text.
+         */
+        public static final int MAX_LOGO = 512 * 1024;
+        public static final Type<CreditsPayload> TYPE = new Type<>(ResourceLocation.fromNamespaceAndPath(Src2mc.MOD_ID, "screen_credits"));
+        public static final StreamCodec<FriendlyByteBuf, CreditsPayload> STREAM_CODEC = StreamCodec.of(
+            (buffer, p) -> {
+                buffer.writeByte(p.kind); buffer.writeFloat(p.logoLength); p.params.write(buffer);
+                buffer.writeVarInt(p.names.size());
+                for (CreditsName name : p.names) { buffer.writeUtf(name.name, 256); buffer.writeUtf(name.font, 64); }
+                buffer.writeByteArray(p.logo);
+            },
+            buffer -> {
+                int kind = buffer.readUnsignedByte();
+                if (kind < LOGO || kind > OUTRO) throw new DecoderException("invalid src2mc credits kind " + kind);
+                float logoLength = buffer.readFloat();
+                CreditsParams params = CreditsParams.read(buffer);
+                int count = buffer.readVarInt();
+                if (count < 0 || count > 4096) throw new DecoderException("invalid src2mc credits count " + count);
+                List<CreditsName> names = new ArrayList<>(count);
+                for (int i = 0; i < count; i++) names.add(new CreditsName(buffer.readUtf(256), buffer.readUtf(64)));
+                return new CreditsPayload(kind, logoLength, params, names, buffer.readByteArray(MAX_LOGO));
+            });
+        @Override public Type<? extends CustomPacketPayload> type() { return TYPE; }
+    }
+
+    /** {@code KeyHintText}: the hint's text with its {@code %command%} placeholders, or empty to hide it. */
+    public record HudHintPayload(String text) implements CustomPacketPayload {
+        public static final Type<HudHintPayload> TYPE = new Type<>(ResourceLocation.fromNamespaceAndPath(Src2mc.MOD_ID, "screen_hudhint"));
+        public static final StreamCodec<FriendlyByteBuf, HudHintPayload> STREAM_CODEC = StreamCodec.of(
+            (buffer, p) -> buffer.writeUtf(p.text, 2048), buffer -> new HudHintPayload(buffer.readUtf(2048)));
+        @Override public Type<? extends CustomPacketPayload> type() { return TYPE; }
+    }
+
     public static final int SHAKE_START = 0, SHAKE_STOP = 1, SHAKE_AMPLITUDE = 2, SHAKE_FREQUENCY = 3, SHAKE_START_RUMBLEONLY = 4,
         SHAKE_START_NORUMBLE = 5;
     public static final int FFADE_IN = 1, FFADE_OUT = 2, FFADE_MODULATE = 4, FFADE_STAYOUT = 8, FFADE_PURGE = 16;
@@ -96,6 +201,14 @@ public final class ScreenEffects {
             (payload, context) -> dev.theredja.src2mc.client.logic.ScreenOverlay.clear());
         registrar.playToClient(ShakePayload.TYPE, ShakePayload.STREAM_CODEC,
             (payload, context) -> dev.theredja.src2mc.client.logic.ScreenOverlay.shake(payload));
+        registrar.playToClient(ZoomPayload.TYPE, ZoomPayload.STREAM_CODEC,
+            (payload, context) -> dev.theredja.src2mc.client.logic.ZoomClient.zoom(payload));
+        registrar.playToClient(StarfieldPayload.TYPE, StarfieldPayload.STREAM_CODEC,
+            (payload, context) -> dev.theredja.src2mc.client.logic.Starfield.set(payload));
+        registrar.playToClient(CreditsPayload.TYPE, CreditsPayload.STREAM_CODEC,
+            (payload, context) -> dev.theredja.src2mc.client.logic.CreditsOverlay.show(payload));
+        registrar.playToClient(HudHintPayload.TYPE, HudHintPayload.STREAM_CODEC,
+            (payload, context) -> dev.theredja.src2mc.client.logic.HudHint.show(payload));
     }
 
     /** What went to whom, for tests: a server-less run records instead of sending. */
@@ -303,6 +416,377 @@ public final class ScreenEffects {
         }
 
         @Override String state() { return "amplitude " + amplitude + ", frequency " + frequency + ", " + duration + " s, radius " + radius + "; " + reach; }
+    }
+
+    // ---- The camera and HUD entities of the intro and the hints.
+
+    /** Who {@code UTIL_GetLocalPlayer} is for a map that can have several players inside: the activator if a player, else everyone inside. */
+    private static List<ServerPlayer> locals(MapLogic map, Actor activator) {
+        ServerPlayer player = player(map, activator);
+        return player != null ? List.of(player) : map.inside();
+    }
+
+    /** {@code UTIL_ShowMessage}'s player: the activator if it is a player, else Source's only one; with several inside, nobody. */
+    private static List<ServerPlayer> onlyOne(MapLogic map, Actor activator) {
+        ServerPlayer player = player(map, activator);
+        return player != null ? List.of(player) : map.inside().size() == 1 ? map.inside() : List.of();
+    }
+
+    /** {@code client text}'s limit: a longer string would not encode. */
+    private static String clamp(String text) { return text.length() > 2000 ? text.substring(0, 2000) : text; }
+
+    /** {@code 0xAARRGGBB} as the {@code 0xRRGGBBAA} the text payload carries. */
+    private static int rrggbbaa(int argb) { return argb << 8 | argb >>> 24; }
+
+    /**
+     * Sends the zoom and starfield as they stand to players who have just come into the map (it
+     * is checked every server tick): a player arriving later, logging in, or changing dimension
+     * into it was not there when those were sent. A player is new when they were not inside the
+     * map's previous tick, so leaving and coming back counts too.
+     */
+    static void arrivals(MapLogic map, List<ServerPlayer> inside) {
+        Set<UUID> seen = map.screenPlayers();
+        List<ServerPlayer> arrived = new ArrayList<>();
+        Set<UUID> now = new java.util.HashSet<>();
+        for (ServerPlayer player : inside) {
+            now.add(player.getUUID());
+            if (!seen.contains(player.getUUID())) arrived.add(player);
+        }
+        seen.retainAll(now);
+        seen.addAll(now);
+        if (arrived.isEmpty()) return;
+        // Straight to the players: a map that has not ticked yet has no level of its own to send through.
+        for (ServerPlayer player : arrived) {
+            for (LogicEntity entity : map.entities()) {
+                if (!entity.removed && entity instanceof Starfield field && field.changed) PacketDistributor.sendToPlayer(player, new StarfieldPayload(field.on, field.density));
+            }
+            Integer owner = Zoom.OWNERS.get(map);
+            if (owner != null && map.entity(owner) instanceof Zoom zoom && !zoom.removed) PacketDistributor.sendToPlayer(player, new ZoomPayload(zoom.fov, 0));
+        }
+    }
+
+    /**
+     * {@code CEnvZoom}: {@code Zoom} takes the player's field of view to {@code FOV} over {@code Rate}
+     * seconds, {@code UnZoom} puts it back at once. A zoom holds the field of view as its owner,
+     * as {@code CBasePlayer::SetFOV} keeps {@code m_hZoomOwner}: another env_zoom's {@code Zoom} takes
+     * it over, but an {@code UnZoom} from one that does not own it only works if the owner has the
+     * override flag. The field of view is the client's; this tracks only who holds it.
+     */
+    static final class Zoom extends LogicEntity {
+        private static final int ENV_ZOOM_OVERRIDE = 1;
+        /** Per map, the entity index of the zoom that holds the field of view. */
+        private static final Map<MapLogic, Integer> OWNERS = new java.util.WeakHashMap<>();
+        private float rate;
+        private int fov;
+
+        Zoom(MapLogic map, int index, LogicTable.Entity entity) { super(map, index, entity); }
+
+        @Override void spawn() {
+            rate = (float) number("rate", 0);
+            fov = (int) number("fov", 0);
+            OWNERS.remove(map);
+        }
+
+        @Override boolean accept(String input, String value, Actor activator, LogicEntity caller) {
+            switch (input) {
+                case "zoom" -> {
+                    // The player held by another env_zoom may be taken over: it is cleared first.
+                    OWNERS.remove(map);
+                    if (fov != 0) OWNERS.put(map, index);
+                    send(map, locals(map, activator), new ZoomPayload(fov, rate));
+                }
+                case "unzoom" -> {
+                    Integer owner = OWNERS.get(map);
+                    if (owner == null || owner == index) {
+                        OWNERS.remove(map);
+                        send(map, locals(map, activator), new ZoomPayload(0, 0));
+                    } else if (map.entity(owner) instanceof Zoom other && other.hasSpawnFlags(ENV_ZOOM_OVERRIDE)) {
+                        // CanOverrideEnvZoomOwner: the field of view changes, the owner stays.
+                        send(map, locals(map, activator), new ZoomPayload(0, 0));
+                    }
+                }
+                default -> { return false; }
+            }
+            return true;
+        }
+
+        private boolean holding() { return Integer.valueOf(index).equals(OWNERS.get(map)); }
+
+        @Override void save(net.minecraft.nbt.CompoundTag tag) {
+            super.save(tag);
+            if (holding()) tag.putBoolean("zoom_owner", true);
+        }
+
+        /** A restored map has no zoom on the client; the next think sends it again, as {@code m_iFOV} is part of Source's save. */
+        @Override void load(net.minecraft.nbt.CompoundTag tag) {
+            super.load(tag);
+            if (!tag.getBoolean("zoom_owner")) return;
+            OWNERS.put(map, index);
+            nextThink = map.time();
+        }
+
+        @Override void think() { send(map, map.inside(), new ZoomPayload(fov, 0)); }
+
+        @Override String state() { return "fov " + fov + ", rate " + rate + (holding() ? ", holding the zoom" : ""); }
+    }
+
+    /** {@code CEnvStarfield}: {@code TurnOn}, {@code TurnOff}, {@code SetDensity}; the client draws the particles. */
+    static final class Starfield extends LogicEntity {
+        private boolean on;
+        private float density = 1;
+        private boolean changed;
+
+        Starfield(MapLogic map, int index, LogicTable.Entity entity) { super(map, index, entity); }
+
+        @Override void spawn() {
+            on = false;
+            density = 1;
+        }
+
+        @Override boolean accept(String input, String value, Actor activator, LogicEntity caller) {
+            switch (input) {
+                case "turnon" -> on = true;
+                case "turnoff" -> on = false;
+                case "setdensity" -> density = (float) Variant.number(value);
+                default -> { return false; }
+            }
+            changed = true;
+            // The entity is networked to everyone, so everyone in the map sees it.
+            send(map, map.inside(), new StarfieldPayload(on, density));
+            return true;
+        }
+
+        @Override void save(net.minecraft.nbt.CompoundTag tag) {
+            super.save(tag);
+            if (!changed) return;
+            tag.putBoolean("on", on);
+            tag.putFloat("density", density);
+        }
+
+        @Override void load(net.minecraft.nbt.CompoundTag tag) {
+            super.load(tag);
+            if (!tag.contains("on")) return;
+            on = tag.getBoolean("on");
+            density = tag.getFloat("density");
+            changed = true;
+            if (on) nextThink = map.time();
+        }
+
+        /** After a restore: the client has forgotten the field. */
+        @Override void think() { send(map, map.inside(), new StarfieldPayload(on, density)); }
+
+        @Override String state() { return (on ? "on" : "off") + ", density " + density; }
+    }
+
+    /**
+     * {@code CCredits}: {@code ShowLogo}, {@code RollCredits} (the intro names), {@code RollOutroCredits}
+     * and {@code SetLogoLength}. The client draws; it also tells Source's server when the outro has
+     * scrolled by, which here the server works out itself ({@link #outroSeconds}) and fires
+     * {@code OnCreditsDone} then.
+     */
+    static final class Credits extends LogicEntity {
+        private float logoLength;
+        private boolean rolledOutro;
+        /** After a restore: the outro is rolled again on the next think. */
+        private boolean reroll;
+
+        Credits(MapLogic map, int index, LogicTable.Entity entity) { super(map, index, entity); }
+
+        @Override boolean accept(String input, String value, Actor activator, LogicEntity caller) {
+            switch (input) {
+                case "showlogo" -> roll(CreditsPayload.LOGO);
+                case "rollcredits" -> roll(CreditsPayload.INTRO);
+                case "rolloutrocredits" -> {
+                    roll(CreditsPayload.OUTRO);
+                    // In case of a save and restore.
+                    rolledOutro = true;
+                }
+                case "setlogolength" -> logoLength = (float) Variant.number(value);
+                default -> { return false; }
+            }
+            return true;
+        }
+
+        private void roll(int kind) {
+            LogicTable.Credits credits = map.table.credits();
+            // No credits file: Source's HUD loads nothing and draws nothing.
+            if (credits == null) return;
+            CreditsParams params = CreditsParams.read(credits.params());
+            List<CreditsName> names = new ArrayList<>();
+            if (kind != CreditsPayload.LOGO) {
+                for (LogicTable.CreditName name : kind == CreditsPayload.INTRO ? credits.intro() : credits.outro()) {
+                    // The outro looks up a #token; the intro shows its names as written.
+                    String text = kind == CreditsPayload.OUTRO && name.name().startsWith("#") ? map.table.localize(name.name()) : name.name();
+                    names.add(new CreditsName(text.length() > 250 ? text.substring(0, 250) : text, name.font()));
+                }
+            }
+            byte[] logo = kind == CreditsPayload.INTRO ? new byte[0] : logoImage(credits);
+            send(map, map.inside(), new CreditsPayload(kind, kind == CreditsPayload.LOGO ? logoLength : 0, params, names, logo));
+            if (kind == CreditsPayload.OUTRO) {
+                double seconds = outroSeconds(params, names);
+                nextThink = Double.isNaN(seconds) ? NEVER : map.time() + seconds;
+            }
+        }
+
+        /** The logo's PNG from the map's bundle, or nothing: the client then draws the logo's text. */
+        private byte[] logoImage(LogicTable.Credits credits) {
+            if (credits.logoImage() == null || map.level() == null) return new byte[0];
+            try {
+                var located = Src2mc.bundles().active().findLocatedMap(map.placement.campaignId(), map.placement.mapId()).orElse(null);
+                if (located == null) return new byte[0];
+                byte[] bytes = dev.theredja.src2mc.menu.ScreensData.read(located.bundle(), credits.logoImage());
+                return bytes.length > CreditsPayload.MAX_LOGO ? new byte[0] : bytes;
+            } catch (java.io.IOException | RuntimeException exception) {
+                Src2mc.LOGGER.warn("src2mc credits: cannot read the logo {}", credits.logoImage(), exception);
+                return new byte[0];
+            }
+        }
+
+        /** The client's {@code creditsdone} command: {@code CreditsDone_f} fires the output on the entity, as activator too. */
+        @Override void think() {
+            if (reroll) {
+                // CCredits::OnRestore: the client has forgotten the outro, so it is rolled again, which also
+                // sets when OnCreditsDone is due.
+                reroll = false;
+                roll(CreditsPayload.OUTRO);
+                return;
+            }
+            fire("oncreditsdone", this, null);
+        }
+
+        @Override void save(net.minecraft.nbt.CompoundTag tag) {
+            super.save(tag);
+            tag.putFloat("logo_length", logoLength);
+            tag.putBoolean("rolled_outro", rolledOutro);
+        }
+
+        @Override void load(net.minecraft.nbt.CompoundTag tag) {
+            super.load(tag);
+            logoLength = tag.getFloat("logo_length");
+            rolledOutro = tag.getBoolean("rolled_outro");
+            if (rolledOutro) {
+                reroll = true;
+                nextThink = map.time();
+            }
+        }
+
+        @Override String state() { return "logo length " + logoLength + (rolledOutro ? ", outro rolled" : ""); }
+    }
+
+    // ---- The credits' layout, which the server and the client both go by.
+
+    /** The virtual screen the credits are laid out on: Source's 640 by 480. */
+    public static final float VIRTUAL_HEIGHT = 480;
+    /** {@code HudCredits}' {@code TextColor} alpha in HL2's {@code hudlayout.res}: where the outro's last name fades from. */
+    public static final int OUTRO_ALPHA = 192;
+    /** How long the outro's last name stays before it fades (non-console builds). */
+    public static final double OUTRO_HOLD = 10;
+
+    /**
+     * {@code surface()->GetFontTall} of a credits font in virtual pixels: the scheme's {@code tall}
+     * times its family's line height (ascent plus descent over the em: Trebuchet MS 1.161, Verdana
+     * 1.215, whole pixels as {@code GetFontTall} returns; the glyph fonts are taken as their {@code tall}).
+     */
+    public static float fontTall(String font) {
+        return switch (font == null ? "" : font.toLowerCase(java.util.Locale.ROOT)) {
+            case "creditstext" -> Math.round(20 * 1.161f);
+            case "creditsoutrotext" -> Math.round(16 * 1.215f);
+            case "creditslogo", "creditsicons", "creditsoutrologos" -> 34;
+            case "creditsoutrovalve" -> 48;
+            case "weaponicons", "clienttitlefont" -> 64;
+            default -> Math.round(20 * 1.161f);
+        };
+    }
+
+    /**
+     * How long {@code DrawOutroCreditsName} runs before it sends {@code creditsdone}, on the 480-line
+     * screen: every name scrolls up at {@code pixelHeight / scrolltime}; the last stops with its
+     * middle at the screen's, waits {@link #OUTRO_HOLD}, and fades its alpha at {@code scrolltime * 2}
+     * a second. NaN with no names, when Source's panel never starts.
+     */
+    public static double outroSeconds(CreditsParams params, List<CreditsName> names) {
+        if (names.isEmpty() || params.scrollTime <= 0) return Double.NaN;
+        double height = VIRTUAL_HEIGHT, lastStart = height, lastTall = 0;
+        for (int i = 0; i < names.size(); i++) {
+            double tall = fontTall(names.get(i).font());
+            if (i == names.size() - 1) { lastStart = height; lastTall = tall; }
+            height += tall + params.separation;
+        }
+        double speed = height / params.scrollTime;
+        double scroll = Math.max(0, (lastStart + (int) lastTall / 2 - VIRTUAL_HEIGHT / 2) / speed);
+        return scroll + OUTRO_HOLD + OUTRO_ALPHA / (params.scrollTime * 2.0);
+    }
+
+    /**
+     * {@code CMessage}: {@code ShowMessage} shows a {@code titles.txt} text through {@code HudText}
+     * and plays {@code messagesound}. Without the all-players flag only the activator, or Source's
+     * single player, sees it; a message the titles lack is silently dropped.
+     */
+    static final class Message extends LogicEntity {
+        private static final int SF_MESSAGE_ONCE = 1, SF_MESSAGE_ALL = 2;
+        private float volume = 1;
+        private int attenuation;
+
+        Message(MapLogic map, int index, LogicTable.Entity entity) { super(map, index, entity); }
+
+        @Override void spawn() {
+            attenuation = (int) number("messageattenuation", 0);
+            // Remap volume from [0,10] to [0,1]; none means normal.
+            volume = (float) number("messagevolume", 0) * 0.1F;
+            if (volume <= 0) volume = 1;
+        }
+
+        @Override boolean accept(String input, String value, Actor activator, LogicEntity caller) {
+            if (!input.equals("showmessage")) return false;
+            LogicTable.Title title = map.table.title(key("message", ""));
+            if (title != null) {
+                List<ServerPlayer> to = hasSpawnFlags(SF_MESSAGE_ALL) ? map.inside() : onlyOne(map, activator);
+                send(map, to, new TextPayload(CHANNEL_HUDTEXT, title.x(), title.y(), rrggbbaa(title.color1()), rrggbbaa(title.color2()),
+                    title.effect(), title.fadein(), title.fadeout(), title.holdtime(), title.fxtime(), clamp(title.text())));
+            }
+            // Attenuation 3 is "everywhere"; the other levels are the sound script's own here.
+            String noise = key("messagesound");
+            if (noise != null && !noise.isBlank()) map.emitSound(noise, attenuation == 3 ? null : position(), null, null, 0, volume);
+            fire("onshowmessage", activator, null);
+            if (hasSpawnFlags(SF_MESSAGE_ONCE)) remove();
+            return true;
+        }
+
+        @Override String state() { return "\"" + key("message", "") + "\"" + (map.table.title(key("message", "")) == null ? " (no such title)" : ""); }
+    }
+
+    /**
+     * {@code CEnvHudHint}: {@code ShowHudHint} and {@code HideHudHint} send {@code KeyHintText}. The text is
+     * the message's localized string; a {@code #} token the strings lack hides, as
+     * {@code CHudHintKeyDisplay::SetHintText} refuses to show a placeholder.
+     */
+    static final class HudHint extends LogicEntity {
+        private static final int SF_HUDHINT_ALLPLAYERS = 1;
+
+        HudHint(MapLogic map, int index, LogicTable.Entity entity) { super(map, index, entity); }
+
+        @Override boolean accept(String input, String value, Actor activator, LogicEntity caller) {
+            boolean show;
+            switch (input) {
+                case "showhudhint" -> show = true;
+                case "hidehudhint" -> show = false;
+                default -> { return false; }
+            }
+            List<ServerPlayer> to = hasSpawnFlags(SF_HUDHINT_ALLPLAYERS) ? map.inside() : locals(map, activator);
+            send(map, to, new HudHintPayload(show ? text() : ""));
+            return true;
+        }
+
+        /** The text to show: the localized string, the plain text as written, or empty for a token with no string. */
+        String text() {
+            String raw = key("message", "");
+            String token = raw.startsWith("#") ? raw.substring(1) : raw;
+            String found = map.table.strings().get(token.toLowerCase(java.util.Locale.ROOT));
+            if (found != null && !found.isEmpty()) return clamp(found);
+            return raw.startsWith("#") ? "" : clamp(raw);
+        }
+
+        @Override String state() { return "\"" + text() + "\""; }
     }
 
     /** Payloads the last server-less run would have sent, oldest first; drained. */

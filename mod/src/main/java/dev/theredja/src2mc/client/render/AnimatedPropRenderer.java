@@ -211,7 +211,8 @@ public final class AnimatedPropRenderer {
 
     @SubscribeEvent
     public static void render(RenderLevelStageEvent event) {
-        boolean timed = event.getStage() == MapSurfaceRenderer.opaqueStage() || event.getStage() == RenderLevelStageEvent.Stage.AFTER_PARTICLES;
+        boolean timed = (event.getStage() == MapSurfaceRenderer.opaqueStage() || event.getStage() == RenderLevelStageEvent.Stage.AFTER_PARTICLES)
+            && !dev.theredja.src2mc.client.view.SecondaryView.active();
         GpuTimer.Phase phase = IrisCompat.renderingShadowPass() ? GpuTimer.Phase.ANIMATED_PROPS_SHADOW : GpuTimer.Phase.ANIMATED_PROPS;
         if (timed) GpuTimer.begin(phase);
         try {
@@ -224,7 +225,7 @@ public final class AnimatedPropRenderer {
     private static void renderStage(RenderLevelStageEvent event) {
         boolean shadowPass = IrisCompat.renderingShadowPass();
         if (event.getStage() == MapSurfaceRenderer.opaqueStage()) {
-            if (!shadowPass) prepare(event);
+            if (!shadowPass && !dev.theredja.src2mc.client.view.SecondaryView.active()) prepare(event);
             draw(event, false);
         } else if (event.getStage() == RenderLevelStageEvent.Stage.AFTER_PARTICLES && !shadowPass) {
             draw(event, true);
@@ -334,7 +335,7 @@ public final class AnimatedPropRenderer {
             if (key.entity() == prop.entity() && prop.stableId() != null && !PropRenderer.rootActive(placing.placement, prop.stableId())) return;
             double dx = placing.placement.translation().getX() + placing.translation[0] - camera.x;
             double dz = placing.placement.translation().getZ() + placing.translation[2] - camera.z;
-            if (dx * dx + dz * dz > reach * reach) return;
+            if (dx * dx + dz * dz > reach * reach && !dev.theredja.src2mc.client.view.SecondaryView.within(camera.x + dx, camera.z + dz, reach)) return;
         }
         wanted.add(key);
         int model = prop.model(state.skin());

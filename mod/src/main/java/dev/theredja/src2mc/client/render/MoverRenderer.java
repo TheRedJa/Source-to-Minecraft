@@ -103,6 +103,38 @@ public final class MoverRenderer {
     }
 
     private static final Map<UUID, Built> BUILT = new HashMap<>();
+
+    /**
+     * Movers within {@code radius} blocks of {@code near} (by their compiled position) whose sub-level has not reached
+     * this client yet or whose mesh is not built: a level change's loading screen waits for them, so a player who
+     * starts on a train is not left standing in the air while Sable sends it.
+     */
+    public static int pendingNear(ClientLevel level, Vec3 near, double radius) {
+        ClientSubLevelContainer container = SubLevelContainer.getContainer(level);
+        if (container == null) return 0;
+        BundleGeneration generation = Src2mc.bundles().active();
+        var placements = dev.theredja.src2mc.network.PlacementNetwork.clientIndex(level.dimension().location()).view();
+        int pending = 0;
+        for (MoverRegistry.Instance instance : MoverRegistry.instances(true)) {
+            BundleMap map = generation.findMap(instance.campaignId(), instance.mapId()).orElse(null);
+            if (map == null || map.logic() == null || instance.source() < 0 || instance.source() >= map.logic().entities().size()) continue;
+            dev.theredja.src2mc.world.MapPlacement placement = null;
+            for (var candidate : placements) if (candidate.anchorWorld().asLong() == instance.anchor()) placement = candidate;
+            if (placement == null) continue;
+            var entity = map.logic().entities().get(instance.source());
+            double[] at = entity.origin();
+            if (at == null && entity.volume() >= 0 && entity.volume() < map.logic().volumes().size()) {
+                double[] b = map.logic().volumes().get(entity.volume()).bounds();
+                at = new double[]{(b[0] + b[3]) / 2, (b[1] + b[4]) / 2, (b[2] + b[5]) / 2};
+            }
+            if (at == null) continue;
+            BlockPos t = placement.translation();
+            if (near.distanceToSqr(at[0] + t.getX(), at[1] + t.getY(), at[2] + t.getZ()) > radius * radius) continue;
+            Built built = BUILT.get(instance.subLevel());
+            if (container.getSubLevel(instance.subLevel()) == null || built == null || !built.complete) pending++;
+        }
+        return pending;
+    }
     private static long frame, generationSequence = -1;
     private static boolean enabled = true, perVertexLight = true, turnShading = true;
     private static long drawnLast, relights, workerRelights, workerNanos, uploadNanosLast, uploadNanosMax, sentBytes;
@@ -147,7 +179,8 @@ public final class MoverRenderer {
 
     @SubscribeEvent
     public static void render(RenderLevelStageEvent event) {
-        boolean timed = event.getStage() == MapSurfaceRenderer.opaqueStage() || event.getStage() == RenderLevelStageEvent.Stage.AFTER_PARTICLES;
+        boolean timed = (event.getStage() == MapSurfaceRenderer.opaqueStage() || event.getStage() == RenderLevelStageEvent.Stage.AFTER_PARTICLES)
+            && !dev.theredja.src2mc.client.view.SecondaryView.active();
         GpuTimer.Phase phase = IrisCompat.renderingShadowPass() ? GpuTimer.Phase.MOVERS_SHADOW : GpuTimer.Phase.MOVERS;
         if (timed) GpuTimer.begin(phase);
         try {
@@ -160,7 +193,7 @@ public final class MoverRenderer {
     private static void renderStage(RenderLevelStageEvent event) {
         boolean shadowPass = IrisCompat.renderingShadowPass();
         if (event.getStage() == MapSurfaceRenderer.opaqueStage()) {
-            if (!shadowPass) prepare();
+            if (!shadowPass && !dev.theredja.src2mc.client.view.SecondaryView.active()) prepare();
             draw(event, false, shadowPass);
         } else if (event.getStage() == RenderLevelStageEvent.Stage.AFTER_PARTICLES && !shadowPass) {
             draw(event, true, false);

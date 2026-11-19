@@ -55,6 +55,9 @@ public final class ScreenOverlay {
     }
 
     private static final Message[] MESSAGES = new Message[CHANNELS];
+    /** {@code maxHUDMessages}: the texts {@code HudText} (env_message) can have up at once, each in the first free slot. */
+    private static final int HUD_TEXT_SLOTS = 16;
+    private static final List<Message> HUD_TEXTS = new ArrayList<>();
     private static final List<Fade> FADES = new ArrayList<>();
     private static final List<Shake> SHAKES = new ArrayList<>();
     private static final Random RANDOM = new Random();
@@ -77,6 +80,11 @@ public final class ScreenOverlay {
     // ---- What the server sends.
 
     public static void text(ScreenEffects.TextPayload payload) {
+        if (payload.channel() == ScreenEffects.CHANNEL_HUDTEXT) {
+            // CHudMessage::MessageAdd: a text with no free slot is dropped.
+            if (HUD_TEXTS.size() < HUD_TEXT_SLOTS) HUD_TEXTS.add(new Message(payload, now()));
+            return;
+        }
         MESSAGES[Math.floorMod(payload.channel(), CHANNELS)] = new Message(payload, now());
     }
 
@@ -152,12 +160,18 @@ public final class ScreenOverlay {
     static String status() {
         int texts = 0;
         for (Message message : MESSAGES) if (message != null) texts++;
+        texts += HUD_TEXTS.size();
         return "src2mc screen: " + texts + " texts, " + FADES.size() + " fades, " + SHAKES.size() + " shakes; offset "
             + String.format(java.util.Locale.ROOT, "%.3f %.3f %.3f, roll %.2f", shakeOffset.x, shakeOffset.y, shakeOffset.z, shakeRoll);
     }
 
     public static void clear() {
         java.util.Arrays.fill(MESSAGES, null);
+        HUD_TEXTS.clear();
+        ZoomClient.clear();
+        Starfield.clear();
+        CreditsOverlay.clear();
+        HudHint.clear();
         FADES.clear();
         SHAKES.clear();
         shakeOffset = Vec3.ZERO;
@@ -291,16 +305,21 @@ public final class ScreenOverlay {
         for (int channel = 0; channel < CHANNELS; channel++) {
             Message message = MESSAGES[channel];
             if (message == null) continue;
-            ScreenEffects.TextPayload text = message.text();
-            String string = text.text();
-            double end = switch (text.effect()) {
-                case 0, 1 -> message.start() + text.fadein() + text.fadeout() + text.holdtime();
-                case 2 -> message.start() + text.fadein() * string.length() + text.fadeout() + text.holdtime();
-                default -> 0;
-            };
-            if (time > end) { MESSAGES[channel] = null; continue; }
-            draw(graphics, font, scale, text, string, time - message.start());
+            if (time > end(message)) { MESSAGES[channel] = null; continue; }
+            draw(graphics, font, scale, message.text(), message.text().text(), time - message.start());
         }
+        HUD_TEXTS.removeIf(message -> time > end(message));
+        for (Message message : HUD_TEXTS) draw(graphics, font, scale, message.text(), message.text().text(), time - message.start());
+    }
+
+    /** When the message is over, as {@code CHudMessage::Paint} works out its {@code endTime}. */
+    private static double end(Message message) {
+        ScreenEffects.TextPayload text = message.text();
+        return switch (text.effect()) {
+            case 0, 1 -> message.start() + text.fadein() + text.fadeout() + text.holdtime();
+            case 2 -> message.start() + text.fadein() * text.text().length() + text.fadeout() + text.holdtime();
+            default -> 0;
+        };
     }
 
     /** {@code CHudMessage::MessageDrawScan}: line by line, character by character, each in its own colour and alpha. */

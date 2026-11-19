@@ -595,6 +595,7 @@ impl Default for Entities {
             "func_door_rotating",
             "func_movelinear",
             "func_tracktrain",
+            "func_train",
         ] {
             classname_modes.insert(class.to_string(), BrushEntityMode::Separate);
         }
@@ -615,12 +616,14 @@ pub const MOVER_CLASSES: &[&str] = &[
     "func_door_rotating",
     "func_movelinear",
     "func_tracktrain",
+    "func_train",
     "func_rotating",
     "func_button",
     "func_rot_button",
     "momentary_rot_button",
     "infra_button",
     "func_brush",
+    "func_monitor",
     "func_wall_toggle",
 ];
 

@@ -36,6 +36,16 @@
         { "name": "AmbientPY", "type": "float", "count": 3, "values": [ 1.0, 1.0, 1.0 ] },
         { "name": "AmbientNY", "type": "float", "count": 3, "values": [ 1.0, 1.0, 1.0 ] },
         { "name": "AmbientPZ", "type": "float", "count": 3, "values": [ 1.0, 1.0, 1.0 ] },
-        { "name": "AmbientNZ", "type": "float", "count": 3, "values": [ 1.0, 1.0, 1.0 ] }
+        { "name": "AmbientNZ", "type": "float", "count": 3, "values": [ 1.0, 1.0, 1.0 ] },
+        { "name": "DLightCount", "type": "int", "count": 1, "values": [ 0 ] },
+        { "name": "DLightMode", "type": "float", "count": 1, "values": [ 1.0 ] },
+        { "name": "DLight0", "type": "matrix4x4", "count": 16, "values": [ 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 ] },
+        { "name": "DLight1", "type": "matrix4x4", "count": 16, "values": [ 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 ] },
+        { "name": "DLight2", "type": "matrix4x4", "count": 16, "values": [ 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 ] },
+        { "name": "DLight3", "type": "matrix4x4", "count": 16, "values": [ 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 ] },
+        { "name": "DLight4", "type": "matrix4x4", "count": 16, "values": [ 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 ] },
+        { "name": "DLight5", "type": "matrix4x4", "count": 16, "values": [ 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 ] },
+        { "name": "DLight6", "type": "matrix4x4", "count": 16, "values": [ 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 ] },
+        { "name": "DLight7", "type": "matrix4x4", "count": 16, "values": [ 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 ] }
     ]
 }

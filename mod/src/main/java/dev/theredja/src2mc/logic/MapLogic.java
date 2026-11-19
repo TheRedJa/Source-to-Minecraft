@@ -6,6 +6,7 @@ import dev.theredja.src2mc.bundle.LogicTable;
 import dev.theredja.src2mc.world.MapPlacement;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -74,11 +75,18 @@ public final class MapLogic {
     int tonemapInUse = -1;
     /** The fog and tonemap controller each player was told to follow. */
     private final Map<UUID, dev.theredja.src2mc.world.LookState.Player> lookPlayers = new HashMap<>();
+    /** The players inside at the last server tick, for {@link ScreenEffects#arrivals}. */
+    private final Set<UUID> screenPlayers = new HashSet<>();
     private final EventQueue queue = new EventQueue();
     private double time;
     private LoadType loadType = LoadType.NEW_GAME;
     private ServerLevel level;
     private List<ServerPlayer> inside = List.of();
+    /** The global states: the map's own until its first tick binds it to its level's table; see {@link GlobalStates}. */
+    private GlobalStates.Table globals = new GlobalStates.Table();
+    private boolean globalsBound;
+    /** How the map came to run, for the binding: null for one restored from a save. */
+    private LoadType globalsEntry;
 
     // Counters for /src2mc logic status.
     private long inputsFired, outputsFired, scriptCalls;
@@ -106,12 +114,16 @@ public final class MapLogic {
     /** Spawns every entity fresh, as a map loads in Source, and activates them. */
     void spawn(LoadType type) {
         loadType = type;
+        globals = new GlobalStates.Table();
+        globalsBound = false;
+        globalsEntry = restoring ? null : type;
         time = 0;
         queue.clear();
         byName.clear();
         byClass.clear();
         playerEntities.clear();
         lookPlayers.clear();
+        screenPlayers.clear();
         tonemapRate = dev.theredja.src2mc.world.LookState.DEFAULT_RATE;
         tonemapInUse = -1;
         entities.clear();
@@ -137,11 +149,28 @@ public final class MapLogic {
     /** Entered anew through a level change while empty: Source restores the level and activates every entity again. */
     void reenter() {
         loadType = LoadType.TRANSITION;
+        globalsBound = false;
+        globalsEntry = LoadType.TRANSITION;
         for (LogicEntity entity : entities) if (!entity.removed) entity.activate();
         dirty = true;
     }
 
+    /** The logic is stopped for good: entities give back what they set on players. */
+    void stopped() {
+        for (LogicEntity entity : entities) if (!entity.removed) entity.stopped();
+    }
+
+    Set<UUID> screenPlayers() { return screenPlayers; }
+
     LoadType loadType() { return loadType; }
+
+    /** The global states this map reads and sets. */
+    GlobalStates.Table globals() { return globals; }
+
+    void bindGlobals(GlobalStates.Table shared) { globals = shared; }
+
+    /** Whether the first tick has bound the map to its level's table. */
+    boolean globalsBound() { return globalsBound; }
 
     /**
      * A player arriving through a level change who already stands in a level change does not take
@@ -331,6 +360,10 @@ public final class MapLogic {
     void tick(ServerLevel level, List<ServerPlayer> inside) {
         this.level = level;
         this.inside = inside;
+        if (level != null && !globalsBound) {
+            globalsBound = true;
+            GlobalStates.bind(this, level, inside, globalsEntry);
+        }
         traceLines = 0;
         time += TICK_SECONDS;
         dirty = true;
@@ -458,6 +491,12 @@ public final class MapLogic {
 
     LogicEntity entity(int index) { return index >= 0 && index < entities.size() ? entities.get(index) : null; }
 
+    /** Every entity, removed ones included, by index. */
+    List<LogicEntity> entities() { return java.util.Collections.unmodifiableList(entities); }
+
+    /** What the map's camera entities network ({@link CameraEntities#state}), as of game tick {@code now}. */
+    dev.theredja.src2mc.view.ViewState view(long now) { return CameraEntities.state(this, now); }
+
     /** The controllers {@code player} follows. */
     dev.theredja.src2mc.world.LookState.Player lookPlayer(UUID player) { return view().of(player); }
 
@@ -559,6 +598,16 @@ public final class MapLogic {
      * heard everywhere. Returns an id {@link #stopSound} takes, or -1 when the map has no such sound.
      */
     long emitSound(String script, double[] at, UUID speaker, String caption, double duration, double volume) {
+        return emitSound(script, at, speaker, caption, duration, volume, speaker != null || caption != null);
+    }
+
+    /** {@code voice}: plays on the voice channel, as every scene {@code speak} event does ({@code CHAN_VOICE}). */
+    long emitSound(String script, double[] at, UUID speaker, String caption, double duration, double volume, boolean voice) {
+        return emitSound(script, at, speaker, caption, duration, volume, voice, null);
+    }
+
+    /** {@code source}: the entity making the sound, for an {@code env_microphone}'s listen filter; null when unknown. */
+    long emitSound(String script, double[] at, UUID speaker, String caption, double duration, double volume, boolean voice, LogicEntity source) {
         // Maps write "0", and INFRA "nothing", where a sound keyvalue plays none.
         if (script == null || script.isBlank() || script.trim().equals("0") || script.equalsIgnoreCase("nothing") || audio == null) return -1;
         AudioTable.Script entry = audio.script(normalizeSound(script));
@@ -567,12 +616,45 @@ public final class MapLogic {
             return -1;
         }
         long id = ++soundEventIds;
-        boolean voice = speaker != null || caption != null;
-        soundEvents.add(new LogicNetwork.SoundEvent(id, entry.name(), at, speaker, caption, (float) duration, (float) volume, voice));
+        // CEnvMicrophone::OnSoundPlayed: every microphone hears the sound first; one may swallow the original.
+        boolean swallowed = false;
+        for (LogicEntity entity : entities) {
+            if (entity instanceof SoundEntities.Microphone microphone
+                && microphone.hear(entry, at, speaker, caption, duration, volume, voice, source, id)) swallowed = true;
+        }
+        if (!swallowed) soundEvents.add(new LogicNetwork.SoundEvent(id, entry.name(), at, speaker, caption, (float) duration, (float) volume, voice));
         return id;
     }
 
-    void stopSound(long id) { if (id > 0) stoppedSounds.add(id); }
+    /** The copies microphones played of each sound, stopped with it; bounded, the oldest forgotten. */
+    private final Map<Long, List<Long>> routedSounds = new LinkedHashMap<>(16, 0.75f, false) {
+        @Override protected boolean removeEldestEntry(Map.Entry<Long, List<Long>> eldest) { return size() > 256; }
+    };
+
+    /** A microphone's copy of sound {@code originalId}, played at a speaker; microphones do not hear it again ({@code SND_SPEAKER}). */
+    long emitRouted(AudioTable.Script script, double[] at, UUID speaker, String caption, double duration, double volume, boolean voice, long originalId) {
+        long id = ++soundEventIds;
+        soundEvents.add(new LogicNetwork.SoundEvent(id, script.name(), at, speaker, caption, (float) duration, (float) volume, voice));
+        routedSounds.computeIfAbsent(originalId, ignored -> new ArrayList<>()).add(id);
+        return id;
+    }
+
+    void stopSound(long id) {
+        if (id <= 0) return;
+        stoppedSounds.add(id);
+        List<Long> routed = routedSounds.remove(id);
+        if (routed != null) stoppedSounds.addAll(routed);
+    }
+
+    /** The middle of a player's box, map-local ({@code WorldSpaceCenter}), or null when they are not in this map's level. */
+    double[] playerCentre(PlayerActor actor) {
+        if (level == null || actor == null) return null;
+        net.minecraft.world.entity.player.Player player = level.getPlayerByUUID(actor.id());
+        if (player == null) return null;
+        Vec3 centre = player.getBoundingBox().getCenter();
+        return new double[]{centre.x - placement.translation().getX(), centre.y - placement.translation().getY(),
+            centre.z - placement.translation().getZ()};
+    }
 
     /** Until when each scene actor is speaking, for {@code busyactor}. */
     private final Map<String, Double> speakingUntil = new HashMap<>();

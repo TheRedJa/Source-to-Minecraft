@@ -885,12 +885,18 @@ fn encode(
     pak: Option<&vbsp::Packfile>,
     wave: &WaveRef,
 ) -> std::result::Result<(SoundAsset, Vec<u8>), String> {
-    if !wave.path.ends_with(".wav") {
-        return Err("only WAV sounds are supported".into());
+    let mp3 = wave.path.ends_with(".mp3");
+    if !mp3 && !wave.path.ends_with(".wav") {
+        return Err("only WAV and MP3 sounds are supported".into());
     }
     let bytes = crate::source::sound::read_sound(vfs, pak, &wave.path)
         .ok_or_else(|| "not found".to_string())?;
-    let mut decoded = crate::source::wav::decode(&bytes).map_err(|e| format!("{e:#}"))?;
+    let decoded = if mp3 {
+        crate::source::mp3::decode(&bytes)
+    } else {
+        crate::source::wav::decode(&bytes)
+    };
+    let mut decoded = decoded.map_err(|e| format!("{e:#}"))?;
     if decoded.channels.len() > 2 || (wave.spatial_stereo && decoded.channels.len() > 1) {
         decoded = decoded.downmixed();
     }

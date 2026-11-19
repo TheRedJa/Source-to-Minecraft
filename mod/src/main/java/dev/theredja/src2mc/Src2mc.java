@@ -44,6 +44,8 @@ public final class Src2mc {
         NeoForge.EVENT_BUS.addListener(dev.theredja.src2mc.logic.LookSync::onPlayerChangedDimension);
         NeoForge.EVENT_BUS.addListener(dev.theredja.src2mc.logic.MenuSync::onPlayerLoggedIn);
         NeoForge.EVENT_BUS.addListener(dev.theredja.src2mc.logic.MenuSync::onPlayerChangedDimension);
+        NeoForge.EVENT_BUS.addListener(dev.theredja.src2mc.logic.ViewSync::onPlayerLoggedIn);
+        NeoForge.EVENT_BUS.addListener(dev.theredja.src2mc.logic.ViewSync::onPlayerChangedDimension);
         NeoForge.EVENT_BUS.addListener(dev.theredja.src2mc.levels.MenuCommand::register);
         NeoForge.EVENT_BUS.addListener(dev.theredja.src2mc.logic.LogicCommands::register);
         NeoForge.EVENT_BUS.addListener(dev.theredja.src2mc.logic.MoverSystem::onServerTick);

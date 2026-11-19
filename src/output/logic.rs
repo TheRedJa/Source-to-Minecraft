@@ -9,6 +9,9 @@ use crate::bsp::entities::{EntityRecord, Output, OutputParse, parse_output};
 use crate::geom::Vec3;
 use crate::output::bundle;
 use crate::output::metadata::{Diagnostic, Severity};
+use crate::source::credits::Credits;
+use crate::source::scene_image::SceneImage;
+use crate::source::titles::Title;
 use crate::source::vcd;
 use crate::source::vfs::{Vfs, read_file};
 use crate::voxel::transform::Transform;
@@ -47,6 +50,17 @@ pub struct LogicTable {
     /// Inputs the game's own code queues as the map spawns; absent when none.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub engine_events: Vec<EngineEvent>,
+    /// The `scripts/titles.txt` messages the map's `env_message` entities
+    /// name; absent when none is defined.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub titles: Vec<Title>,
+    /// `scripts/credits.txt`, present when the map has an `env_credits`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credits: Option<Credits>,
+    /// Bundle payloads the table points at, as (path below the map's
+    /// directory, bytes); the campaign writer adds them. Not serialized.
+    #[serde(skip)]
+    pub assets: Vec<(String, Vec<u8>)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -143,14 +157,16 @@ pub struct Scenes {
 }
 
 impl Scenes {
-    /// Read the text `.vcd` of every scene entity's `SceneFile`, from the
-    /// map's pakfile or the game. Compiled scenes (`scenes.image`) are not
-    /// read, so a game that only ships those has none.
+    /// Read every scene entity's `SceneFile`: its text `.vcd` from the map's
+    /// pakfile or the game, else the compiled scene in the game's
+    /// `scenes/scenes.image` (all Half-Life 2 ships).
     pub fn load(vfs: &Vfs, pak: Option<&vbsp::Packfile>, entities: &[EntityRecord]) -> Scenes {
         let mut scenes = Vec::new();
         let mut by_path: HashMap<String, Option<u32>> = HashMap::new();
         let mut by_entity = HashMap::new();
         let mut unavailable = BTreeSet::new();
+        let mut broken = BTreeMap::new();
+        let mut image: Option<Option<SceneImage>> = None;
         for entity in entities {
             let class = entity.classname.to_ascii_lowercase();
             if !SCENE_CLASSES.contains(&class.as_str()) {
@@ -165,12 +181,24 @@ impl Scenes {
             };
             let key = file.to_ascii_lowercase().replace('\\', "/");
             let index = *by_path.entry(key.clone()).or_insert_with(|| {
-                let bytes = read_file(vfs, pak, &key)?;
+                let scene = match read_file(vfs, pak, &key) {
+                    Some(bytes) => vcd::parse(&String::from_utf8_lossy(&bytes)),
+                    None => {
+                        let image = image.get_or_insert_with(|| {
+                            vfs.open("scenes/scenes.image")
+                                .and_then(|bytes| SceneImage::parse(bytes).ok())
+                        });
+                        match image.as_ref()?.scene(&key)? {
+                            Ok(scene) => scene.to_vcd(),
+                            Err(error) => {
+                                broken.insert(file.to_string(), format!("{error:#}"));
+                                return None;
+                            }
+                        }
+                    }
+                };
                 let id = scenes.len() as u32;
-                scenes.push((
-                    file.to_string(),
-                    vcd::parse(&String::from_utf8_lossy(&bytes)),
-                ));
+                scenes.push((file.to_string(), scene));
                 Some(id)
             });
             match index {
@@ -182,17 +210,30 @@ impl Scenes {
                 }
             }
         }
-        let diagnostics = unavailable
-            .into_iter()
-            .map(|file| {
+        let mut diagnostics: Vec<Diagnostic> = broken
+            .iter()
+            .map(|(file, error)| {
                 diagnostic(
                     Severity::Warning,
-                    "LOGIC_SCENE_UNAVAILABLE",
-                    "a scene entity names a scene with no text .vcd; it plays nothing",
-                    [("file", file)],
+                    "LOGIC_SCENE_MALFORMED",
+                    "a compiled scene in scenes.image does not read; it plays nothing",
+                    [("file", file.clone()), ("error", error.clone())],
                 )
             })
             .collect();
+        diagnostics.extend(
+            unavailable
+                .into_iter()
+                .filter(|file| !broken.contains_key(file))
+                .map(|file| {
+                    diagnostic(
+                        Severity::Warning,
+                        "LOGIC_SCENE_UNAVAILABLE",
+                        "a scene entity names a scene that is neither a .vcd nor in scenes.image; it plays nothing",
+                        [("file", file)],
+                    )
+                }),
+        );
         Scenes {
             scenes,
             by_entity,
@@ -373,6 +414,21 @@ pub fn build(
         {
             wanted_strings.extend(token(&message.1));
         }
+        // `CHudHintKeyDisplay::SetHintText` looks the `message` up with
+        // `g_pVGuiLocalize->Find` as written: hint entities name their tokens
+        // without the `#`.
+        if entity.classname == "env_hudhint"
+            && let Some(message) = entity
+                .keyvalues
+                .iter()
+                .rev()
+                .find(|(k, _)| k.eq_ignore_ascii_case("message"))
+        {
+            let name = message.1.strip_prefix('#').unwrap_or(&message.1);
+            if !name.is_empty() {
+                wanted_strings.insert(name.to_ascii_lowercase());
+            }
+        }
         for output in &entity.outputs {
             if output.input.eq_ignore_ascii_case("settext") {
                 wanted_strings.extend(token(&output.parameter));
@@ -384,19 +440,105 @@ pub fn build(
             wanted_strings.extend(token(&event.parameter));
         }
     }
-    let strings = if wanted_strings.is_empty() {
-        Vec::new()
+    // The HUD messages `env_message` shows, by the name `message` gives.
+    let mut title_names: Vec<&str> = Vec::new();
+    for entity in table_entities
+        .iter()
+        .filter(|e| e.classname == "env_message")
+    {
+        if let Some((_, message)) = entity
+            .keyvalues
+            .iter()
+            .rev()
+            .find(|(k, _)| k.eq_ignore_ascii_case("message"))
+        {
+            let name = message.strip_prefix('#').unwrap_or(message);
+            if !name.is_empty()
+                && !title_names
+                    .iter()
+                    .any(|seen| seen.eq_ignore_ascii_case(name))
+            {
+                title_names.push(name);
+            }
+        }
+    }
+    let pak = Some(&map.bsp.pack);
+    let mut titles: Vec<Title> = Vec::new();
+    if !title_names.is_empty() {
+        let defined = crate::source::titles::load(vfs, pak);
+        for name in &title_names {
+            if let Some(title) = crate::source::titles::find(&defined, name) {
+                titles.push(title.clone());
+            }
+        }
+    }
+    let all_strings = if wanted_strings.is_empty() && titles.is_empty() {
+        HashMap::new()
     } else {
-        let all = load_strings(vfs, Some(&map.bsp.pack));
-        wanted_strings
-            .into_iter()
-            .filter_map(|token| {
-                all.get(&token).map(|text| Caption {
-                    token,
-                    text: text.clone(),
-                })
+        load_strings(vfs, pak)
+    };
+    // A title whose text is a `#` token is drawn with the token's localized
+    // text; one that names nothing is drawn as written
+    // (`CHudMessage::MessageAdd` falls back to the raw string).
+    for title in &mut titles {
+        if let Some(token) = title.text.trim().strip_prefix('#')
+            && let Some(text) = all_strings.get(&token.trim().to_ascii_lowercase())
+        {
+            title.text = text.clone();
+        }
+        for number in [
+            &mut title.x,
+            &mut title.y,
+            &mut title.fadein,
+            &mut title.fadeout,
+            &mut title.holdtime,
+            &mut title.fxtime,
+        ] {
+            *number = canonical(*number)?;
+        }
+    }
+    let strings = wanted_strings
+        .into_iter()
+        .filter_map(|token| {
+            all_strings.get(&token).map(|text| Caption {
+                token,
+                text: text.clone(),
             })
-            .collect()
+        })
+        .collect::<Vec<_>>();
+
+    // The credits roll and its logo, for `env_credits`.
+    let mut assets = Vec::new();
+    let credits = if table_entities.iter().any(|e| e.classname == "env_credits") {
+        match crate::source::credits::load(vfs) {
+            Some(mut credits) => {
+                match crate::source::credits::render_logo(vfs, &credits) {
+                    Some(png) => {
+                        let path = "logic/credits_logo.png";
+                        credits.logo_image = Some(path.to_string());
+                        assets.push((path.to_string(), png));
+                    }
+                    None => diagnostics.push(diagnostic(
+                        Severity::Warning,
+                        "LOGIC_CREDITS_LOGO",
+                        "the credits logo could not be drawn: the scheme font or its file is missing",
+                        [("font", "WeaponIcons".to_string())],
+                    )),
+                }
+                Some(credits)
+            }
+            None => {
+                diagnostics.push(diagnostic(
+                    Severity::Warning,
+                    "LOGIC_CREDITS_MISSING",
+                    "the map has an env_credits but scripts/credits.txt is missing or empty",
+                    [("file", "scripts/credits.txt".to_string())],
+                ));
+                None
+            }
+        }
+    } else {
+        None
     };
 
     let o = transform.to_block_space(Vec3::ZERO);
@@ -414,6 +556,9 @@ pub fn build(
         strings,
         engine_entities,
         engine_events,
+        titles,
+        credits,
+        assets,
     };
     diagnostics.push(diagnostic(
         Severity::Info,
@@ -427,6 +572,8 @@ pub fn build(
             ("captions", table.captions.len().to_string()),
             ("strings", table.strings.len().to_string()),
             ("engine_entities", table.engine_entities.len().to_string()),
+            ("titles", table.titles.len().to_string()),
+            ("credits", table.credits.is_some().to_string()),
         ],
     ));
     Ok(LogicExport { table, diagnostics })
@@ -499,20 +646,61 @@ fn load_captions(vfs: &Vfs, pak: Option<&vbsp::Packfile>) -> HashMap<String, Str
     captions
 }
 
-/// Every loose `resource/*_english.txt`, as the HUD's localization loads
-/// them; a token the first file in path order defines wins.
+/// Localization files an archive may hold instead of the game directory,
+/// which `Vfs::loose_files` cannot list: Valve's shared HUD strings and the
+/// game's own.
+const ARCHIVED_STRING_FILES: &[&str] = &[
+    "resource/valve_english.txt",
+    "resource/hl2_english.txt",
+    "resource/gameui_english.txt",
+];
+
+/// Every `resource/*_english.txt`, as the HUD's localization loads them: the
+/// loose files, then the well-known ones an archive holds. A token the first
+/// file in path order defines wins, and so does the first definition within a
+/// file once `[$SYMBOL]` conditionals are applied (`valve_english.txt` has
+/// `Valve_Hint_Movement` for both `[$X360]` and `[$WIN32]`).
 pub fn load_strings(vfs: &Vfs, pak: Option<&vbsp::Packfile>) -> HashMap<String, String> {
+    let mut files = vfs.loose_files("resource/", "_english.txt");
+    for file in ARCHIVED_STRING_FILES {
+        if !files.iter().any(|f| f == file) {
+            files.push((*file).to_string());
+        }
+    }
     let mut strings = HashMap::new();
-    for file in vfs.loose_files("resource/", "_english.txt") {
+    for file in files {
         let Some(bytes) = read_file(vfs, pak, &file) else {
             continue;
         };
-        let text = crate::source::captions::decode(&bytes);
+        let text = apply_conditionals(&crate::source::captions::decode(&bytes));
         for (token, value) in crate::source::captions::parse(&text) {
             strings.entry(token).or_insert(value);
         }
     }
     strings
+}
+
+/// Localization files put a platform conditional after a pair
+/// (`"token" "text" [$WIN32]`): drop the line when it is false and the
+/// conditional itself when it holds, with `kvfile`'s platform (Windows PC).
+fn apply_conditionals(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for line in text.lines() {
+        let trimmed = line.trim_end();
+        if let Some(open) = trimmed.strip_suffix(']').and_then(|l| l.rfind('['))
+            && trimmed[open..].contains('$')
+        {
+            let condition = &trimmed[open + 1..trimmed.len() - 1];
+            if crate::source::kvfile::evaluate(condition) {
+                out.push_str(&trimmed[..open]);
+                out.push('\n');
+            }
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
 }
 
 fn canonical(value: f64) -> Result<f64> {
@@ -625,6 +813,103 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&entity).unwrap(),
             r#"{"classname":"trigger_once","keyvalues":[["targetname","t"]],"outputs":[],"volume":0}"#
+        );
+    }
+    #[test]
+    fn conditionals_pick_the_pc_variant_of_a_string() {
+        let text = "\"A\" \"console\" [$X360]\n\"A\" \"pc\" [$WIN32]\n\"B\" \"plain [x]\"\n\"C\" \"both\"\t[!$X360] \n";
+        let kept = apply_conditionals(text);
+        assert_eq!(
+            kept,
+            "\"A\" \"pc\" \n\"B\" \"plain [x]\"\n\"C\" \"both\"\t\n"
+        );
+    }
+
+    /// The hint tokens of Half-Life 2's trainstation maps are all found, with
+    /// their binding placeholders and the PC variant of the two-platform one.
+    #[test]
+    fn half_life_2_hint_tokens_are_localized() {
+        let map = std::path::Path::new(
+            "/mnt/games/SteamLibrary/steamapps/common/Half-Life 2/hl2/maps/d1_trainstation_01.bsp",
+        );
+        if !map.exists() {
+            return;
+        }
+        let vfs = Vfs::for_map(map, &[]);
+        let strings = load_strings(&vfs, None);
+        for token in [
+            "valve_hint_usepickup",
+            "valve_hint_ladder",
+            "valve_hint_jump",
+            "valve_hint_movement",
+            "valve_hint_interact",
+            "valve_hint_throwheld",
+            "valve_hint_hevcharger",
+            "valve_hint_sprint",
+            "valve_hint_flashlight",
+            "valve_hint_zoom",
+            "valve_hint_attack",
+        ] {
+            assert!(strings.contains_key(token), "{token} missing");
+        }
+        assert_eq!(strings["valve_hint_jump"], "%+jump% JUMP");
+        assert_eq!(
+            strings["valve_hint_movement"],
+            "FORWARD %+forward%BACK %+back%LEFT %+moveleft%RIGHT %+moveright%"
+        );
+        assert_eq!(strings["hl2_chapter1_title"], "POINT INSERTION");
+    }
+    /// The JSON the mod's validator reads (`LogicTitlesTest` holds the same
+    /// text): keys in this order, empty `titles` and absent `credits` left out.
+    #[test]
+    fn titles_and_credits_serialize_in_the_documented_order() {
+        let mut table = LogicTable {
+            format: FORMAT,
+            version: 1,
+            source_origin: [0.0, 0.0, 0.0],
+            entities: Vec::new(),
+            volumes: Vec::new(),
+            scenes: Vec::new(),
+            captions: Vec::new(),
+            strings: Vec::new(),
+            engine_entities: Vec::new(),
+            engine_events: Vec::new(),
+            titles: Vec::new(),
+            credits: None,
+            assets: Vec::new(),
+        };
+        let bare = String::from_utf8(table.encode().unwrap()).unwrap();
+        assert!(!bare.contains("titles") && !bare.contains("credits") && !bare.contains("assets"));
+        table.titles = vec![Title {
+            name: "CHAPTER1_TITLE".into(),
+            x: -1.0,
+            y: 0.58,
+            effect: 2,
+            color1: [100, 100, 100, 255],
+            color2: [240, 110, 0, 255],
+            fadein: 0.01,
+            fadeout: 1.5,
+            holdtime: 3.5,
+            fxtime: 0.25,
+            text: "POINT INSERTION".into(),
+        }];
+        table.credits = Some(Credits {
+            params: BTreeMap::from([("logo".into(), "HALF-LIFE'".into())]),
+            intro: vec![crate::source::credits::CreditName {
+                name: "V".into(),
+                font: "WeaponIcons".into(),
+            }],
+            outro: Vec::new(),
+            logo_image: Some("logic/credits_logo.png".into()),
+        });
+        let json = String::from_utf8(table.encode().unwrap()).unwrap();
+        assert!(
+            json.ends_with(concat!(
+                r#","titles":[{"name":"CHAPTER1_TITLE","x":-1.0,"y":0.58,"effect":2,"color1":[100,100,100,255],"color2":[240,110,0,255],"fadein":0.01,"fadeout":1.5,"holdtime":3.5,"fxtime":0.25,"text":"POINT INSERTION"}],"#,
+                r#""credits":{"params":{"logo":"HALF-LIFE'"},"intro":[{"name":"V","font":"WeaponIcons"}],"outro":[],"logo_image":"logic/credits_logo.png"}}"#,
+                "\n"
+            )),
+            "{json}"
         );
     }
 }

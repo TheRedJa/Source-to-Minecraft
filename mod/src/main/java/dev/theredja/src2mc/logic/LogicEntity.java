@@ -189,6 +189,9 @@ public class LogicEntity implements Actor {
         for (LogicEntity child : children) child.remove();
     }
 
+    /** The map's logic is stopped for good (not rebuilt from a save): undo what the entity did to players outside the logic. */
+    void stopped() {}
+
     /** The {@link dev.theredja.src2mc.world.PropStates} state of a model entity. */
     dev.theredja.src2mc.world.PropStates.State propState() {
         int flags = (removed || noDraw ? dev.theredja.src2mc.world.PropStates.HIDDEN : 0)

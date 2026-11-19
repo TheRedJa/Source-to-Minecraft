@@ -499,6 +499,290 @@ final class Trains {
         }
     }
 
+    // ---- func_train.
+
+    /** {@code CPathCorner}: one stop of a {@link Train}, linked to the next by its {@code target}. */
+    static final class PathCorner extends LogicEntity {
+        /** {@code SF_CORNER_WAITFORTRIG}: the train waits here for a Start or Toggle. */
+        static final int WAIT_FOR_TRIGGER = 1;
+        /** {@code SF_CORNER_TELEPORT}: the train jumps here instead of moving. */
+        static final int TELEPORT = 2;
+
+        private String target = "";
+
+        PathCorner(MapLogic map, int index, LogicTable.Entity entity) { super(map, index, entity); }
+
+        @Override void spawn() { target = key("target", ""); }
+
+        /** The next corner's name: {@code m_target}, which {@code SetNextPathCorner} changes. */
+        String target() { return target; }
+
+        @Override boolean accept(String input, String value, Actor activator, LogicEntity caller) {
+            switch (input) {
+                // InputPass: a train that arrives here trips it.
+                case "inpass" -> fire("onpass", activator, null);
+                case "setnextpathcorner" -> target = value == null ? "" : value.trim();
+                default -> { return false; }
+            }
+            return true;
+        }
+
+        @Override void save(CompoundTag tag) {
+            super.save(tag);
+            if (!target.equals(key("target", ""))) tag.putString("next_corner", target);
+        }
+
+        @Override void load(CompoundTag tag) {
+            super.load(tag);
+            if (tag.contains("next_corner")) target = tag.getString("next_corner");
+        }
+    }
+
+    /**
+     * {@code CFuncTrain}: moves from path_corner to path_corner in straight lines at constant
+     * speed, taking each corner's {@code speed} on leaving it and its {@code wait} on reaching
+     * the next, and trips the corner's {@code OnPass} on each arrival. It never turns. The brush
+     * is moved so that the centre of its bounds stands on the corner.
+     *
+     * <p>Not done: the {@code noise1}/{@code noise2} moving and arrival sounds, and the crush
+     * damage ({@code dmg}) of a train that runs into something.
+     */
+    static final class Train extends LogicEntity {
+        /** {@code SF_TRAIN_WAIT_RETRIGGER}: stopped, or waiting for a Start. */
+        private static final int WAIT_RETRIGGER = 1;
+        /** {@code SF_TRAIN_PASSABLE}: the brush is not solid. */
+        private static final int PASSABLE = 8;
+        private static final double DEFAULT_SPEED = 100;
+        /** A chain of zero-length moves and zero waits would never end; Source recurses until it overflows. */
+        private static final int MAX_CHAIN = 64;
+
+        /** What the train does when {@link #doneAt} comes: {@code MoveDone}. */
+        private enum Done { NONE, WAIT, NEXT }
+
+        private double speed, wait;
+        /** {@code m_target}: the name of the corner it heads for next. */
+        private String target = "";
+        /** {@code m_hCurrentTarget} and {@code m_hEnemy}: the corner last set out for. */
+        private LogicEntity current, enemy;
+        private boolean activated;
+        /** Where the bounds' centre rests, or stood when the move started. */
+        private double[] at;
+        /** The move's end, and the times it started and ends. */
+        private double[] dest;
+        private double legStart, legEnd;
+        private Done done = Done.NONE;
+        private double doneAt;
+
+        Train(MapLogic map, int index, LogicTable.Entity entity) { super(map, index, entity); }
+
+        @Override void spawn() {
+            speed = number("speed", 0);
+            if (speed == 0) speed = DEFAULT_SPEED;
+            target = key("target", "");
+        }
+
+        /** {@code Activate} with {@code SetupTarget}: onto the first corner, then on its way or waiting for a Start. */
+        @Override void activate() {
+            if (activated) return;
+            activated = true;
+            if (current == null) {
+                LogicEntity first = target.isEmpty() ? null : map.findFirst(target, this, null, null);
+                // "Can't find target of train": it stays where the map built it.
+                if (first == null) return;
+                target = cornerTarget(first);
+                current = first;
+            }
+            double[] corner = current.position();
+            if (corner == null) return;
+            at = corner.clone();
+            if (name().isEmpty()) schedule(Done.NEXT, map.time() + 0.1);
+            else spawnflags |= WAIT_RETRIGGER;
+        }
+
+        private static String cornerTarget(LogicEntity corner) {
+            return corner instanceof PathCorner path ? path.target() : corner.key("target", "");
+        }
+
+        private void schedule(Done what, double time) {
+            done = what;
+            doneAt = time;
+            nextThink = time;
+        }
+
+        private void cancel() {
+            done = Done.NONE;
+            nextThink = NEVER;
+        }
+
+        @Override void think() {
+            Done what = done;
+            done = Done.NONE;
+            // From when it was due rather than the tick that ran it, so legs do not pick up a tick each.
+            double now = Math.min(doneAt, map.time());
+            if (what == Done.WAIT) {
+                // LinearMoveDone: snaps to the exact end.
+                if (dest != null) at = dest.clone();
+                waited(now, 0);
+            } else if (what == Done.NEXT) {
+                next(now, 0);
+            }
+        }
+
+        /** {@code Wait}: arrived at the current corner. */
+        private void waited(double now, int depth) {
+            if (current == null) return;
+            current.input("inpass", null, this, this);
+            if (current.hasSpawnFlags(PathCorner.WAIT_FOR_TRIGGER) || hasSpawnFlags(WAIT_RETRIGGER)) {
+                spawnflags |= WAIT_RETRIGGER;
+                cancel();
+                return;
+            }
+            // A wait of -1 waits for ever.
+            if (wait < 0) cancel();
+            else if (wait != 0) schedule(Done.NEXT, now + wait);
+            else next(now, depth + 1);
+        }
+
+        /** {@code Next}: sets out for the corner {@code m_target} names. */
+        private void next(double now, int depth) {
+            LogicEntity corner = target.isEmpty() ? null : map.findFirst(target, this, null, null);
+            if (corner == null) { cancel(); return; }
+            if (depth > MAX_CHAIN) { schedule(Done.NEXT, now + MapLogic.TICK_SECONDS); return; }
+            target = cornerTarget(corner);
+            wait = corner.number("wait", 0);
+            // The corner left gives the speed, not the one it heads for.
+            if (current != null && current.number("speed", 0) != 0) speed = current.number("speed", 0);
+            current = corner;
+            enemy = corner;
+            double[] centre = corner.position();
+            if (centre == null) { cancel(); return; }
+            if (corner.hasSpawnFlags(PathCorner.TELEPORT)) {
+                at = centre.clone();
+                cancel();
+                waited(now, depth + 1);
+            } else {
+                linearMove(centre, now, depth);
+            }
+        }
+
+        /** {@code CBaseToggle::LinearMove}: constant speed in a straight line; already there is done at once. */
+        private void linearMove(double[] to, double now, int depth) {
+            if (at == null) at = to.clone();
+            double dx = to[0] - at[0], dy = to[1] - at[1], dz = to[2] - at[2];
+            double length = Math.sqrt(dx * dx + dy * dy + dz * dz);
+            if (length < 1e-9) {
+                at = to.clone();
+                cancel();
+                waited(now, depth + 1);
+                return;
+            }
+            dest = to.clone();
+            legStart = now;
+            legEnd = now + length / (Math.max(speed, 1e-6) / UNITS);
+            schedule(Done.WAIT, legEnd);
+        }
+
+        /** Where the centre of the bounds is at time {@code t}. */
+        private double[] positionAt(double t) {
+            if (at == null) return null;
+            if (done != Done.WAIT || dest == null || legEnd <= legStart) return at;
+            double f = Math.max(0, Math.min(1, (t - legStart) / (legEnd - legStart)));
+            return new double[]{at[0] + (dest[0] - at[0]) * f, at[1] + (dest[1] - at[1]) * f, at[2] + (dest[2] - at[2]) * f};
+        }
+
+        /** {@code Start}: leaves a stop for the next corner. */
+        private void start() {
+            if (!hasSpawnFlags(WAIT_RETRIGGER)) return;
+            spawnflags &= ~WAIT_RETRIGGER;
+            next(map.time(), 0);
+        }
+
+        /** {@code Stop}: halts where it is, and will head for the corner it was making for. */
+        private void stop() {
+            if (hasSpawnFlags(WAIT_RETRIGGER)) return;
+            spawnflags |= WAIT_RETRIGGER;
+            if (enemy != null) target = enemy.name();
+            double[] here = positionAt(map.time());
+            if (here != null) at = here;
+            cancel();
+        }
+
+        @Override boolean accept(String input, String value, Actor activator, LogicEntity caller) {
+            switch (input) {
+                case "toggle" -> { if (hasSpawnFlags(WAIT_RETRIGGER)) start(); else stop(); }
+                case "start" -> start();
+                case "stop" -> stop();
+                default -> { return false; }
+            }
+            return true;
+        }
+
+        @Override MoverPose pose(double t) {
+            LogicTable.Volume volume = map.volume(this);
+            double[] here = positionAt(t);
+            if (volume == null || here == null) return null;
+            double[] b = volume.bounds();
+            return MoverPose.of(new double[]{here[0] - (b[0] + b[3]) / 2, here[1] - (b[1] + b[4]) / 2, here[2] - (b[2] + b[5]) / 2},
+                new Quaterniond());
+        }
+
+        @Override boolean moving(double t) { return done == Done.WAIT && t < legEnd; }
+
+        /** A passable train is not solid, as Source's {@code FSOLID_NOT_SOLID}. */
+        @Override int moverState() {
+            return removed || !hasSpawnFlags(PASSABLE) ? super.moverState() : MoverRegistry.NOT_SOLID;
+        }
+
+        private static void putAll(CompoundTag tag, String key, double[] values) {
+            if (values != null) for (int i = 0; i < 3; i++) tag.putDouble(key + i, values[i]);
+        }
+
+        private static double[] getAll(CompoundTag tag, String key) {
+            return tag.contains(key + "0") ? new double[]{tag.getDouble(key + "0"), tag.getDouble(key + "1"), tag.getDouble(key + "2")} : null;
+        }
+
+        @Override void save(CompoundTag tag) {
+            super.save(tag);
+            tag.putBoolean("activated", activated);
+            tag.putString("target", target);
+            tag.putDouble("speed", speed);
+            tag.putDouble("wait", wait);
+            if (current != null) tag.putInt("current", current.index);
+            if (enemy != null) tag.putInt("enemy", enemy.index);
+            putAll(tag, "at", at);
+            putAll(tag, "dest", dest);
+            tag.putDouble("leg_start", legStart);
+            tag.putDouble("leg_end", legEnd);
+            tag.putString("done", done.name());
+            tag.putDouble("done_at", doneAt);
+        }
+
+        @Override void load(CompoundTag tag) {
+            super.load(tag);
+            activated = tag.getBoolean("activated");
+            if (tag.contains("target")) target = tag.getString("target");
+            if (tag.contains("speed")) speed = tag.getDouble("speed");
+            wait = tag.getDouble("wait");
+            current = tag.contains("current") ? map.entity(tag.getInt("current")) : null;
+            enemy = tag.contains("enemy") ? map.entity(tag.getInt("enemy")) : null;
+            at = getAll(tag, "at");
+            dest = getAll(tag, "dest");
+            legStart = tag.getDouble("leg_start");
+            legEnd = tag.getDouble("leg_end");
+            done = tag.contains("done") ? Done.valueOf(tag.getString("done")) : Done.NONE;
+            doneAt = tag.getDouble("done_at");
+        }
+
+        @Override String state() {
+            String corner = current == null ? "no corner" : current.describe();
+            return switch (done) {
+                case WAIT -> "moving to " + corner + ", arrives at " + String.format(java.util.Locale.ROOT, "%.2f", legEnd);
+                case NEXT -> "waiting at " + corner;
+                case NONE -> (hasSpawnFlags(WAIT_RETRIGGER) ? "stopped, last " : "idle, last ") + corner;
+            };
+        }
+    }
+
     // ---- func_rotating.
 
     /** {@code CFuncRotating}. */

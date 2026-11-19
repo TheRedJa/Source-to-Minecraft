@@ -1,6 +1,117 @@
 # src2mc implementation handoff
 
-Updated: 2026-10-12 (Europe/Berlin), menu side quest done (DEV-0.50.0); next Source look stage 3
+Updated: 2026-11-16 (Europe/Berlin), HL2 NPCs tier 1: M0+M1 user-tested OK (DEV-0.55.1, uncommitted); next M1b (HL2 intro + logic batch), research running
+
+## IN PROGRESS: HL2 NPCs, tier 1 (scripted actors, no combat) -- plan ~/.claude/plans/effervescent-crunching-curry.md
+
+User 2026-11-16: NPCs + map logic are the priority (HL2 has no VScript; VScript later). Tiers: 1 actors
+(scripted_sequence, scenes, node-graph walking, spawners, faces), 2 trainstation behaviour (police goal,
+actbusy, scanners, health), 3 combat. Research notes: source_refs/data/hl2_npc_research.md.
+Milestones: M0 HL2 baseline, M1 compiled scenes, M2 NPC models + idle, M3 scripted_sequence + node graph +
+makers, M4 full choreography, M5 faces. Architecture (user-approved): Npc LogicEntity + generic
+`src2mc:npc` MC body entity (collision/tracking), own renderer; scenes evaluated on both sides like Source.
+- M0 (DEV-0.55.0): export_all.sh now also exports campaign hl2 = d1_trainstation_01..06 (bundle 1.4 GB).
+  HL2 music is MP3: src/source/mp3.rs (symphonia) decodes it.
+- M1 (DEV-0.55.0): src/source/scene_image.rs (VSIF, CRC-32 lookup, LZMA) + src/source/choreo.rs (full
+  binary VCD model, all 17 event types; to_vcd() narrows to speak/firetrigger like vcd.rs). All 119
+  trainstation scene refs + Portal 1 scenes resolve. Scene speak lines are now always VOICE category
+  (were BLOCKS when uncaptioned). Runtime test: a scene that pauses itself owes lines up to the pause
+  (crowbar_intro pauses, resumed by ai_script_conditions = NPC AI).
+- Found for later: `$gender01` in vo paths (needs actor model, M2/M4); ai_script_conditions resumes scenes.
+- DEV-0.55.1: spawn picks info_player_start flagged Master (spawnflag 1) like FindPlayerStart (player.cpp:4900);
+  levels/LevelWorlds.java. Map 01 spawned in the station before.
+- User test 2026-11-16 (DEV-0.55.1): G-Man voice + captions OK, MP3 music OK (stops as it should), Breen audio OK at
+  good volume, Voice slider OK, Portal GLaDOS lines OK, INFRA OK, HL2 geometry fine. Broken: intro screen black and
+  never teleported to the train; Breen screens blank; NPC models (drawn as plain static props) sit UNDER the map
+  upside down (cause unknown; M2 replaces that path, find cause there). No HL2 title screen (HL2/Portal menus are a
+  separate later task; user agreed after tier 1).
+- Cause found by offline logic run (copy of the temp test: source_refs/tools/UnhandledInputsReport.java.txt; put in
+  mod/src/test/.../logic/ and run with -Dsrc2mc.testBundle): intro chain (logic_auto OnNewGame -> scene1..4 relays
+  -> logic_start_train ~61 s) is complete, but script_intro (camera views, blend modes, fades, FOV) and
+  point_teleport are not implemented.
+- NEXT M1b (user chose "intro + logic batch first", before M2): script_intro, point_teleport, trigger_teleport,
+  env_zoom, env_starfield, env_credits (logo + intro credits), env_screenoverlay, func_train + path_corner,
+  point_camera + func_monitor (Breen screens), env_message, env_hudhint, env_microphone, env_speaker, env_global,
+  trigger_look, trigger_hurt/push/wind, player_speedmod, point_playermoveconstraint, math_remap, logic_autosave /
+  logic_achievement (no-op). Out of M1b: physics (prop_physics, func_physbox, constraints, func_breakable,
+  env_physexplosion), sprites/beams/steam/tesla, light toggles, NPC inputs.
+  SDK research notes: source_refs/data/hl2_intro_notes.md, hl2_camera_hud_notes.md, hl2_logic_batch_notes.md
+  (agents writing them 2026-11-16), plus hl2_npc_research.md, hl2_ain_notes.md for M2+.
+
+### M1b progress (2026-11-16): DEV-0.56.0 built, exported, user-tested 2026-11-16 (results below); uncommitted
+- Converter: func_train/func_monitor movers (config.rs); logic.rs titles (titles.rs), credits + rasterized logo PNG (credits.rs,
+  ab_glyph), env_hudhint strings, [$X360]/[$WIN32] conditionals; logic assets written by mod_export/campaign.rs; format.md 16.
+- Mod entities: point_teleport, trigger_teleport(_relative), trigger_push/wind(stub)/hurt (gordon_invulnerable)/look,
+  player_speedmod, point_playermoveconstraint (PlayerEntities, Triggers); func_train + path_corner (Trains); env_global +
+  logic_auto gate (GlobalStates, LogicSavedData "globals", PlayerPersisted "src2mc_globals"); math_remap, logic_autosave,
+  logic_achievement; env_zoom/starfield/credits/message/hudhint (ScreenEffects + client ZoomClient, Starfield, CreditsOverlay,
+  HudHint); script_intro, point_camera, func_monitor (CameraEntities, ViewSync, view/ViewState+ViewNetwork, protocol "15").
+- Client camera view: client/view/SecondaryView (draw-only pass of own renderers from another camera; seams in MapSurface,
+  Prop, Animated/Logic/Mover renderers, SkyRenderer per-view snapshots; camera positions are build/reach interest points),
+  IntroView (scene target at RenderFrameEvent.Pre, composite intro.fsh before SourcePost, fade under HUD, HUD hidden).
+  Notes: source_refs/data/secondary_view_audit.md.
+- Reviewed by sonnet reviewer; 9 findings fixed (globals reset/respawn/restore, point_teleport !player, zoom/starfield resend,
+  credits re-roll, speedmod leak, starfield buffer, payload caps). 254 mod tests pass.
+- USER IN-GAME TEST DEV-0.56.0 (2026-11-16, screenshots ~/Pictures/Screenshots/Screenshot_20261116_173031.png, _173059.png):
+  OK: new game from menu, HL2 logo shows and fades, intro credits (appear once in the train, correct), ends in the train,
+  chapter title "POINT INSERTION", hud hints look good, func_train sparks, no fps issues, HEALTH_SCALE 0.2 approved.
+  BROKEN, to fix next (only documented so far):
+  1. Logo a bit too large (credits logo PNG scale; check tall vs engine glyph size, CreditsOverlay draw scale).
+  2. HL1 room camera view very dark and its animation missing (likely: named light TurnOn/TurnOff toggles not implemented --
+     light_start/light_tracktrain/light_end are toggled by the intro relays; also env_fog_controller fog_gman/fog_citadel
+     TurnOn/TurnOff and camera views using the PLAYER's fog/exposure; animated props near the camera: check reach/rootActive).
+  3. (USER: fixed after re-paste; likely caused by moving down via Shift during the screenshot -> movement now frozen during the intro, DEV-0.56.1) Citadel view: lower half washed out white/cyan with a hard horizontal edge (screenshot _173059). Suspects: sky
+     depth snapshots / 3D skybox room in the secondary pass, fog, or a translucent brush; on a full retry a separate "white
+     thingy" disappeared but this remained.
+  4. Player ends in the train in SPECTATOR, so does not ride it: entering the map from the menu must put the player in
+     survival/adventure (check MenuStart / LevelWorlds new-game path).
+  5. Breen's voice extremely muffled (G-Man fine on retry; first try muffled): Breen's broadcast should reach the player via
+     env_microphone -> env_speaker (not implemented), so it plays at Breen's far-away studio and Sound Physics muffles it.
+- FIXES DEV-0.57.0 (2026-11-16, uncommitted, protocol "16", mod-only, no re-export needed; 257 mod tests pass; NOT yet
+  user-tested): (1) logo drawn at 64 screen pixels, not scaled by height/480 (DrawLogo takes WeaponIcons non-proportional,
+  hud_credits.cpp:435); (2) light_dynamic (logic/DynamicLight, ViewState.lights, client/render/DynamicLights, baked shader
+  DLight0..7): spotlights light models only, the "spot end" point light at the trace hit lights the world
+  (c_dynamiclight.cpp; notes source_refs/data/light_dynamic_notes.md). World dlight falloff is engine-only: linear
+  1-d/r by default, `/src2mc_look dlight off|linear|quadratic` to compare. The G-Man himself is a cycler_actor (M2);
+  (4) `/src2mc menu <campaign> <map>` on a map without a main-menu panel enters as NEW_GAME (was MENU: spectator);
+  (5) env_microphone routing (SoundEntities.Microphone, MapLogic.emitSound/emitRouted): Breencast plays again at the
+  jumbotron speakers. Not carried: SoundLevel/OnHeardSound sampling, speaker DSP preset, light styles on dlights.
+- USER TEST DEV-0.57.0 (2026-11-16): logo OK; survival OK; Breencast audio from the screens OK; played through to
+  d1_trainstation_05. G-Man scene in real HL2 is only the G-Man on black (no room), so the black is right; our G-Man
+  is invisible because NPC models are drawn upside down under the floor: src/source/mdl.rs:261 applies vmdl's
+  idle_transform()*root_transform() (bone 0 rotation) to vvd vertices that are already in model space. Fix belongs to
+  M2 (pose NPC models properly). Train appeared ~5 s after arriving: Sable sub-levels reach the client after the
+  loading screen closed (log: "movement packet for a non-existent sub-level") -> DEV-0.57.1 loading screen also waits
+  for movers within 64 blocks of the player (MoverRenderer.pendingNear, LevelChangeClient); not yet user-tested.
+- USER TEST DEV-0.57.1: still left on the tracks (screenshot _190119); train appears only when walking forward.
+  Cause: player spawns in the G-Man room ~500 blocks from the intro trains; Sable tracks sub-levels only within
+  sub_level_tracking_range (dev config 128, default 320) of their centre (SubLevelTrackingSystem.shouldLoad, checked
+  each tick), so at point_teleport_destination (202,131,270) the train reaches the client late, the player is not on
+  it, it rolls to the station (~350) out of range. DEV-0.57.2: mixin/SableTrackingMixin makes shouldLoad true when
+  player and sub-level are inside one placed map (MoverSystem.sameMap, 16-block margin). Mixin not runtime-verified
+  by me (no server run config); not yet user-tested.
+- USER TEST DEV-0.57.2: still left behind (only 2 late sub-level packets now, so tracking was fixed). Offline probe
+  of the real bundle: at logic_start_train's teleport (+0.1 s) point_teleport_destination (201.7,130.8,270.1) is inside
+  intro_train_2 (x 196.5..216.8, y 128.4..134.9, z 263.6..273.4); trains go 5 u/s, then 300 u/s at +0.6 s. So the
+  logic is right and the player is not carried. HL2 also keeps the player in the G-Man room and teleports once.
+  DEV-0.57.3: after every player teleport (PlayerEntities.teleport, LevelWorlds arrival) MoverSystem.freezeOnto attaches
+  the player to the smallest mover sub-level whose plot box holds them, via Sable's own respawn-on-sub-level path
+  (PlayerFreezeExtension.sable$freezeTo + ClientboundFreezePlayerPacket; client waits for the sub-level, then rides).
+  Not yet user-tested.
+- DEV-0.57.4 diagnostics found the train cause: at the teleport the server had "55 movers registered, 43 without a
+  sub-level": Sable keeps a sub-level unloaded unless every chunk under it is block-ticking
+  (PhysicsChunkTicketManager.isChunkLoadedEnough, SubLevelHoldingChunk.canLoadSubLevel); from the G-Man room (~500
+  blocks away) the trains' chunks were unloaded, so the logic could not move them; they stayed at the station (client
+  got func_tracktrain #605 at 350,132,250 only after walking closer). DEV-0.57.5: MoverSystem.updateTickets holds a
+  distance-1 region ticket (src2mc_mover) on every chunk under each mover of a running map, at its logic pose and its
+  last placed pose. Diagnostic logs ("src2mc teleport:", "src2mc movers: client got/lost") still in; remove after
+  the user confirms. Not yet user-tested.
+- USER-CONFIRMED DEV-0.57.5 (2026-11-16): intro train works (player lands in it and rides into the station); the train's
+  holes are gone too (they were sub-levels half-loaded at chunk edges). DEV-0.57.6 removed the diagnostic logs.
+- NOT DONE in M1b: func_monitor drawing (_rt_Camera faces = UnlitTwoTexture x scanline texture2, additive, Sine proxies;
+  needs converter material flag + mod shader; SecondaryView ready to render a 256x256 camera target), env_screenoverlay,
+  env_speaker (response rules), env_microphone. Open: Hurt.HEALTH_SCALE 0.2 confirm; Sable sub_level_tracking_range 128 in
+  dev config (movers >128 blocks away not drawn in camera views); camera views use the player's fog/exposure.
 
 ## DONE: side quest "menu + one MC world per map" -- part 1 d9ce899 (DEV-0.47.0), part 2 menu DEV-0.50.0 user-confirmed 2026-10-12
 

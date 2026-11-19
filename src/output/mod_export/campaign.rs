@@ -240,6 +240,9 @@ pub fn write_campaign(
         let has_logic = map.logic.is_some();
         if let Some(logic) = map.logic {
             archive.add(format!("{prefix}/logic.json"), logic.encode()?)?;
+            for (path, bytes) in &logic.assets {
+                archive.add(format!("{prefix}/{path}"), bytes.clone())?;
+            }
         }
         let has_particles = map.particles.is_some();
         if let Some(particles) = &map.particles {

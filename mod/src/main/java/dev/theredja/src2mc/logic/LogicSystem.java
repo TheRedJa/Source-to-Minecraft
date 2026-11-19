@@ -63,10 +63,12 @@ public final class LogicSystem {
             for (MapLogic logic : List.copyOf(maps.values())) {
                 List<ServerPlayer> inside = playersInside(level, logic.placement);
                 OCCUPIED.put(logic, !inside.isEmpty());
+                ScreenEffects.arrivals(logic, inside);
                 if (ticking && !inside.isEmpty() && !allHeld(inside)) logic.tick(level, inside);
                 PropSync.update(level, logic);
                 LookSync.update(level, logic);
                 MenuSync.update(level, logic);
+                ViewSync.update(level, logic);
                 LogicNetwork.Update update = logic.drainUpdate(false);
                 if (!update.isEmpty()) send(level, logic, update, false);
                 if (logic.dirty()) data.setDirty();
@@ -126,10 +128,12 @@ public final class LogicSystem {
 
     public static void onServerStopped(ServerStoppedEvent event) {
         RUNNING.clear();
+        PlayerEntities.SpeedMod.clear();
         dev.theredja.src2mc.world.PropStates.clear(false);
         PropSync.clear();
         LookSync.clear();
         MenuSync.clear();
+        ViewSync.clear();
         OCCUPIED.clear();
         LEAVING.clear();
         HELD.clear();
@@ -174,8 +178,10 @@ public final class LogicSystem {
         LogicSavedData data = LogicSavedData.get(level);
         boolean had = logic != null | data.pending().remove(placement.anchorWorld().asLong()) != null;
         if (logic != null) OCCUPIED.remove(logic);
+        if (logic != null) logic.stopped();
         if (logic != null) LookSync.forget(level, logic);
         if (logic != null) MenuSync.forget(level, logic);
+        if (logic != null) ViewSync.forget(level, logic);
         data.setDirty();
         PacketDistributor.sendToPlayersInDimension(level, new LogicNetwork.SyncPayload(level.dimension().location(),
             placement.anchorWorld().asLong(), false, true, List.of(), List.of(), List.of()));

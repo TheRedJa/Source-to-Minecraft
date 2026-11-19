@@ -12,7 +12,7 @@ import java.util.Map;
  */
 public record LogicTable(double[] sourceOrigin, List<Entity> entities, List<Volume> volumes, List<Scene> scenes,
                          Map<String, String> captions, Map<String, String> strings, List<Entity> engineEntities,
-                         List<EngineEvent> engineEvents) {
+                         List<EngineEvent> engineEvents, List<Title> titles, Credits credits) {
     public LogicTable {
         sourceOrigin = sourceOrigin.clone();
         entities = List.copyOf(entities);
@@ -22,10 +22,49 @@ public record LogicTable(double[] sourceOrigin, List<Entity> entities, List<Volu
         strings = Map.copyOf(strings);
         engineEntities = List.copyOf(engineEntities);
         engineEvents = List.copyOf(engineEvents);
+        titles = List.copyOf(titles);
+    }
+
+    public LogicTable(double[] sourceOrigin, List<Entity> entities, List<Volume> volumes, List<Scene> scenes,
+                      Map<String, String> captions, Map<String, String> strings, List<Entity> engineEntities,
+                      List<EngineEvent> engineEvents) {
+        this(sourceOrigin, entities, volumes, scenes, captions, strings, engineEntities, engineEvents, List.of(), null);
     }
 
     public LogicTable(double[] sourceOrigin, List<Entity> entities, List<Volume> volumes, List<Scene> scenes, Map<String, String> captions) {
-        this(sourceOrigin, entities, volumes, scenes, captions, Map.of(), List.of(), List.of());
+        this(sourceOrigin, entities, volumes, scenes, captions, Map.of(), List.of(), List.of(), List.of(), null);
+    }
+
+    /**
+     * A {@code scripts/titles.txt} message an {@code env_message} shows (format.md section 16). {@code x} and
+     * {@code y} are screen fractions, -1 centering; colors are packed {@code 0xAARRGGBB}; times in seconds.
+     * {@code text} is the localized text, its lines joined by {@code \n}.
+     */
+    public record Title(String name, float x, float y, int effect, int color1, int color2, float fadein, float fadeout,
+                        float holdtime, float fxtime, String text) {}
+
+    /**
+     * {@code scripts/credits.txt} for an {@code env_credits}: {@code CreditsParams} with lowercase keys, the intro
+     * and outro names in file order with the scheme font each is drawn in, and the bundle path of the logo PNG
+     * (white glyphs, alpha coverage) or null when it could not be drawn.
+     */
+    public record Credits(Map<String, String> params, List<CreditName> intro, List<CreditName> outro, String logoImage) {
+        public Credits {
+            params = Map.copyOf(params);
+            intro = List.copyOf(intro);
+            outro = List.copyOf(outro);
+        }
+    }
+
+    /** One credits line: the text and the scheme font it is drawn in. */
+    public record CreditName(String name, String font) {}
+
+    /** The title named {@code name}, ignoring case and one leading {@code #}; null if the map has none. */
+    public Title title(String name) {
+        if (name == null) return null;
+        String key = name.startsWith("#") ? name.substring(1) : name;
+        for (Title title : titles) if (title.name().equalsIgnoreCase(key)) return title;
+        return null;
     }
 
     /**

@@ -15,16 +15,27 @@ import net.minecraft.world.level.saveddata.SavedData;
 final class LogicSavedData extends SavedData {
     private static final String FILE = "src2mc_logic";
     private final Map<Long, CompoundTag> pending = new HashMap<>();
+    /** The level's global states, shared by every map in it; see {@link GlobalStates}. */
+    private final GlobalStates.Table globals = new GlobalStates.Table();
     private ServerLevel level;
 
     static LogicSavedData get(ServerLevel level) {
         LogicSavedData data = level.getDataStorage().computeIfAbsent(new Factory<>(LogicSavedData::new, LogicSavedData::load), FILE);
-        data.level = level;
+        if (data.level != level) {
+            data.level = level;
+            data.globals.onChange(() -> {
+                data.setDirty();
+                GlobalStates.mirror(level, data.globals);
+            });
+        }
         return data;
     }
 
+    GlobalStates.Table globals() { return globals; }
+
     private static LogicSavedData load(CompoundTag tag, HolderLookup.Provider registries) {
         LogicSavedData data = new LogicSavedData();
+        data.globals.load(tag.getCompound("globals"));
         CompoundTag maps = tag.getCompound("maps");
         for (String key : maps.getAllKeys()) {
             try {
@@ -48,6 +59,7 @@ final class LogicSavedData extends SavedData {
         pending.forEach((anchor, state) -> maps.put(Long.toString(anchor), state));
         if (level != null) for (MapLogic logic : LogicSystem.runningMaps(level)) maps.put(Long.toString(logic.placement.anchorWorld().asLong()), logic.save());
         tag.put("maps", maps);
+        tag.put("globals", globals.toTag());
         return tag;
     }
 }
