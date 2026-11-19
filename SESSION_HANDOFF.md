@@ -1,6 +1,6 @@
 # src2mc implementation handoff
 
-Updated: 2026-11-16 (Europe/Berlin), HL2 NPCs tier 1: M0+M1 user-tested OK (DEV-0.55.1, uncommitted); next M1b (HL2 intro + logic batch), research running
+Updated: 2026-11-20 (Europe/Berlin), HL2 NPCs tier 1: M0-M1b committed 9ce6544; M2 part 1 + screens + /src2mcc commands committed (DEV-0.60.2), user-tested; next M3
 
 ## IN PROGRESS: HL2 NPCs, tier 1 (scripted actors, no combat) -- plan ~/.claude/plans/effervescent-crunching-curry.md
 
@@ -37,6 +37,52 @@ makers, M4 full choreography, M5 faces. Architecture (user-approved): Npc LogicE
   env_physexplosion), sprites/beams/steam/tesla, light toggles, NPC inputs.
   SDK research notes: source_refs/data/hl2_intro_notes.md, hl2_camera_hud_notes.md, hl2_logic_batch_notes.md
   (agents writing them 2026-11-16), plus hl2_npc_research.md, hl2_ain_notes.md for M2+.
+
+### DEV-0.60.x (2026-11-20, committed): monitor screens user-tested
+- Screens, cameras (folded out), templates, /src2mcc commands work. Breen's screen shows the right camera view
+  (user confirmed with blocks in the studio): fov 20 at 38.7 u is a face close-up as in Source, but Breen stands
+  (refpose) so the camera sees his suit; `ss_breencast` (sitpose) seats him -> M3. The black box with the white bar
+  is `brush_breen_combineslate` (toggled by lcs_tv_breencast), correct.
+- Missing everywhere: `infodecal` (static map decals, e.g. decals/decal_posterbreentv behind Breen): handled nowhere
+  in src/ or mod/. Separate task after M3.
+- Debug: `/src2mcc debug monitorshot` (PNG of _rt_Camera), `debug monitorforce on|off`, `draw monitorexposure`;
+  status monitors shows camera pose, exposure and the camera view's draw counts. Region builds now sort by distance
+  to the player or any secondary camera (MapSurfaceRenderer).
+- M3 research complete: source_refs/data/hl2_m3_notes.md section 7 (events #1003 etc., footsteps, movement blocks,
+  bone-0 fixup, goal tolerance 52); scratch tooling source_refs/tools/m3_mdl/ (anim.rs events/moves patch).
+
+### DEV-0.59.0 (2026-11-19, uncommitted, all 4 bundles re-exported + validated; awaiting user in-game test)
+- User-confirmed DEV-0.58.0: G-Man upright/idle (a bit pixelated close up: higher-res textures LATER, after all
+  features), police/citizens fine, no fps issue. Reported: Breen screens see-through, combine cameras missing.
+- DEV-0.58.1: npc_combine_camera idles in ACT_COMBINE_CAMERA_OPEN_IDLE (closed if spawnflag 0x80), via deploy
+  transition (npcs.rs idle_activity + Npc.idleActivity); SF_NPC_TEMPLATE (2048) NPCs removed at spawn (mapentities.cpp:365).
+- Commands: all client commands now under ONE root /src2mcc (client/ClientCommands.java wires; docs/commands.md lists
+  both roots). /src2mcc status = compact page (fps + one line per subsystem), status <topic> = full. Create/static-section
+  probes deleted; iris_entity_id/render_stage/indexed/draw_order/mipmaps/translucent_depth commands removed (defaults kept).
+- Screens: map JSON v2 -> v3, material `camera` object (format section 6) for $basetexture _rt_Camera (UnlitGeneric,
+  UnlitTwoTexture, MonitorScreen; Sine/TextureScroll/LinearRamp proxies; texture2 as details PNG). Mod: MonitorCameras
+  renders the lowest-index active camera of a visible monitor into one 256x256 target via SecondaryView (own fog);
+  MonitorScreens draws camera faces with shader src2mc:monitor. Toggles /src2mcc draw monitors|monitorcamera,
+  /src2mcc status monitors. Unverified: $color2/srgb? prefix (combinemonitor_3 brightness), camera choice order.
+- M3 groundwork: src/source/ain.rs node graph reader + A* (tests on trainstation 01-06; zones are not hull
+  connectivity, see hl2_ain_notes.md section 7). M3 SDK research -> source_refs/data/hl2_m3_notes.md (agent running).
+
+### M2 part 1 (2026-11-19): DEV-0.58.0 built + exported + all bundles installed; uncommitted, awaiting user in-game test
+- Converter: anim.rs merges $includemodel (virtual model rules: seq dedupe by label + STUDIO_OVERRIDE, bones by name,
+  nodes by name with GetTransition=goal, attachments by name). Include parses cached process-wide (Arc), include
+  sequences reference group frames through bone_map (Animation::frame/frame_count); no copies (male citizens ~56k frames).
+- src/bsp/npcs.rs: actor classes + model per class (fixed / key-or-default / citizen SelectModel, deterministic head =
+  first least-used); additionalequipment -> weapon world model. Actors = animated logic props, solid NONE, reachable
+  = seq 0 + ACT_IDLE + named.
+- anim::with_weapon bakes the weapon into the NPC mesh on the first weapon bone the owner has (bonemerge), bound rigidly;
+  ModelUse key has a 5th field (weapon). Test: stunstick stays within 8 u of police R_Hand during idle.
+- s2anim v2 (format section 19): weights only for kept sequences (cut ~300 KB per citizen), attachments appended.
+- Mod: Npc extends DynamicProp (LogicEntities default for npc_* + generic/cycler_actor/monster_generic): idles
+  ACT_IDLE weighted, re-picks when a non-looping idle ends; no CDynamicProp inputs. AnimationAsset v2 + attachments.
+- Deviations from plan, deferred: src2mc:npc body entity (NPCs walk-through until M3, when they move), sequence
+  movement + autolayers + pose params + gesture layers (M3/M4 where used). Static-path bug left: mdl.rs:261 applies
+  idle*root (should be idle*root^-1); only non-actor props now (prop_ragdoll/physics of NPC models still flipped).
+- Animations in trainstation_01: 19 files, 5 MB.
 
 ### M1b progress (2026-11-16): DEV-0.56.0 built, exported, user-tested 2026-11-16 (results below); uncommitted
 - Converter: func_train/func_monitor movers (config.rs); logic.rs titles (titles.rs), credits + rasterized logo PNG (credits.rs,

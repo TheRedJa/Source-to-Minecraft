@@ -189,6 +189,63 @@ pub struct MaterialReference {
     /// `$phong` of a VertexLitGeneric material (format section 6).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub phong: Option<PhongReference>,
+    /// A `$basetexture _rt_Camera` material: it shows the `point_camera`
+    /// picture (format section 6).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub camera: Option<CameraReference>,
+}
+
+/// A material drawing the camera target, `_rt_Camera`, as its shader does.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct CameraReference {
+    pub shader: CameraShader,
+    /// Texels per texture repeat along s and t: the BSP's texture-data size,
+    /// which the face's texture vectors are authored against.
+    pub size: [u32; 2],
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub additive: bool,
+    pub color: [f64; 3],
+    pub color2: [f64; 3],
+    /// `Sine` proxies on `$color`, one per channel at most, by channel.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub sines: Vec<SineReference>,
+    /// `$texture2`: content ID of its `details/<id>.png`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub texture2: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transform: Option<Texture2TransformReference>,
+    /// `MonitorScreen` only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contrast: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub saturation: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tint: Option<[f64; 3]>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CameraShader {
+    UnlitGeneric,
+    UnlitTwoTexture,
+    MonitorScreen,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SineReference {
+    pub channel: u8,
+    pub period: f64,
+    pub min: f64,
+    pub max: f64,
+    pub offset: f64,
+}
+
+/// `uv * scale + offset + velocity * t`, `t` in seconds.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Texture2TransformReference {
+    pub scale: f64,
+    pub offset: [f64; 2],
+    pub velocity: [f64; 2],
 }
 
 /// `$phong` as VertexLitGeneric's phong shader draws it. `exponent` 0 takes
@@ -459,7 +516,7 @@ impl AtlasMetadata {
 impl MapMetadata {
     pub fn encode(mut self) -> Result<Vec<u8>> {
         ensure!(
-            self.format == "src2mc-map" && self.version == 2,
+            self.format == "src2mc-map" && self.version == 3,
             "invalid map schema"
         );
         validate_id(&self.map_id, "map")?;
@@ -616,6 +673,65 @@ impl MaterialReference {
                 }
             }
         }
+        if let Some(camera) = &mut self.camera {
+            ensure!(
+                self.texture.is_none(),
+                "a camera material draws the camera target, not a texture"
+            );
+            ensure!(
+                camera.size[0] > 0 && camera.size[1] > 0,
+                "camera texture size must be positive"
+            );
+            ensure!(
+                camera
+                    .sines
+                    .windows(2)
+                    .all(|pair| pair[0].channel < pair[1].channel)
+                    && camera.sines.iter().all(|s| s.channel < 3),
+                "camera sines must be unique, sorted channels 0 to 2"
+            );
+            let monitor = camera.shader == CameraShader::MonitorScreen;
+            ensure!(
+                camera.contrast.is_some() == monitor
+                    && camera.saturation.is_some() == monitor
+                    && camera.tint.is_some() == monitor,
+                "contrast, saturation and tint belong to MonitorScreen"
+            );
+            ensure!(
+                camera.shader != CameraShader::UnlitGeneric
+                    || (camera.texture2.is_none() && camera.transform.is_none()),
+                "UnlitGeneric has no second texture"
+            );
+            if let Some(id) = &camera.texture2 {
+                validate_content_id(id)?;
+            }
+            for sine in &mut camera.sines {
+                ensure!(sine.period != 0.0, "a sine period of 0 is written as 1");
+                for value in [&mut sine.period, &mut sine.min, &mut sine.max, &mut sine.offset] {
+                    *value = canonical_f64(*value)?;
+                }
+            }
+            if let Some(transform) = &mut camera.transform {
+                for value in transform
+                    .offset
+                    .iter_mut()
+                    .chain(transform.velocity.iter_mut())
+                    .chain([&mut transform.scale])
+                {
+                    *value = canonical_f64(*value)?;
+                }
+            }
+            for value in camera
+                .color
+                .iter_mut()
+                .chain(camera.color2.iter_mut())
+                .chain(camera.tint.iter_mut().flatten())
+                .chain(camera.contrast.iter_mut())
+                .chain(camera.saturation.iter_mut())
+            {
+                *value = canonical_f64(*value)?;
+            }
+        }
         if let Some(envmap) = &mut self.envmap {
             for value in envmap
                 .tint
@@ -766,7 +882,7 @@ mod tests {
     fn map_normalizes_floats_and_requires_model_order() {
         let mut map = MapMetadata {
             format: "src2mc-map",
-            version: 2,
+            version: 3,
             map_id: "d1_01".into(),
             source_name: "d1_01".into(),
             units_per_block: 32.0,
@@ -789,6 +905,7 @@ mod tests {
                 detail: None,
                 selfillum: None,
                 phong: None,
+                camera: None,
             }],
             models: vec![
                 ModelReference {

@@ -1,7 +1,5 @@
 package dev.theredja.src2mc.client.particles;
 
-import static net.minecraft.commands.Commands.literal;
-
 import dev.theredja.src2mc.Src2mc;
 import dev.theredja.src2mc.bundle.BundleGeneration;
 import dev.theredja.src2mc.bundle.BundleManifest;
@@ -26,7 +24,6 @@ import net.neoforged.api.distmarker.Dist;
 import net.neoforged.bus.api.EventPriority;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.common.EventBusSubscriber;
-import net.neoforged.neoforge.client.event.RegisterClientCommandsEvent;
 import net.neoforged.neoforge.client.event.RenderLevelStageEvent;
 
 /**
@@ -353,27 +350,24 @@ public final class ParticleEffects {
         return total;
     }
 
-    @SubscribeEvent
-    static void registerCommand(RegisterClientCommandsEvent event) {
-        event.getDispatcher().register(literal("src2mc_particles")
-            .executes(context -> status(context.getSource()))
-            .then(literal("on").executes(context -> { enabled = true; return status(context.getSource()); }))
-            .then(literal("off").executes(context -> { enabled = false; clear(); return status(context.getSource()); }))
-            .then(literal("range").then(net.minecraft.commands.Commands.argument("blocks", com.mojang.brigadier.arguments.DoubleArgumentType.doubleArg(16, 1024))
-                .executes(context -> { range = com.mojang.brigadier.arguments.DoubleArgumentType.getDouble(context, "blocks"); return status(context.getSource()); })))
-            .then(literal("decals")
-                .then(literal("on").executes(context -> { DecalRenderer.setEnabled(true); return status(context.getSource()); }))
-                .then(literal("off").executes(context -> { DecalRenderer.setEnabled(false); return status(context.getSource()); }))
-                .then(literal("clear").executes(context -> { DecalRenderer.clearAll(); return status(context.getSource()); }))));
+    public static void setEnabled(boolean value) { enabled = value; if (!value) clear(); }
+
+    public static void setRange(double blocks) { range = blocks; }
+
+    /** One line for {@code /src2mcc status}. */
+    public static String summaryLine() {
+        long running = SOURCES.stream().filter(s -> s.current != null).count();
+        return "particles " + (enabled ? "on" : "off") + ", range " + (int) range + ": " + particleCount() + " live from " + running + "/" + SOURCES.size()
+            + " entities, " + ONE_SHOTS.size() + " one-shots; " + SPARKS.size() + " spark entities; drawn " + ParticleRenderer.drawnParticles + " in " + ParticleRenderer.drawCalls
+            + " draws since start; " + DecalRenderer.status();
     }
 
-    private static int status(CommandSourceStack source) {
+    /** The full particle and decal status ({@code /src2mcc status particles}). */
+    public static String statusText() {
         long running = SOURCES.stream().filter(s -> s.current != null).count();
         String text = "src2mc particles " + (enabled ? "on" : "off") + ", range " + (int) range + " blocks: " + SOURCES.size()
             + " particle entities, " + running + " running, " + ONE_SHOTS.size() + " one-shot effects, " + particleCount()
             + " particles; " + SPARKS.size() + " spark entities, " + sparks + " sparks; impacts " + Impacts.impacts + " heard, " + Impacts.drawn + " drawn; drawn " + ParticleRenderer.drawnParticles + " particles in " + ParticleRenderer.drawCalls + " draws since start";
-        source.sendSuccess(() -> Component.literal(text), false);
-        source.sendSuccess(() -> Component.literal(DecalRenderer.status()), false);
-        return 1;
+        return text + "\n" + DecalRenderer.status();
     }
 }

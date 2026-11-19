@@ -1,24 +1,17 @@
 package dev.theredja.src2mc.client.look;
 
-import static net.minecraft.commands.Commands.argument;
-import static net.minecraft.commands.Commands.literal;
-
-import com.mojang.brigadier.arguments.FloatArgumentType;
-import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import dev.theredja.src2mc.Src2mc;
 import dev.theredja.src2mc.client.render.IrisCompat;
 import java.util.Locale;
-import java.util.function.Consumer;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.network.chat.Component;
 import net.neoforged.api.distmarker.Dist;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.common.EventBusSubscriber;
 import net.neoforged.neoforge.client.event.ClientPlayerNetworkEvent;
-import net.neoforged.neoforge.client.event.RegisterClientCommandsEvent;
 
 /**
- * {@code /src2mc_look}: switches for each part of Source's post-processing, a held tone map
+ * Handlers for {@code /src2mcc look} and parts of {@code /src2mcc light}: switches for each part of Source's post-processing, a held tone map
  * scale, and what the camera's map makes of its view this frame.
  */
 @EventBusSubscriber(modid = Src2mc.MOD_ID, value = Dist.CLIENT)
@@ -32,91 +25,83 @@ public final class LookCommands {
         dev.theredja.src2mc.network.PlacementNetwork.clearClient();
     }
 
-    @SubscribeEvent
-    static void registerCommands(RegisterClientCommandsEvent event) {
-        event.getDispatcher().register(onOff(literal("src2mc_look"), value -> SourcePost.enabled = value, "post-processing")
-            .then(onOff(literal("bloom"), value -> SourcePost.bloomOn = value, "bloom"))
-            .then(onOff(literal("exposure"), value -> SourcePost.exposureOn = value, "auto exposure"))
-            .then(onOff(literal("correction"), value -> SourcePost.correctionOn = value, "colour correction"))
-            .then(onOff(literal("vignette"), value -> SourcePost.vignetteOn = value, "vignette"))
-            .then(onOff(literal("grain"), value -> SourcePost.grainOn = value, "film grain (on follows the map's data)"))
-            .then(literal("grainscale")
-                .then(argument("scale", FloatArgumentType.floatArg(-1f, 64f))
-                    .executes(context -> grainScale(context.getSource(), FloatArgumentType.getFloat(context, "scale")))))
-            .then(onOff(literal("fog"), value -> LookClient.fogOn = value, "Source fog"))
-            .then(onOff(literal("reflections"), value -> dev.theredja.src2mc.client.render.SurfaceEffects.enabled = value, "cubemap reflections"))
-            .then(onOff(literal("detail"), value -> dev.theredja.src2mc.client.render.SurfaceEffects.detailOn = value, "detail textures"))
-            .then(onOff(literal("blend"), value -> dev.theredja.src2mc.client.render.SurfaceEffects.blendOn = value, "displacement blending"))
-            .then(onOff(literal("selfillum"), value -> dev.theredja.src2mc.client.render.SurfaceEffects.selfillumOn = value, "self-illumination"))
-            .then(onOff(literal("lightonly"), value -> dev.theredja.src2mc.client.render.SurfaceEffects.lightOnly = value, "light-only grey albedo"))
-            .then(onOff(literal("phong"), value -> dev.theredja.src2mc.client.render.PropLights.phongOn = value, "phong on props (off: baked light only)"))
-            .then(onOff(literal("rimlight"), value -> dev.theredja.src2mc.client.render.PropLights.rimOn = value, "phong rim light"))
-            .then(onOff(literal("proplights"), value -> dev.theredja.src2mc.client.render.PropLights.propLightsOn = value, "world lights on non-phong moving props (phong always uses them)"))
-            .then(onOff(literal("sun"), value -> dev.theredja.src2mc.client.render.PropLights.setSunOn(value), "skylight on props (off: excluded everywhere)"))
-            .then(onOff(literal("lightvis"), value -> dev.theredja.src2mc.client.render.PropLights.setLightVisOn(value), "hide lights behind walls from props (visibility lists)"))
-            .then(onOff(literal("srgb"), value -> dev.theredja.src2mc.client.render.SurfaceEffects.srgbCurve = value, "exact sRGB curve"))
-            .then(onOff(literal("dither"), value -> dev.theredja.src2mc.client.render.SurfaceEffects.ditherAll = value, "dither on every path"))
-            .then(literal("lightatten")
-                .then(literal("vertex").executes(context -> { dev.theredja.src2mc.client.render.PropLights.lightAttenVertex = true; return reply(context.getSource(), "src2mc phong light attenuation per vertex (Source)"); }))
-                .then(literal("pixel").executes(context -> { dev.theredja.src2mc.client.render.PropLights.lightAttenVertex = false; return reply(context.getSource(), "src2mc phong light attenuation per pixel"); })))
-            .then(literal("dlight")
-                .then(dlight("off", 0)).then(dlight("linear", 1)).then(dlight("quadratic", 2)))
-            .then(literal("phongdebug")
-                .then(phongDebug("off", 0)).then(phongDebug("diffuse", 1)).then(phongDebug("spec", 2)).then(phongDebug("lights", 3)))
-            .then(literal("bump")
-                .then(literal("on").executes(context -> bump(context.getSource(), true)))
-                .then(literal("off").executes(context -> bump(context.getSource(), false))))
-            .then(literal("measure")
-                .then(literal("gamma").executes(context -> { SourcePost.measureLinear = false; return reply(context.getSource(), "src2mc exposure measures the stored gamma values"); }))
-                .then(literal("linear").executes(context -> { SourcePost.measureLinear = true; return reply(context.getSource(), "src2mc exposure measures linear light"); })))
-            .then(literal("scale")
-                .then(literal("auto").executes(context -> held(context.getSource(), 0)))
-                .then(argument("scale", FloatArgumentType.floatArg(0.01f, 64f))
-                    .executes(context -> held(context.getSource(), FloatArgumentType.getFloat(context, "scale")))))
-            .then(literal("status").executes(context -> status(context.getSource()))));
+    /** The switches {@link #toggle} knows, for {@code /src2mcc look}. */
+    public static final java.util.List<String> LOOK_SWITCHES = java.util.List.of(
+        "bloom", "exposure", "correction", "vignette", "grain", "fog", "reflections", "detail", "blend", "selfillum", "srgb", "dither");
+    /** The switches {@link #toggle} knows, for {@code /src2mcc light}. */
+    public static final java.util.List<String> LIGHT_SWITCHES = java.util.List.of("phong", "rimlight", "proplights", "sun", "lightvis");
+
+    /** Sets the named switch; {@code post} is the whole of Source's post-processing. */
+    public static int toggle(CommandSourceStack source, String name, boolean value) {
+        String what;
+        switch (name) {
+            case "post" -> { SourcePost.enabled = value; what = "post-processing"; }
+            case "bloom" -> { SourcePost.bloomOn = value; what = "bloom"; }
+            case "exposure" -> { SourcePost.exposureOn = value; what = "auto exposure"; }
+            case "correction" -> { SourcePost.correctionOn = value; what = "colour correction"; }
+            case "vignette" -> { SourcePost.vignetteOn = value; what = "vignette"; }
+            case "grain" -> { SourcePost.grainOn = value; what = "film grain (on follows the map's data)"; }
+            case "fog" -> { LookClient.fogOn = value; what = "Source fog"; }
+            case "reflections" -> { dev.theredja.src2mc.client.render.SurfaceEffects.enabled = value; what = "cubemap reflections"; }
+            case "detail" -> { dev.theredja.src2mc.client.render.SurfaceEffects.detailOn = value; what = "detail textures"; }
+            case "blend" -> { dev.theredja.src2mc.client.render.SurfaceEffects.blendOn = value; what = "displacement blending"; }
+            case "selfillum" -> { dev.theredja.src2mc.client.render.SurfaceEffects.selfillumOn = value; what = "self-illumination"; }
+            case "lightonly" -> { dev.theredja.src2mc.client.render.SurfaceEffects.lightOnly = value; what = "light-only grey albedo"; }
+            case "phong" -> { dev.theredja.src2mc.client.render.PropLights.phongOn = value; what = "phong on props (off: baked light only)"; }
+            case "rimlight" -> { dev.theredja.src2mc.client.render.PropLights.rimOn = value; what = "phong rim light"; }
+            case "proplights" -> { dev.theredja.src2mc.client.render.PropLights.propLightsOn = value; what = "world lights on non-phong moving props (phong always uses them)"; }
+            case "sun" -> { dev.theredja.src2mc.client.render.PropLights.setSunOn(value); what = "skylight on props (off: excluded everywhere)"; }
+            case "lightvis" -> { dev.theredja.src2mc.client.render.PropLights.setLightVisOn(value); what = "hide lights behind walls from props (visibility lists)"; }
+            case "srgb" -> { dev.theredja.src2mc.client.render.SurfaceEffects.srgbCurve = value; what = "exact sRGB curve"; }
+            case "dither" -> { dev.theredja.src2mc.client.render.SurfaceEffects.ditherAll = value; what = "dither on every path"; }
+            default -> throw new IllegalArgumentException("unknown look switch " + name);
+        }
+        return reply(source, "src2mc " + what + (value ? " on" : " off"));
+    }
+
+    /** {@code light atten}: Source's phong attenuation per vertex, or per pixel. */
+    public static int lightAtten(CommandSourceStack source, boolean vertex) {
+        dev.theredja.src2mc.client.render.PropLights.lightAttenVertex = vertex;
+        return reply(source, vertex ? "src2mc phong light attenuation per vertex (Source)" : "src2mc phong light attenuation per pixel");
+    }
+
+    /** {@code look measure}: whether auto exposure measures stored gamma values or linear light. */
+    public static int measure(CommandSourceStack source, boolean linear) {
+        SourcePost.measureLinear = linear;
+        return reply(source, linear ? "src2mc exposure measures linear light" : "src2mc exposure measures the stored gamma values");
     }
 
     /** The falloff of {@code light_dynamic}'s lights (the engine's is not public), or none. */
-    private static LiteralArgumentBuilder<CommandSourceStack> dlight(String name, int mode) {
-        return literal(name).executes(context -> {
-            dev.theredja.src2mc.client.render.DynamicLights.mode = mode;
-            return reply(context.getSource(), "src2mc dynamic lights " + name + " (" + dev.theredja.src2mc.client.render.DynamicLights.lightsLastFrame()
-                + " lit last frame)");
-        });
+    public static int dlight(CommandSourceStack source, String name, int mode) {
+        dev.theredja.src2mc.client.render.DynamicLights.mode = mode;
+        return reply(source, "src2mc dynamic lights " + name + " (" + dev.theredja.src2mc.client.render.DynamicLights.lightsLastFrame()
+            + " lit last frame)");
     }
 
-    /** {@code on} and {@code off} under {@code node}. */
-    private static LiteralArgumentBuilder<CommandSourceStack> onOff(LiteralArgumentBuilder<CommandSourceStack> node, Consumer<Boolean> set, String what) {
-        return node
-            .then(literal("on").executes(context -> { set.accept(true); return reply(context.getSource(), "src2mc " + what + " on"); }))
-            .then(literal("off").executes(context -> { set.accept(false); return reply(context.getSource(), "src2mc " + what + " off"); }));
+    public static int phongDebug(CommandSourceStack source, String name, int mode) {
+        dev.theredja.src2mc.client.render.PropLights.phongDebug = mode;
+        return reply(source, "src2mc phong debug " + name);
     }
 
     /** Bump-mapped faces through their bump lightmaps, or flat; surface meshes rebuild to show it. */
-    private static int bump(CommandSourceStack source, boolean value) {
+    public static int bump(CommandSourceStack source, boolean value) {
         dev.theredja.src2mc.client.render.BakedLighting.bumpEnabled = value;
         reply(source, "src2mc bump mapping " + (value ? "on" : "off") + " (moving parts keep theirs until they rebuild)");
         return dev.theredja.src2mc.client.render.MapSurfaceRenderer.rebuildMeshes(source);
     }
 
-    private static int held(CommandSourceStack source, float value) {
+    /** Holds the tone map scale at {@code value}, or back to auto exposure with 0. */
+    public static int held(CommandSourceStack source, float value) {
         SourcePost.force(value);
         return reply(source, value > 0 ? "src2mc tone map scale held at " + value : "src2mc tone map scale back to auto exposure");
     }
 
-    private static int grainScale(CommandSourceStack source, float value) {
+    public static int grainScale(CommandSourceStack source, float value) {
         SourcePost.grainScale = value;
         return reply(source, value == -1 ? "src2mc film grain scale back to the map's own" : "src2mc film grain scale held at " + value);
     }
 
-    private static LiteralArgumentBuilder<CommandSourceStack> phongDebug(String name, int mode) {
-        return literal(name).executes(context -> {
-            dev.theredja.src2mc.client.render.PropLights.phongDebug = mode;
-            return reply(context.getSource(), "src2mc phong debug " + name);
-        });
-    }
-
-    private static int status(CommandSourceStack source) {
+    public static String statusText() {
         LookClient.Frame frame = LookClient.frame();
         StringBuilder text = new StringBuilder("src2mc look: post ").append(SourcePost.enabled ? "on" : "off")
             .append(", bloom ").append(SourcePost.bloomOn ? "on" : "off")
@@ -172,7 +157,7 @@ public final class LookCommands {
                 SourcePost.grainUsed() > 0 ? "yes" : "no (off, no data, or framebuffer under 720 high)"));
             if (look != null && look.vignette() != null) text.append(", vignette ").append(look.vignette().width()).append('x').append(look.vignette().height());
         }
-        return reply(source, text.toString());
+        return text.toString();
     }
 
     private static int reply(CommandSourceStack source, String text) {

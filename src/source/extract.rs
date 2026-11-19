@@ -122,6 +122,9 @@ pub struct ModProp {
     /// `model` and `skins` are a still dynamic prop's sequence 0, which
     /// differs from the model's reference pose.
     pub posed: bool,
+    /// The weapon model an NPC holds, baked into `model` and `skins` on its
+    /// hand bone ([`crate::source::anim::with_weapon`]).
+    pub weapon: Option<String>,
 }
 
 /// What an animated prop's model can play, and where it starts.
@@ -167,7 +170,7 @@ pub fn extract_mod_props(map: &Map, config: &Config) -> Vec<ModProp> {
     let skybox = map.skybox().filter(|_| config.contents.skip_3d_skybox);
     let mut props = crate::bsp::props::extract(map);
     if config.props.entity_props {
-        props.extend(crate::bsp::props::extract_entities(&map.bsp));
+        props.extend(crate::bsp::props::extract_entities(&map.bsp, &map.name));
     }
     // A parented prop may ride a mover: a train's buttons and levers are small,
     // but they are its controls and move with it, so the size floor spares them.
@@ -245,9 +248,12 @@ pub fn extract_mod_props(map: &Map, config: &Config) -> Vec<ModProp> {
             // sequence 0 at its first frame, which `CDynamicProp` keeps when
             // nothing animates it.
             let mut animation = None;
-            let dynamic = prop.entity.is_some()
-                && crate::bsp::logic_props::DYNAMIC_PROP_CLASSES
-                    .contains(&prop.classname.to_ascii_lowercase().as_str());
+            let mut weapon = None;
+            let actor = prop.entity.is_some() && crate::bsp::npcs::is_actor(&prop.classname);
+            let dynamic = actor
+                || prop.entity.is_some()
+                    && crate::bsp::logic_props::DYNAMIC_PROP_CLASSES
+                        .contains(&prop.classname.to_ascii_lowercase().as_str());
             let skeleton = if dynamic {
                 animations
                     .entry(prop.model.to_ascii_lowercase())
@@ -264,17 +270,46 @@ pub fn extract_mod_props(map: &Map, config: &Config) -> Vec<ModProp> {
                         .map(|(_, v)| v.trim().to_string())
                         .unwrap_or_default()
                 };
+                if actor {
+                    let equipment = key("additionalequipment");
+                    if let Some(path) = crate::bsp::npcs::weapon_model(&equipment) {
+                        let held = models.get(path).zip(
+                            animations
+                                .entry(path.to_string())
+                                .or_insert_with(|| crate::source::anim::read(&vfs, path).map(Arc::new))
+                                .clone(),
+                        );
+                        if let Some((gun, gun_animation)) = held {
+                            let hold = |owner: &Arc<crate::source::mdl::Model>| {
+                                crate::source::anim::with_weapon(owner, &skeleton, &gun, &gun_animation)
+                                    .map(Arc::new)
+                            };
+                            if let Some(holding) = hold(&model) {
+                                model = holding;
+                                skins = skins.iter().map(|s| hold(s).unwrap_or_else(|| s.clone())).collect();
+                                weapon = Some(path.to_string());
+                            }
+                        }
+                    }
+                }
                 if logic.is_some_and(|role| role.animated) {
                     let names = requests.get(&entity);
                     let spawn = skeleton.spawn_sequence(&key("DefaultAnim"));
+                    // An actor idles: `SelectWeightedSequence` of its idle activity.
+                    let idle = actor.then(|| {
+                        crate::bsp::npcs::idle_activity(
+                            &prop.classname,
+                            crate::bsp::logic_props::atoi_text(&key("spawnflags")),
+                        )
+                    });
                     let sequences = skeleton.reachable(
-                        names.into_iter().flatten().map(String::as_str),
+                        names.into_iter().flatten().map(String::as_str).chain(idle),
                         crate::bsp::logic_props::atoi_text(&key("RandomAnimation")) != 0,
                     );
                     let spawn_model = Arc::new(crate::source::anim::pose_model(
                         &model,
                         &skeleton,
-                        &skeleton.sequences[spawn].frames[0],
+                        &skeleton.frame(spawn, 0),
                     ));
                     animation = Some(AnimatedProp {
                         animation: skeleton,
@@ -290,7 +325,7 @@ pub fn extract_mod_props(map: &Map, config: &Config) -> Vec<ModProp> {
                                 let still = crate::source::anim::pose_model(
                                     model,
                                     &skeleton,
-                                    &skeleton.sequences[0].frames[0],
+                                    &skeleton.frame(0, 0),
                                 );
                                 if moved(model, &still) {
                                     Arc::new(still)
@@ -311,7 +346,7 @@ pub fn extract_mod_props(map: &Map, config: &Config) -> Vec<ModProp> {
             // An animated prop keeps its model's own box: a sequence can park it far
             // away (escape_02's debris wait above the map), and the box places its
             // root block.
-            let posed = !Arc::ptr_eq(&model, &models.get_skin(&prop.model, prop.skin)?);
+            let posed = weapon.is_none() && !Arc::ptr_eq(&model, &models.get_skin(&prop.model, prop.skin)?);
             if posed {
                 bounds = placed_bounds(&prop, &model);
             }
@@ -324,6 +359,7 @@ pub fn extract_mod_props(map: &Map, config: &Config) -> Vec<ModProp> {
                 skins,
                 animation,
                 posed,
+                weapon,
             })
         })
         .collect()
@@ -682,7 +718,7 @@ fn place_props(
     let mut props = crate::bsp::props::extract(map);
     if config.props.entity_props {
         // Crates, barrels, doors and cars are entities, not `sprp` records.
-        props.extend(crate::bsp::props::extract_entities(&map.bsp));
+        props.extend(crate::bsp::props::extract_entities(&map.bsp, &map.name));
     }
     // Whether props may be drawn as their own mesh. It needs the generated
     // pack, since that is what registers the models, so this is a `kubejs`

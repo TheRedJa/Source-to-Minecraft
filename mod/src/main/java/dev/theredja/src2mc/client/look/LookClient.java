@@ -83,7 +83,7 @@ public final class LookClient {
                         float rate, List<Lookup> lookups, float defaultWeight) {}
 
     private static Frame frame;
-    /** {@code /src2mc_look fog off}: Minecraft's fog everywhere again. */
+    /** {@code /src2mcc look fog off}: Minecraft's fog everywhere again. */
     static boolean fogOn = true;
     /** The fog controller the player followed last frame; -2 before any. */
     private static int fogController = -2;
@@ -94,6 +94,16 @@ public final class LookClient {
 
     /** This frame's view, or null when the camera is in no map. */
     public static Frame frame() { return frame; }
+
+    /**
+     * Puts {@code next} in place of this frame's view and returns the one it replaces: a {@code point_camera}'s view
+     * draws with the camera's own fog (DrawOneMonitor, viewrender.cpp:3179-3199), and is put back after.
+     */
+    public static Frame swapFrame(Frame next) {
+        Frame old = frame;
+        frame = next;
+        return old;
+    }
 
     /** Works out this frame's view from where the camera is. */
     public static void update(Camera camera) {

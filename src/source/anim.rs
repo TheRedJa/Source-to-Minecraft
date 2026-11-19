@@ -23,6 +23,7 @@ pub const STUDIO_SNAP: u32 = 0x0002;
 pub const STUDIO_DELTA: u32 = 0x0004;
 pub const STUDIO_ALLZEROS: u32 = 0x0020;
 pub const STUDIO_REALTIME: u32 = 0x0100;
+pub const STUDIO_OVERRIDE: u32 = 0x0800;
 
 const STUDIO_ANIM_RAWPOS: u8 = 0x01;
 const STUDIO_ANIM_RAWROT: u8 = 0x02;
@@ -90,8 +91,34 @@ pub struct Sequence {
     pub bone_weights: Vec<f32>,
     /// Every frame's pose, each bone's local transform; at least one frame.
     /// A frame between two is blended as `CalcBoneQuaternion` blends:
-    /// position linearly, rotation by `QuaternionBlend`.
+    /// position linearly, rotation by `QuaternionBlend`. Empty for a sequence
+    /// of an `$includemodel`, whose frames stay in that model's bones: read
+    /// them through [`Animation::frame`].
     pub frames: Vec<Vec<BonePose>>,
+    /// For a sequence of an `$includemodel`: the group in
+    /// [`Animation::groups`] and its index among that model's own sequences.
+    pub origin: Option<(usize, usize)>,
+}
+
+/// One `$includemodel` of a model, as `virtualmodel_t` keeps a group.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Group {
+    /// The included model's own skeleton and sequences.
+    pub animation: std::sync::Arc<Animation>,
+    /// `boneMap`: for each bone of the main model, the included model's bone
+    /// of the same name, ignoring ASCII case.
+    pub bone_map: Vec<Option<usize>>,
+}
+
+/// `mstudioattachment_t`: a named frame on a bone.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Attachment {
+    pub name: String,
+    pub flags: u32,
+    /// The main model's bone it rides.
+    pub bone: usize,
+    /// Bone space to attachment space, row-major 3x4.
+    pub local: [[f32; 4]; 3],
 }
 
 /// A model's skeleton and every sequence it can play.
@@ -106,6 +133,10 @@ pub struct Animation {
     /// What the reader met and could not reproduce, for diagnostics: include
     /// models, local hierarchy, IK rules and the like.
     pub unsupported: Vec<String>,
+    /// The `$includemodel`s merged in, depth first in their order.
+    pub groups: Vec<Group>,
+    /// The attachments of the model and its includes, deduplicated by name.
+    pub attachments: Vec<Attachment>,
 }
 
 impl Animation {
@@ -177,13 +208,46 @@ impl Animation {
 
     /// Where a sequence leaves the prop once it has played: a sequence that
     /// stops holds its last frame, one that loops is where it starts.
-    pub fn settled(&self, sequence: usize) -> &[BonePose] {
-        let s = &self.sequences[sequence];
-        if s.flags & STUDIO_LOOPING != 0 {
-            &s.frames[0]
+    pub fn settled(&self, sequence: usize) -> std::borrow::Cow<'_, [BonePose]> {
+        let frames = self.frame_count(sequence);
+        if self.sequences[sequence].flags & STUDIO_LOOPING != 0 {
+            self.frame(sequence, 0)
         } else {
-            s.frames.last().expect("a sequence has a frame")
+            self.frame(sequence, frames - 1)
         }
+    }
+
+    /// How many frames a sequence has; at least one.
+    pub fn frame_count(&self, sequence: usize) -> usize {
+        let s = &self.sequences[sequence];
+        match s.origin {
+            None => s.frames.len(),
+            Some((group, local)) => self.groups[group].animation.sequences[local].frames.len(),
+        }
+    }
+
+    /// One frame of a sequence in the main model's bones. A sequence of an
+    /// include moves the bones it shares by name and weights
+    /// (`CalcVirtualAnimation`, bone_setup.cpp:926-978); every other bone
+    /// stays as `InitPose` set it, the main model's own rest transform.
+    pub fn frame(&self, sequence: usize, frame: usize) -> std::borrow::Cow<'_, [BonePose]> {
+        let s = &self.sequences[sequence];
+        let Some((group, local)) = s.origin else {
+            return std::borrow::Cow::Borrowed(&s.frames[frame]);
+        };
+        let group = &self.groups[group];
+        let own = &group.animation.sequences[local];
+        let pose = &own.frames[frame];
+        std::borrow::Cow::Owned(
+            self.bones
+                .iter()
+                .zip(&group.bone_map)
+                .map(|(bone, map)| match map {
+                    Some(j) if own.bone_weights[*j] > 0.0 => pose[*j],
+                    _ => (bone.pos, bone.quat),
+                })
+                .collect(),
+        )
     }
 
     /// Each bone's skinning transform for a pose: bone to model, after the
@@ -340,16 +404,272 @@ fn count(value: i32, max: usize) -> Option<usize> {
 /// Reads the animation of the model at `path`, its `.ani` file included,
 /// from the search path. `None` when it has no bones or cannot be read.
 pub fn read(vfs: &Vfs, path: &str) -> Option<Animation> {
-    let key = path.to_ascii_lowercase().replace('\\', "/");
+    let key = model_key(path);
     let mdl = vfs.open(&key)?;
-    let header = Bytes(&mdl);
-    let ani_name = header.string(0, header.i32(348)?).unwrap_or_default();
-    let ani = if header.i32(352)? > 1 && !ani_name.is_empty() {
-        vfs.open(&ani_name.to_ascii_lowercase().replace('\\', "/"))
+    let mut main = parse(&mdl, ani_of(vfs, &mdl).as_deref())?;
+    let includes = include_names(&mdl);
+    if !includes.is_empty() {
+        main.unsupported.retain(|u| !u.ends_with(" include models"));
+        let mut visited = std::collections::HashSet::from([key]);
+        let mut sequence_names: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for (i, s) in main.sequences.iter().enumerate() {
+            sequence_names.entry(s.label.to_ascii_lowercase()).or_insert(i);
+        }
+        let mut nodes = node_names(&mdl);
+        main.attachments = attachments(&mdl, &main.bones, None);
+        // Group 0's sequences use the main model's nodes as they are.
+        append_includes(vfs, &includes, &mut main, &mut visited, &mut sequence_names, &mut nodes, 0);
+        if !nodes.is_empty() {
+            // `CStudioHdr::GetTransition` of a virtual model goes straight to
+            // the goal node (studio.cpp:1212-1224).
+            main.nodes = nodes.len();
+            main.transitions = (0..nodes.len() * nodes.len())
+                .map(|i| (i % nodes.len() + 1) as u8)
+                .collect();
+        }
+    } else {
+        main.attachments = attachments(&mdl, &main.bones, None);
+    }
+    Some(main)
+}
+
+fn model_key(path: &str) -> String {
+    path.to_ascii_lowercase().replace('\\', "/")
+}
+
+/// The `.ani` file a model keeps its animation blocks in, when it has one.
+fn ani_of(vfs: &Vfs, mdl: &[u8]) -> Option<Vec<u8>> {
+    let header = Bytes(mdl);
+    let name = header.string(0, header.i32(348)?).unwrap_or_default();
+    if header.i32(352)? > 1 && !name.is_empty() {
+        vfs.open(&model_key(&name))
     } else {
         None
+    }
+}
+
+/// `pModelGroup(j)->pszName()` for every `$includemodel`, in order
+/// (`mstudiomodelgroup_t`, studio.h:479-486: `szlabelindex`, `sznameindex`).
+fn include_names(mdl: &[u8]) -> Vec<String> {
+    let file = Bytes(mdl);
+    let (Some(n), Some(at)) = (file.i32(336), file.i32(340)) else {
+        return Vec::new();
     };
-    parse(&mdl, ani.as_deref())
+    let (Some(n), Ok(at)) = (count(n, 64), usize::try_from(at)) else {
+        return Vec::new();
+    };
+    (0..n)
+        .filter_map(|j| {
+            let record = at + j * 8;
+            file.string(record, file.i32(record + 4)?)
+        })
+        .filter(|name| !name.is_empty())
+        .collect()
+}
+
+/// The names of a model's transition nodes, `localnodenameindex`.
+fn node_names(mdl: &[u8]) -> Vec<String> {
+    let file = Bytes(mdl);
+    let (Some(n), Some(at)) = (file.i32(248), file.i32(256)) else {
+        return Vec::new();
+    };
+    let (Some(n), Ok(at)) = (count(n, 256), usize::try_from(at)) else {
+        return Vec::new();
+    };
+    (0..n)
+        .map(|j| {
+            file.i32(at + j * 4)
+                .and_then(|name| file.string(0, name))
+                .unwrap_or_default()
+        })
+        .collect()
+}
+
+const ATTACHMENT_SIZE: usize = 92;
+
+/// A model's own attachments whose bone the main model has, `bone_map`
+/// taking the model's bones to the main model's (`None` for the main model).
+fn attachments(mdl: &[u8], main_bones: &[Bone], bone_map: Option<&[Option<usize>]>) -> Vec<Attachment> {
+    let file = Bytes(mdl);
+    let (Some(n), Some(at)) = (file.i32(240), file.i32(244)) else {
+        return Vec::new();
+    };
+    let (Some(n), Ok(at)) = (count(n, 256), usize::try_from(at)) else {
+        return Vec::new();
+    };
+    let mut out = Vec::with_capacity(n);
+    for j in 0..n {
+        let record = at + j * ATTACHMENT_SIZE;
+        let Some(local_bone) = file.i32(record + 8).and_then(|b| usize::try_from(b).ok()) else {
+            continue;
+        };
+        let bone = match bone_map {
+            None => Some(local_bone).filter(|&b| b < main_bones.len()),
+            // `masterBone`: the include's bone by name in the main model.
+            Some(map) => map.iter().position(|m| *m == Some(local_bone)),
+        };
+        let Some(bone) = bone else { continue };
+        let mut local = [[0.0f32; 4]; 3];
+        let mut ok = true;
+        for (r, row) in local.iter_mut().enumerate() {
+            for (c, v) in row.iter_mut().enumerate() {
+                match file.f32(record + 12 + (r * 4 + c) * 4) {
+                    Some(x) if x.is_finite() => *v = x,
+                    _ => ok = false,
+                }
+            }
+        }
+        let (Some(name), Some(flags)) = (file.string(record, file.i32(record).unwrap_or(0)), file.u32(record + 4)) else {
+            continue;
+        };
+        if ok && !name.is_empty() {
+            out.push(Attachment { name, flags, bone, local });
+        }
+    }
+    out
+}
+
+/// Included models already parsed, shared between every model including
+/// them (all of HL2's citizens include the same four): by path and content.
+type IncludeCache = std::sync::Mutex<std::collections::HashMap<(String, u64), Option<std::sync::Arc<Animation>>>>;
+
+fn include_cache() -> &'static IncludeCache {
+    static CACHE: std::sync::OnceLock<IncludeCache> = std::sync::OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+
+fn parse_include(vfs: &Vfs, key: &str) -> Option<(std::sync::Arc<Animation>, Vec<u8>)> {
+    use std::hash::{Hash, Hasher};
+    let mdl = vfs.open(key)?;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    mdl.hash(&mut hasher);
+    let id = (key.to_string(), hasher.finish());
+    if let Some(found) = include_cache().lock().ok()?.get(&id) {
+        return found.clone().map(|a| (a, mdl));
+    }
+    let parsed = parse(&mdl, ani_of(vfs, &mdl).as_deref()).map(std::sync::Arc::new);
+    if let Ok(mut cache) = include_cache().lock() {
+        cache.insert(id, parsed.clone());
+    }
+    parsed.map(|a| (a, mdl))
+}
+
+/// `virtualmodel_t::AppendModels` (studio_virtualmodel.cpp:81-140) for the
+/// includes of one header: each appended, then its own includes, depth
+/// first. A model that cannot be found is skipped, as `FindModel` failing.
+#[allow(clippy::too_many_arguments)]
+fn append_includes(
+    vfs: &Vfs,
+    includes: &[String],
+    main: &mut Animation,
+    visited: &mut std::collections::HashSet<String>,
+    sequence_names: &mut std::collections::HashMap<String, usize>,
+    nodes: &mut Vec<String>,
+    depth: usize,
+) {
+    if depth > 8 {
+        return;
+    }
+    for name in includes {
+        let key = model_key(name);
+        if !visited.insert(key.clone()) {
+            continue;
+        }
+        let Some((include, mdl)) = parse_include(vfs, &key) else {
+            main.unsupported.push(format!("include model {key} missing"));
+            continue;
+        };
+        let group = main.groups.len();
+        let bone_map: Vec<Option<usize>> = main
+            .bones
+            .iter()
+            .map(|bone| {
+                include
+                    .bones
+                    .iter()
+                    .position(|b| b.name.eq_ignore_ascii_case(&bone.name))
+            })
+            .collect();
+        // AppendNodes: by name, ignoring case; a sequence's nodes are 1-based.
+        let own_nodes = node_names(&mdl);
+        let node_map: Vec<i32> = own_nodes
+            .iter()
+            .map(|n| {
+                let found = nodes.iter().position(|m| m.eq_ignore_ascii_case(n));
+                (found.unwrap_or_else(|| {
+                    nodes.push(n.clone());
+                    nodes.len() - 1
+                }) + 1) as i32
+            })
+            .collect();
+        let master_node = |local: i32| -> i32 {
+            if local <= 0 {
+                local
+            } else {
+                node_map.get(local as usize - 1).copied().unwrap_or(0)
+            }
+        };
+        // AppendSequences (:142-218): a label seen in an earlier header is
+        // kept, unless that one is only declared (`STUDIO_OVERRIDE`).
+        let before = main.sequences.len();
+        for (local, s) in include.sequences.iter().enumerate() {
+            let merged = Sequence {
+                label: s.label.clone(),
+                activity: s.activity.clone(),
+                activity_weight: s.activity_weight,
+                flags: s.flags,
+                fade_in: s.fade_in,
+                fade_out: s.fade_out,
+                entry_node: master_node(s.entry_node),
+                exit_node: master_node(s.exit_node),
+                node_flags: s.node_flags,
+                cycles_per_second: s.cycles_per_second,
+                bone_weights: bone_map
+                    .iter()
+                    .map(|m| m.map_or(0.0, |j| s.bone_weights[j]))
+                    .collect(),
+                frames: Vec::new(),
+                origin: Some((group, local)),
+            };
+            match sequence_names.get(&s.label.to_ascii_lowercase()).copied() {
+                Some(k) if k < before => {
+                    if main.sequences[k].flags & STUDIO_OVERRIDE != 0 {
+                        main.sequences[k] = merged;
+                    }
+                }
+                _ => {
+                    sequence_names
+                        .entry(s.label.to_ascii_lowercase())
+                        .or_insert(main.sequences.len());
+                    main.sequences.push(merged);
+                }
+            }
+        }
+        // AppendAttachments (:365-435): by name, ignoring case, skipped when
+        // the bone is not in the main model.
+        for attachment in attachments(&mdl, &main.bones, Some(&bone_map)) {
+            if !main
+                .attachments
+                .iter()
+                .any(|a| a.name.eq_ignore_ascii_case(&attachment.name))
+            {
+                main.attachments.push(attachment);
+            }
+        }
+        main.unsupported.extend(
+            include
+                .unsupported
+                .iter()
+                .filter(|u| !u.ends_with(" include models"))
+                .map(|u| format!("{key}: {u}")),
+        );
+        main.groups.push(Group {
+            animation: include,
+            bone_map,
+        });
+        let nested = include_names(&mdl);
+        append_includes(vfs, &nested, main, visited, sequence_names, nodes, depth + 1);
+    }
 }
 
 /// [`read`] over the bytes of the `.mdl` and, when it has one, its `.ani`.
@@ -441,6 +761,8 @@ pub fn parse(mdl: &[u8], ani: Option<&[u8]>) -> Option<Animation> {
         nodes,
         transitions,
         unsupported,
+        groups: Vec::new(),
+        attachments: Vec::new(),
     })
 }
 
@@ -713,6 +1035,7 @@ fn read_sequence(
         cycles_per_second,
         bone_weights,
         frames,
+        origin: None,
     })
 }
 
@@ -1090,7 +1413,106 @@ pub fn physics_solids(vfs: &Vfs, path: &str) -> usize {
         .unwrap_or(0)
 }
 
-/// Every bone's transform from bone space to model space for one pose, as
+/// The inverse of an affine 3x4 transform; `None` when it is singular.
+pub fn invert(m: &[[f64; 4]; 3]) -> Option<[[f64; 4]; 3]> {
+    let a = |r: usize, c: usize| m[r][c];
+    let det = a(0, 0) * (a(1, 1) * a(2, 2) - a(1, 2) * a(2, 1))
+        - a(0, 1) * (a(1, 0) * a(2, 2) - a(1, 2) * a(2, 0))
+        + a(0, 2) * (a(1, 0) * a(2, 1) - a(1, 1) * a(2, 0));
+    if det.abs() < 1e-12 || !det.is_finite() {
+        return None;
+    }
+    let mut out = [[0.0; 4]; 3];
+    for r in 0..3 {
+        for c in 0..3 {
+            // The adjugate's (r, c) is the cofactor of (c, r).
+            let (r1, r2) = ((c + 1) % 3, (c + 2) % 3);
+            let (c1, c2) = ((r + 1) % 3, (r + 2) % 3);
+            out[r][c] = (a(r1, c1) * a(r2, c2) - a(r1, c2) * a(r2, c1)) / det;
+        }
+    }
+    for r in 0..3 {
+        out[r][3] = -(0..3).map(|k| out[r][k] * m[k][3]).sum::<f64>();
+    }
+    Some(out)
+}
+
+/// `owner` holding `weapon` as `CBaseCombatWeapon::Equip` has it held:
+/// followed with `EF_BONEMERGE` (basecombatweapon_shared.cpp:987,
+/// baseentity_shared.cpp:2360-2373), the weapon's bones taking the owner's
+/// bones of the same name. The weapon, posed at its first frame, is carried
+/// by the first of its bones the owner has, in that bone's place in the
+/// owner's reference pose, and bound to it alone: the owner's skinning then
+/// moves it with the hand. `None` when no bone matches or the weapon has
+/// none.
+pub fn with_weapon(
+    owner: &crate::source::mdl::Model,
+    owner_animation: &Animation,
+    weapon: &crate::source::mdl::Model,
+    weapon_animation: &Animation,
+) -> Option<crate::source::mdl::Model> {
+    use crate::geom::Vec3;
+    let (weapon_bone, owner_bone) = weapon_animation.bones.iter().enumerate().find_map(|(i, b)| {
+        owner_animation
+            .bones
+            .iter()
+            .position(|o| o.name.eq_ignore_ascii_case(&b.name))
+            .map(|o| (i, o))
+    })?;
+    let owner_bone_u8 = u8::try_from(owner_bone).ok()?;
+    let frame = weapon_animation.frame(0, 0);
+    let posed = pose_model(weapon, weapon_animation, &frame);
+    let carrier = bone_to_model(&weapon_animation.bones, &frame)[weapon_bone];
+    let held = invert(&carrier)?;
+    let rest = invert(&widen(&owner_animation.bones[owner_bone].pose_to_bone))?;
+    let r = owner.root;
+    let turned = [
+        [r[0][0], r[0][1], r[0][2], 0.0],
+        [r[1][0], r[1][1], r[1][2], 0.0],
+        [r[2][0], r[2][1], r[2][2], 0.0],
+    ];
+    let m = multiply(&turned, &multiply(&rest, &held));
+    let point = |v: Vec3| {
+        Vec3::new(
+            m[0][0] * v.x + m[0][1] * v.y + m[0][2] * v.z + m[0][3],
+            m[1][0] * v.x + m[1][1] * v.y + m[1][2] * v.z + m[1][3],
+            m[2][0] * v.x + m[2][1] * v.y + m[2][2] * v.z + m[2][3],
+        )
+    };
+    let direction = |v: Vec3| {
+        let n = Vec3::new(
+            m[0][0] * v.x + m[0][1] * v.y + m[0][2] * v.z,
+            m[1][0] * v.x + m[1][1] * v.y + m[1][2] * v.z,
+            m[2][0] * v.x + m[2][1] * v.y + m[2][2] * v.z,
+        );
+        if n.length() > 1e-12 {
+            n.normalized()
+        } else {
+            n
+        }
+    };
+    let mut out = owner.clone();
+    let bound: crate::source::mdl::Weights = [(owner_bone_u8, 1.0), (0, 0.0), (0, 0.0)];
+    let mut added = Vec::new();
+    for part in &posed.parts {
+        let mut part = part.clone();
+        for tri in &mut part.triangles {
+            *tri = tri.map(point);
+        }
+        for normals in &mut part.normals {
+            *normals = normals.map(direction);
+        }
+        part.weights = vec![[bound; 3]; part.triangles.len()];
+        part.hardware = vec![[u32::MAX; 3]; part.triangles.len()];
+        added.push(part.material.clone());
+        out.parts.push(part);
+    }
+    for family in &mut out.skins {
+        family.extend(added.iter().cloned());
+    }
+    Some(out)
+}
+
 /// `BuildBoneChain` composes them, row-major 3x4.
 pub fn bone_to_model(bones: &[Bone], pose: &[BonePose]) -> Vec<[[f64; 4]; 3]> {
     let mut out: Vec<[[f64; 4]; 3]> = Vec::with_capacity(bones.len());
@@ -1148,6 +1570,81 @@ pub fn widen(m: &[[f32; 4]; 3]) -> [[f64; 4]; 3] {
 
 #[cfg(test)]
 mod tests {
+    fn hl2() -> Option<Vfs> {
+        let path = "/mnt/games/SteamLibrary/steamapps/common/Half-Life 2/hl2/maps/d1_trainstation_01.bsp";
+        if !std::path::Path::new(path).exists() {
+            return None;
+        }
+        let map = crate::bsp::Map::load(std::path::Path::new(path)).ok()?;
+        Some(Vfs::for_map(&map.path, &[] as &[std::path::PathBuf]))
+    }
+
+    /// A police officer's stunstick, merged onto his right hand, stays in
+    /// that hand as he idles.
+    #[test]
+    fn a_held_weapon_follows_the_hand_it_is_merged_onto() {
+        let Some(vfs) = hl2() else { return };
+        let mut models = crate::source::mdl::Models::new(&vfs);
+        let police = models.get("models/police.mdl").unwrap();
+        let animation = read(&vfs, "models/police.mdl").unwrap();
+        let baton = models.get("models/weapons/w_stunbaton.mdl").unwrap();
+        let baton_animation = read(&vfs, "models/weapons/w_stunbaton.mdl").unwrap();
+        let held = with_weapon(&police, &animation, &baton, &baton_animation).unwrap();
+        assert_eq!(held.parts.len(), police.parts.len() + baton.parts.len());
+        assert!(held.skins.iter().all(|family| family.len() == held.parts.len()));
+        let hand = animation
+            .bones
+            .iter()
+            .position(|b| b.name.eq_ignore_ascii_case("ValveBiped.Bip01_R_Hand"))
+            .unwrap();
+        let idle = animation.activity("ACT_IDLE")[0];
+        let pose = animation.frame(idle, animation.frame_count(idle) / 2);
+        let at = bone_to_model(&animation.bones, &pose)[hand];
+        let posed = pose_model(&held, &animation, &pose);
+        let mut nearest = f64::INFINITY;
+        for part in &posed.parts[police.parts.len()..] {
+            for tri in &part.triangles {
+                for corner in tri {
+                    let d = ((corner.x - at[0][3]).powi(2) + (corner.y - at[1][3]).powi(2) + (corner.z - at[2][3]).powi(2)).sqrt();
+                    nearest = nearest.min(d);
+                }
+            }
+        }
+        assert!(nearest < 8.0, "the baton is {nearest} units from the hand");
+    }
+
+    /// HL2's citizens and police keep their animations in `$includemodel`s:
+    /// merged, they idle in their own bones and carry their hand attachment.
+    #[test]
+    fn include_models_merge_as_the_virtual_model_does() {
+        let Some(vfs) = hl2() else { return };
+        for path in ["models/humans/group01/male_01.mdl", "models/police.mdl", "models/gman_high.mdl"] {
+            let animation = read(&vfs, path).unwrap();
+            assert!(!animation.groups.is_empty(), "{path} has includes");
+            let idle = animation.activity("ACT_IDLE");
+            assert!(!idle.is_empty(), "{path} idles");
+            // Labels are unique across the merged model.
+            let mut labels: Vec<String> = animation.sequences.iter().map(|s| s.label.to_ascii_lowercase()).collect();
+            let all = labels.len();
+            labels.sort();
+            labels.dedup();
+            assert!(labels.len() + 8 > all, "{path}: {} of {all} labels unique", labels.len());
+            for &s in &idle {
+                let frames = animation.frame_count(s);
+                assert!(frames >= 1);
+                let pose = animation.frame(s, frames - 1);
+                assert_eq!(pose.len(), animation.bones.len());
+                assert!(pose.iter().all(|(p, q)| p.iter().chain(q).all(|v| v.is_finite())));
+            }
+            assert!(
+                animation.attachments.iter().any(|a| a.name.eq_ignore_ascii_case("anim_attachment_RH")),
+                "{path}: {:?}",
+                animation.attachments.iter().map(|a| &a.name).collect::<Vec<_>>()
+            );
+            assert!(animation.attachments.iter().all(|a| a.bone < animation.bones.len()));
+        }
+    }
+
     use super::*;
 
     #[test]

@@ -180,7 +180,7 @@ unique. Campaign and map IDs consist only of lowercase ASCII letters, digits,
 `_` and `-` so they are portable path and Minecraft resource-path components.
 Display/source names are separate and may contain other UTF-8 characters.
 
-Each `maps/<map-id>.json` has `format` `src2mc-map`, `version` 2, and these
+Each `maps/<map-id>.json` has `format` `src2mc-map`, `version` 3, and these
 fields in order:
 
 | Field | Meaning |
@@ -267,6 +267,32 @@ into the map's cubemap file (section 25); `tint`, three finite numbers
 `WorldVertexTransition` materials have one. The material read is the
 compiler's patch when the BSP names one, so `env_cubemap` names the cubemap
 vbsp assigned the face; left unpatched it is the map's `cubemapdefault`.
+
+A world material whose `$basetexture` is `_rt_Camera` (any case), drawn by
+`UnlitGeneric`, `UnlitTwoTexture` or `MonitorScreen`, has `camera`: its faces
+show the picture of the `point_camera`s, which all draw into that one render
+target (viewrender.cpp:3240-3316); it has no `texture`. Fields, in order:
+`shader` (`unlit_generic`, `unlit_two_texture` or `monitor_screen`); `size`,
+two positive integers, the BSP's texture-data width and height: a face's
+texture coordinates, which the surface table gives in texels, divided by them
+are the coordinates into the camera picture, which repeats; `additive`,
+present only as `true` (`$additive`); `color` and `color2`, three numbers each,
+`$color` and `$color2` (`srgb?$color2` too, as on an sRGB-blending DX9
+system), white by default; `sines`, present only when not empty, the `Sine`
+proxies on `$color`, at most one per channel (the last a material runs), sorted
+by channel: `channel` (0 to 2), `period` (never 0: Source reads a 0 period as
+1), `min`, `max` and `offset`, the channel at time `t` seconds being
+`(max - min) * (sin(2 pi (t - offset) / period) / 2 + 1/2) + min`;
+`texture2`, the content ID of `$texture2` as `details/<id>.png` (it repeats
+and scrolls on its own; absent for `unlit_generic` or a missing texture,
+drawn as white); `transform`, the `$texture2transform` its proxies set
+(`TextureScroll`, or `TextureTransform` with only a translation, each
+component fixed or a `LinearRamp`): `scale` and two-number `offset` and
+`velocity`, `$texture2`'s coordinates being `uv * scale + offset + velocity * t`;
+absent is the identity, and other transforms are not carried; and for
+`monitor_screen` only, `contrast`, `saturation` and `tint` (three numbers)
+(`$contrast` 0, `$saturation` 1, `$tint` white by default). A version 2 map,
+which could not carry this, is rejected.
 
 Lightmapped materials may further have: `blend`, present only as `true`, for
 a `WorldVertexTransition` material with `$basetexture2`, which its texture's
@@ -949,6 +975,13 @@ of the map sends `Skin`, `Color`, `Enable`, `Disable`, `TurnOn`, `TurnOff`,
 non-zero `StartDisabled`, or such a dynamic prop that animates: some output
 sends it `SetAnimation`, `SetDefaultAnimation`, `SetPlaybackRate` or
 `SetCycle`, or it has a `DefaultAnim` or a non-zero `RandomAnimation`, or that
+is an actor -- `generic_actor`, `cycler_actor`, `monster_generic`, or an `npc_`
+class with a model, which is animated and wears the model its class chooses
+(each class's `Spawn` and `SelectModel`; the map's `model` key only where the
+class reads it), holding the world model of its `additionalequipment`
+bone-merged onto the first of the weapon's bones it has, in that bone's
+reference place and bound to it alone; an actor is not solid as its model --
+or that
 a `point_template` names in `Template01` to `Template16` (a trailing `*`
 matching every name it begins), which the mod copies at runtime; such a prop's
 collision is kept apart as for a killed one. Targets resolve as `CEventQueue::ServiceEvents`
@@ -1032,7 +1065,7 @@ block space of the reference's runtime mesh (section 7): Source `(x, y, z)` is
 `(x, z, -y)`, 32 units to the block, so a rotation keeps its angle and its axis
 is mapped the same way. All values are little-endian; floats are finite.
 
-The header is the 8-byte magic `S2ANIM\0\0`, `u32` version 1, and `u32` bone,
+The header is the 8-byte magic `S2ANIM\0\0`, `u32` version 2, and `u32` bone,
 vertex, sequence and transition-node counts. The vertex count equals the
 mesh's. Then:
 
@@ -1051,11 +1084,25 @@ mesh's. Then:
   flags (`0x1` looping, `0x2` snap, `0x100` real time); `f32` fade-in and
   fade-out seconds; `i32` entry node, exit node and node flags; `f32` cycles
   per second at playback rate 1 (`Studio_CPS` with every pose parameter at its
-  spawn value); a `f32` weight per bone; `u32` frame count. A sequence the map
-  cannot reach has 0 frames and nothing more; it keeps its name and timing so
-  a lookup finds what Source would. Otherwise, per bone: a `u8` position track
-  and a `u8` rotation track, each 0 (one value) or 1 (one per frame), then
-  the positions, three `f32` each, then the rotations, four `i16` each.
+  spawn value); `u32` frame count. A sequence the map cannot reach has 0
+  frames and nothing more; it keeps its name and timing so a lookup finds
+  what Source would. Otherwise a `f32` weight per bone, then per bone: a `u8`
+  position track and a `u8` rotation track, each 0 (one value) or 1 (one per
+  frame), then the positions, three `f32` each, then the rotations, four
+  `i16` each.
+- **Attachments**: `u32` count, at most 256, then each: the name (`u16` byte
+  length and UTF-8), `u32` Source attachment flags, `u32` bone, and twelve
+  `f32` row-major 3x4, the attachment's transform in the bone's space.
+
+A model with `$includemodel`s is its virtual model (`virtualmodel_t`,
+`studio_virtualmodel.cpp`): the main model's bones and mesh; the sequences of
+the model and then of each include, depth first in `$includemodel` order, a
+label already seen (ignoring ASCII case) skipped unless the one seen is
+`STUDIO_OVERRIDE`; an include's sequence moves the main bones of the same
+name (ignoring case) that it weights, every other bone keeping the main
+model's rest transform; transition nodes merged by name, the table then
+going straight to the goal (`CStudioHdr::GetTransition`); attachments merged
+by name, dropped when their bone is not in the main model.
 
 A sequence's frames are the bones' local transforms as `CalcAnimation` decodes
 the model (`.ani` animation blocks and sections included). Between two frames

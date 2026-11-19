@@ -78,7 +78,8 @@ final class LogicEntities {
             case "env_credits" -> new ScreenEffects.Credits(map, index, entity);
             case "env_message" -> new ScreenEffects.Message(map, index, entity);
             case "env_hudhint" -> new ScreenEffects.HudHint(map, index, entity);
-            default -> new LogicEntity(map, index, entity);
+            case "generic_actor", "cycler_actor", "monster_generic" -> new Npc(map, index, entity);
+            default -> entity.classname().startsWith("npc_") ? new Npc(map, index, entity) : new LogicEntity(map, index, entity);
         };
     }
 

@@ -41,7 +41,7 @@ import org.joml.Matrix4f;
  * <p>A prop is built in the skin and tint its {@link PropStates} state names and built again when
  * that changes; a hidden one is not drawn. Each vertex is lit where it stands, sampled as the
  * aggregates sample theirs, and lit again when the light at the prop's middle changes.
- * {@code /src2mc_logic_props} shows counts and switches drawing off for comparison.
+ * {@code /src2mcc draw logicprops} shows counts and switches drawing off for comparison.
  */
 @EventBusSubscriber(modid = Src2mc.MOD_ID, value = Dist.CLIENT)
 public final class LogicPropRenderer {
@@ -89,18 +89,12 @@ public final class LogicPropRenderer {
             + " hidden; " + builds + " builds, " + relights + " relights" + (enabled ? "" : " (drawing off)");
     }
 
-    @SubscribeEvent
-    public static void registerCommand(net.neoforged.neoforge.client.event.RegisterClientCommandsEvent event) {
-        event.getDispatcher().register(net.minecraft.commands.Commands.literal("src2mc_logic_props")
-            .then(net.minecraft.commands.Commands.literal("status").executes(context -> reply(context.getSource(), status())))
-            .then(net.minecraft.commands.Commands.literal("draw")
-                .then(net.minecraft.commands.Commands.literal("on").executes(context -> { enabled = true; return reply(context.getSource(), status()); }))
-                .then(net.minecraft.commands.Commands.literal("off").executes(context -> { enabled = false; return reply(context.getSource(), status()); }))));
-    }
+    public static void setEnabled(boolean value) { enabled = value; }
 
-    private static int reply(net.minecraft.commands.CommandSourceStack source, String text) {
-        source.sendSuccess(() -> net.minecraft.network.chat.Component.literal(text), false);
-        return 1;
+    /** One line for {@code /src2mcc status}. */
+    public static String summaryLine() {
+        return "logic props " + (enabled ? "on" : "off") + ": " + BUILT.size() + " built, " + drawnLast + " buffers drawn, " + hiddenLast
+            + " hidden; " + builds + " builds, " + relights + " relights";
     }
 
     @SubscribeEvent
@@ -310,6 +304,7 @@ public final class LogicPropRenderer {
         }
         VertexBuffer.unbind();
         if (!shadowPass && !translucent) drawnLast = drawn;
+        if (dev.theredja.src2mc.client.view.SecondaryView.active() && !translucent) dev.theredja.src2mc.client.view.SecondaryView.Counts.logicProps += (int) drawn;
     }
 
     public static void clear() {

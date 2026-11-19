@@ -1,7 +1,5 @@
 package dev.theredja.src2mc.client.audio;
 
-import static net.minecraft.commands.Commands.literal;
-
 import dev.theredja.src2mc.Src2mc;
 import dev.theredja.src2mc.bundle.AudioTable;
 import dev.theredja.src2mc.bundle.BundleGeneration;
@@ -21,7 +19,6 @@ import net.neoforged.api.distmarker.Dist;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.common.EventBusSubscriber;
 import net.neoforged.neoforge.client.event.ClientTickEvent;
-import net.neoforged.neoforge.client.event.RegisterClientCommandsEvent;
 import net.neoforged.neoforge.client.event.sound.PlaySoundEvent;
 
 /**
@@ -29,7 +26,7 @@ import net.neoforged.neoforge.client.event.sound.PlaySoundEvent;
  * footsteps and impacts, all played through Minecraft's sound engine so its volume sliders, and
  * any mod that processes its sounds -- reverb, occlusion -- apply as to any other sound.
  *
- * <p>{@code /src2mc_audio} reports what plays; {@code soundscapes}, {@code ambient} and
+ * <p>{@code /src2mcc status audio} reports what plays; {@code soundscapes}, {@code ambient} and
  * {@code surfaces} switch each part on and off for comparison, and {@code steps <gain>} sets how
  * much louder than Source's own levels footsteps, jumps and landings play.
  */
@@ -224,39 +221,28 @@ public final class SourceAudio {
         placementEpoch = -1;
     }
 
-    @SubscribeEvent
-    static void registerCommand(RegisterClientCommandsEvent event) {
-        event.getDispatcher().register(literal("src2mc_audio")
-            .executes(context -> status(context.getSource()))
-            .then(literal("soundscapes")
-                .then(literal("on").executes(context -> { soundscapes = true; return status(context.getSource()); }))
-                .then(literal("off").executes(context -> { soundscapes = false; SOUNDSCAPES.stop(); return status(context.getSource()); })))
-            .then(literal("ambient")
-                .then(literal("on").executes(context -> { ambient = true; return status(context.getSource()); }))
-                .then(literal("off").executes(context -> { ambient = false; AMBIENTS.stop(); return status(context.getSource()); })))
-            .then(literal("surfaces")
-                .then(literal("on").executes(context -> { surfaces = true; return status(context.getSource()); }))
-                .then(literal("off").executes(context -> { surfaces = false; return status(context.getSource()); })))
-            .then(literal("captions")
-                .then(literal("on").executes(context -> { dev.theredja.src2mc.client.logic.CaptionOverlay.setEnabled(true); return status(context.getSource()); }))
-                .then(literal("off").executes(context -> { dev.theredja.src2mc.client.logic.CaptionOverlay.setEnabled(false); return status(context.getSource()); })))
-            .then(literal("steps")
-                .then(net.minecraft.commands.Commands.argument("gain", com.mojang.brigadier.arguments.FloatArgumentType.floatArg(0, 5))
-                    .executes(context -> {
-                        SURFACES.setStepGain(com.mojang.brigadier.arguments.FloatArgumentType.getFloat(context, "gain"));
-                        return status(context.getSource());
-                    }))));
+    public static void setSoundscapes(boolean value) { soundscapes = value; if (!value) SOUNDSCAPES.stop(); }
+
+    public static void setAmbient(boolean value) { ambient = value; if (!value) AMBIENTS.stop(); }
+
+    public static void setSurfaces(boolean value) { surfaces = value; }
+
+    public static void setStepGain(float gain) { SURFACES.setStepGain(gain); }
+
+    /** One line for {@code /src2mcc status}. */
+    public static String summaryLine() {
+        return "audio" + (LIBRARY.available() ? "" : " UNAVAILABLE") + ": " + maps.size() + " map(s) with sound, " + emitters.size() + " soundscape entities, "
+            + ambients.size() + " ambient sounds; soundscapes " + (soundscapes ? "on" : "off") + ", ambient " + (ambient ? "on" : "off")
+            + ", surfaces " + (surfaces ? "on" : "off") + "; decoded " + LIBRARY.decodedCount() + ", failed " + LIBRARY.failedCount();
     }
 
-    private static int status(net.minecraft.commands.CommandSourceStack source) {
-        String text = "src2mc audio: " + (LIBRARY.available() ? "" : "UNAVAILABLE (see log); ")
+    public static String statusText() {
+        return "src2mc audio: " + (LIBRARY.available() ? "" : "UNAVAILABLE (see log); ")
             + maps.size() + " map(s) with sound, " + emitters.size() + " soundscape entities, " + ambients.size() + " ambient sounds\n"
             + "  soundscapes " + (soundscapes ? "on" : "off") + ": " + SOUNDSCAPES.status() + "\n"
             + "  ambient " + (ambient ? "on" : "off") + ": " + AMBIENTS.status() + "\n"
             + "  surfaces " + (surfaces ? "on" : "off") + ": " + SURFACES.status() + "\n"
             + "  logic: " + LOGIC.status() + ", captions " + (dev.theredja.src2mc.client.logic.CaptionOverlay.enabled() ? "on" : "off") + "\n"
             + "  decoded " + LIBRARY.decodedCount() + ", failed " + LIBRARY.failedCount();
-        source.sendSuccess(() -> Component.literal(text), false);
-        return 1;
     }
 }

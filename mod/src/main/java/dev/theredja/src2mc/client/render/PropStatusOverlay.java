@@ -28,8 +28,8 @@ public final class PropStatusOverlay {
         event.registerAbove(VanillaGuiLayers.DEBUG_OVERLAY, LAYER, PropStatusOverlay::render);
     }
 
-    static boolean toggle() {
-        enabled = !enabled;
+    public static boolean setEnabled(boolean value) {
+        enabled = value;
         lastRefreshTick = Long.MIN_VALUE;
         return enabled;
     }

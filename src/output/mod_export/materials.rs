@@ -148,6 +148,7 @@ pub(super) fn assign_materials(
             detail: None,
             selfillum: None,
             phong: None,
+            camera: None,
         };
         let face_indices = &faces_by_material[index];
         let Some(mut material_assets) = resolver.assets(&material.name, Some(&material.raw_name))
@@ -171,6 +172,21 @@ pub(super) fn assign_materials(
         };
         reference_template.surface_prop = material_assets.surface_prop;
         reference_template.double_sided = material_assets.no_cull;
+        // `_rt_Camera` has no file: the faces show the camera target, drawn
+        // as the material's shader draws it. Everything else stays as a
+        // texture-less material, as before.
+        if let Some(camera) = material_assets.camera.as_ref() {
+            let size = map
+                .bsp
+                .textures_data
+                .get(index)
+                .and_then(|data| Some([u32::try_from(data.width).ok()?, u32::try_from(data.height).ok()?]))
+                .filter(|size| size[0] > 0 && size[1] > 0);
+            if let Some(size) = size {
+                reference_template.camera =
+                    Some(camera_reference(camera, size, decoder, produce, &mut details));
+            }
+        }
         let Some(header) = decoder.header(&material_assets.base_texture) else {
             materials.push(reference_template);
             assign_material(
@@ -544,6 +560,7 @@ pub(super) fn standalone_material(
         detail: None,
         selfillum: None,
         phong: None,
+        camera: None,
     };
     let Some(mut material_assets) = resolver.assets(name, None) else {
         return reference;
@@ -636,6 +653,58 @@ pub(super) fn standalone_material(
         output_height: decision.output[1],
     });
     reference
+}
+
+/// A `_rt_Camera` material's reference: its shader's parameters, and its
+/// `$texture2` as a texture that repeats on its own (it scrolls over the
+/// face, so an atlas region, which does not wrap, cannot hold it).
+fn camera_reference(
+    camera: &crate::source::vmt::Camera,
+    size: [u32; 2],
+    decoder: &mut crate::source::vtf::Textures,
+    produce: &mut dyn FnMut(TextureRequest) -> Option<(Vec<u8>, image::RgbaImage)>,
+    details: &mut BTreeMap<String, Vec<u8>>,
+) -> metadata::CameraReference {
+    use crate::source::vmt::CameraShader;
+    let f = |v: f32| f64::from(v);
+    let monitor = camera.shader == CameraShader::MonitorScreen;
+    metadata::CameraReference {
+        shader: match camera.shader {
+            CameraShader::UnlitGeneric => metadata::CameraShader::UnlitGeneric,
+            CameraShader::UnlitTwoTexture => metadata::CameraShader::UnlitTwoTexture,
+            CameraShader::MonitorScreen => metadata::CameraShader::MonitorScreen,
+        },
+        size,
+        additive: camera.additive,
+        color: camera.color.map(f),
+        color2: camera.color2.map(f),
+        sines: camera
+            .sines
+            .iter()
+            .enumerate()
+            .filter_map(|(channel, sine)| {
+                sine.map(|sine| metadata::SineReference {
+                    channel: channel as u8,
+                    period: f(sine.period),
+                    min: f(sine.min),
+                    max: f(sine.max),
+                    offset: f(sine.offset),
+                })
+            })
+            .collect(),
+        texture2: camera
+            .texture2
+            .as_deref()
+            .and_then(|texture| repeating_texture(texture, decoder, produce, details)),
+        transform: camera.transform.map(|t| metadata::Texture2TransformReference {
+            scale: f(t.scale),
+            offset: t.offset.map(f),
+            velocity: t.velocity.map(f),
+        }),
+        contrast: monitor.then(|| f(camera.contrast)),
+        saturation: monitor.then(|| f(camera.saturation)),
+        tint: monitor.then(|| camera.tint.map(f)),
+    }
 }
 
 /// A texture that repeats on its own (a detail, a blend modulation or a phong

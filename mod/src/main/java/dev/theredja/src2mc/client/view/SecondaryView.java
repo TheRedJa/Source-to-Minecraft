@@ -36,6 +36,31 @@ public final class SecondaryView {
     private static RenderTarget target;
     private static Vec3 cameraPosition;
     private static List<Vec3> interestPoints = List.of();
+    /** The intro's camera and the monitors' camera, set apart by their own frame handlers. */
+    private static List<Vec3> introPoints = List.of(), monitorPoints = List.of();
+
+    /**
+     * What the last camera view drew and had to draw with, by renderer: for {@code /src2mcc status monitors}, to tell a view
+     * that has nothing resident (surfaceFlagged 0, regionsBuilt below regionsWanted) from one that is drawn but shows
+     * something else. Written by the renderers while {@link #active()}; render thread only.
+     */
+    public static final class Counts {
+        private Counts() {}
+        /** Surface meshes kept for the camera by the player's pass, and how many of them passed the camera's frustum. */
+        public static int surfaceFlagged, surfaceDrawn;
+        /** Surface regions within range of a camera, and how many of them hold built meshes, as of the player's last pass. */
+        public static int regionsWanted, regionsBuilt;
+        /** Static prop aggregates, logic props, animated props' buffers and mover buffers drawn (opaque pass). */
+        public static int aggregates, logicProps, animatedBuffers, moverBuffers;
+
+        static void reset() { surfaceFlagged = surfaceDrawn = aggregates = logicProps = animatedBuffers = moverBuffers = 0; }
+
+        public static String line() {
+            return "camera view drew " + surfaceDrawn + "/" + surfaceFlagged + " surface meshes (regions in range " + regionsBuilt + "/" + regionsWanted
+                + " built), " + aggregates + " prop aggregates, " + logicProps + " logic prop and " + animatedBuffers + " animated prop and "
+                + moverBuffers + " mover buffers";
+        }
+    }
 
     /** Whether a camera's view is being drawn now. */
     public static boolean active() { return active; }
@@ -49,7 +74,20 @@ public final class SecondaryView {
     /** World positions of the cameras drawn this frame besides the player's. */
     public static List<Vec3> interestPoints() { return interestPoints; }
 
-    static void setInterestPoints(List<Vec3> points) { interestPoints = List.copyOf(points); }
+    static void setInterestPoints(List<Vec3> points) { introPoints = List.copyOf(points); combinePoints(); }
+
+    /** The camera a monitor shows this frame ({@link MonitorCameras}), none when empty. */
+    static void setMonitorPoints(List<Vec3> points) { monitorPoints = List.copyOf(points); combinePoints(); }
+
+    private static void combinePoints() {
+        if (monitorPoints.isEmpty()) interestPoints = introPoints;
+        else if (introPoints.isEmpty()) interestPoints = monitorPoints;
+        else {
+            List<Vec3> both = new ArrayList<>(introPoints);
+            both.addAll(monitorPoints);
+            interestPoints = List.copyOf(both);
+        }
+    }
 
     /** Whether a camera drawn this frame is within {@code sections} sections of world column {@code x, z}. */
     public static boolean near(double x, double z, int sections) {
@@ -95,6 +133,7 @@ public final class SecondaryView {
         Frustum frustum = new Frustum(modelView, projection);
         Vec3 at = camera.getPosition();
         frustum.prepare(at.x, at.y, at.z);
+        Counts.reset();
         into.setClearColor(0, 0, 0, 1);
         into.clear(Minecraft.ON_OSX);
         into.bindWrite(true);

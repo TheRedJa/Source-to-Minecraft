@@ -123,7 +123,7 @@ final class LightSampler {
     }
 
     /**
-     * The same sample as {@link #smooth}, spelled out for {@code /src2mc_light_probe}: every
+     * The same sample as {@link #smooth}, spelled out for {@code /src2mcc debug lightprobe}: every
      * corner cell with its block, whether it renders solid, whether {@code visibility} sees it,
      * its engine sky and block light and the baked sky light, then the blended result.
      */

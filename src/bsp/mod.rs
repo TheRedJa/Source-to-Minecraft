@@ -8,6 +8,7 @@ pub mod entities;
 pub mod lighting;
 pub mod logic_props;
 pub mod lumps;
+pub mod npcs;
 pub mod props;
 pub mod pvs;
 pub mod rawleaves;

@@ -1,6 +1,5 @@
 package dev.theredja.src2mc.client.render;
 
-import static net.minecraft.commands.Commands.literal;
 
 import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.blaze3d.vertex.DefaultVertexFormat;
@@ -22,7 +21,6 @@ import net.minecraft.resources.ResourceLocation;
 import net.neoforged.api.distmarker.Dist;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.common.EventBusSubscriber;
-import net.neoforged.neoforge.client.event.RegisterClientCommandsEvent;
 import net.neoforged.neoforge.client.event.RegisterShadersEvent;
 import org.joml.Matrix3f;
 import org.lwjgl.opengl.GL11;
@@ -40,7 +38,6 @@ import org.lwjgl.system.MemoryUtil;
  * <p>One core shader draws it all; a shader pack does not draw it, as Iris draws no core shader
  * it does not know while it renders the world.
  */
-@EventBusSubscriber(modid = Src2mc.MOD_ID, value = Dist.CLIENT)
 public final class BakedLighting {
     private BakedLighting() {}
 
@@ -83,7 +80,7 @@ public final class BakedLighting {
         .build();
 
     private static ShaderInstance shader;
-    /** {@code /src2mc_look bump off}: every face takes its flat lightmap; meshes rebuild to show it. */
+    /** {@code /src2mcc look bump off}: every face takes its flat lightmap; meshes rebuild to show it. */
     public static volatile boolean bumpEnabled = true;
     /** The map's lightmap pages, one texture each map, stacked; keyed by identity. */
     private static final Map<LightTable, Integer> TEXTURES = new IdentityHashMap<>();
@@ -324,27 +321,16 @@ public final class BakedLighting {
         PropLights.clear();
     }
 
-    @SubscribeEvent
-    public static void registerCommands(RegisterClientCommandsEvent event) {
-        event.getDispatcher().register(literal("src2mc_light")
-            .then(literal("exposure").then(net.minecraft.commands.Commands.argument("scale",
-                    com.mojang.brigadier.arguments.FloatArgumentType.floatArg(0.01f, 64f))
-                .executes(context -> setExposure(context.getSource(),
-                    com.mojang.brigadier.arguments.FloatArgumentType.getFloat(context, "scale")))))
-            .then(literal("status").executes(context -> status(context.getSource()))));
-    }
-
-    private static int setExposure(CommandSourceStack source, float value) {
+    /** Holds one tone map scale for baked light and the 3D skybox; {@code /src2mcc light exposure}. */
+    public static int setExposure(CommandSourceStack source, float value) {
         setExposure(value);
-        source.sendSuccess(() -> Component.literal("src2mc baked light exposure held at " + value + " (/src2mc_look scale auto releases it)"), false);
+        source.sendSuccess(() -> Component.literal("src2mc exposure held at " + value + " (baked light and 3D skybox; /src2mcc look scale auto releases it)"), false);
         return 1;
     }
 
-    private static int status(CommandSourceStack source) {
-        String text = "src2mc baked light: " + (shader == null ? "shader not loaded" : "shader loaded") + ", exposure " + exposure()
+    public static String statusText() {
+        return "src2mc baked light: " + (shader == null ? "shader not loaded" : "shader loaded") + ", exposure " + exposure()
             + ", " + TEXTURES.size() + " lightmap texture(s)"
             + (IrisCompat.shaderPackInUse() ? "; a shader pack is in use, which does not draw it" : "");
-        source.sendSuccess(() -> Component.literal(text), false);
-        return 1;
     }
 }

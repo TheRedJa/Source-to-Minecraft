@@ -108,7 +108,7 @@ final class BundleSchemaValidator {
         if (map.has("screens")) expected.add("screens");
         expected.add("diagnostics");
         keys(map, expected.toArray(String[]::new));
-        format(map, "src2mc-map", path, 2);
+        format(map, "src2mc-map", path, 3);
         if (!mapId.equals(string(map, "map_id"))) fail(BundleErrorCode.INVALID_REFERENCE, "map ID differs from path: " + path);
         String sourceName = string(map, "source_name");
         if (sourceName.isEmpty()) fail(BundleErrorCode.INVALID_SCHEMA, "empty source_name: " + path);
@@ -541,6 +541,7 @@ final class BundleSchemaValidator {
             if (material.blendModulate() != null) ids.add(material.blendModulate());
             if (material.phong() != null && material.phong().warp() != null) warpIds.add(material.phong().warp());
             if (material.phong() != null && material.phong().lightWarp() != null) warpIds.add(material.phong().lightWarp());
+            if (material.camera() != null && material.camera().texture2() != null) ids.add(material.camera().texture2());
         }
         if (ids.isEmpty() && warpIds.isEmpty()) return null;
         java.util.TreeSet<String> all = new java.util.TreeSet<>(ids);
@@ -1061,7 +1062,7 @@ final class BundleSchemaValidator {
 
     private static BundleMaterial validateMaterial(JsonObject material, Map<String, int[]> textures) throws BundleValidationException {
         Set<String> allowed = Set.of("source_material", "source_material_raw", "render_class", "texture", "surface_prop", "reflectivity", "double_sided", "bump", "envmap",
-            "blend", "blend_modulate", "detail", "selfillum", "phong");
+            "blend", "blend_modulate", "detail", "selfillum", "phong", "camera");
         if (!allowed.containsAll(material.keySet()) || !material.has("source_material") || !material.has("render_class") || !material.has("reflectivity")) fail(BundleErrorCode.INVALID_SCHEMA, "invalid material fields");
         String source = string(material, "source_material");
         if (source.isEmpty()) fail(BundleErrorCode.INVALID_SCHEMA, "empty source material");
@@ -1119,6 +1120,11 @@ final class BundleSchemaValidator {
             for (int i = 0; i < 3; i++) selfillum[i] = (float) finiteNumber(tint.get(i), "selfillum tint");
         }
         BundleMaterial.Phong phong = material.has("phong") ? validatePhong(object(material.get("phong"), "phong"), material.has("texture")) : null;
+        BundleMaterial.Camera camera = null;
+        if (material.has("camera")) {
+            if (material.has("texture")) fail(BundleErrorCode.INVALID_SCHEMA, "a camera material has no texture");
+            camera = validateCamera(object(material.get("camera"), "camera"));
+        }
         JsonArray reflectivity = array(material, "reflectivity");
         if (reflectivity.size() != 3) fail(BundleErrorCode.INVALID_SCHEMA, "reflectivity must have three values");
         float[] averageColor = new float[3];
@@ -1142,7 +1148,81 @@ final class BundleSchemaValidator {
             case "translucent" -> BundleMaterial.RenderClass.TRANSLUCENT;
             default -> BundleMaterial.RenderClass.FALLBACK;
         }, loadedTexture, material.has("double_sided"), material.has("surface_prop") ? string(material, "surface_prop") : null,
-            averageColor[0], averageColor[1], averageColor[2], bump, envmap, material.has("blend"), blendModulate, detail, selfillum, phong);
+            averageColor[0], averageColor[1], averageColor[2], bump, envmap, material.has("blend"), blendModulate, detail, selfillum, phong, camera);
+    }
+
+    /** {@code camera} of a material record (format.md section 6): fields in canonical order, optional ones only when set. */
+    private static BundleMaterial.Camera validateCamera(JsonObject c) throws BundleValidationException {
+        BundleMaterial.CameraShader shader = switch (c.has("shader") ? string(c, "shader") : "") {
+            case "unlit_generic" -> BundleMaterial.CameraShader.UNLIT_GENERIC;
+            case "unlit_two_texture" -> BundleMaterial.CameraShader.UNLIT_TWO_TEXTURE;
+            case "monitor_screen" -> BundleMaterial.CameraShader.MONITOR_SCREEN;
+            default -> { fail(BundleErrorCode.INVALID_SCHEMA, "invalid camera shader"); yield null; }
+        };
+        boolean monitor = shader == BundleMaterial.CameraShader.MONITOR_SCREEN;
+        List<String> expected = new ArrayList<>(List.of("shader", "size"));
+        if (c.has("additive")) expected.add("additive");
+        expected.addAll(List.of("color", "color2"));
+        if (c.has("sines")) expected.add("sines");
+        if (c.has("texture2")) expected.add("texture2");
+        if (c.has("transform")) expected.add("transform");
+        if (monitor) expected.addAll(List.of("contrast", "saturation", "tint"));
+        keys(c, expected.toArray(String[]::new));
+        if (c.has("additive") && !(c.get("additive").isJsonPrimitive() && c.get("additive").getAsJsonPrimitive().isBoolean()
+            && c.get("additive").getAsBoolean())) fail(BundleErrorCode.INVALID_SCHEMA, "additive must be true when present");
+        if (shader == BundleMaterial.CameraShader.UNLIT_GENERIC && (c.has("texture2") || c.has("transform")))
+            fail(BundleErrorCode.INVALID_SCHEMA, "UnlitGeneric has no second texture");
+        JsonArray size = array(c, "size");
+        if (size.size() != 2) fail(BundleErrorCode.INVALID_SCHEMA, "camera size must have two values");
+        int sizeS = cameraSize(size, 0), sizeT = cameraSize(size, 1);
+        float[] color = vector(c, "color", 3), color2 = vector(c, "color2", 3);
+        BundleMaterial.Sine[] sines = new BundleMaterial.Sine[3];
+        if (c.has("sines")) {
+            JsonArray list = array(c, "sines");
+            if (list.isEmpty() || list.size() > 3) fail(BundleErrorCode.INVALID_SCHEMA, "camera sines must be 1 to 3");
+            int last = -1;
+            for (JsonElement element : list) {
+                JsonObject sine = object(element, "camera sine");
+                keys(sine, "channel", "period", "min", "max", "offset");
+                int channel = uintIndex(sine.get("channel"), "sine channel");
+                if (channel > 2 || channel <= last) fail(BundleErrorCode.INVALID_SCHEMA, "camera sines must be sorted unique channels 0 to 2");
+                last = channel;
+                float period = (float) finiteNumber(sine.get("period"), "sine period");
+                if (period == 0) fail(BundleErrorCode.INVALID_SCHEMA, "a sine period of 0 is written as 1");
+                sines[channel] = new BundleMaterial.Sine(period, (float) finiteNumber(sine.get("min"), "sine min"),
+                    (float) finiteNumber(sine.get("max"), "sine max"), (float) finiteNumber(sine.get("offset"), "sine offset"));
+            }
+        }
+        String texture2 = c.has("texture2") ? digest(string(c, "texture2"), "camera texture2") : null;
+        BundleMaterial.Texture2Transform transform = null;
+        if (c.has("transform")) {
+            JsonObject t = object(c.get("transform"), "camera transform");
+            keys(t, "scale", "offset", "velocity");
+            float[] offset = vector(t, "offset", 2), velocity = vector(t, "velocity", 2);
+            transform = new BundleMaterial.Texture2Transform((float) finiteNumber(t.get("scale"), "transform scale"),
+                offset[0], offset[1], velocity[0], velocity[1]);
+        }
+        float contrast = monitor ? (float) finiteNumber(c.get("contrast"), "camera contrast") : 0;
+        float saturation = monitor ? (float) finiteNumber(c.get("saturation"), "camera saturation") : 1;
+        float[] tint = monitor ? vector(c, "tint", 3) : new float[]{1, 1, 1};
+        return new BundleMaterial.Camera(shader, sizeS, sizeT, c.has("additive"), color, color2, sines, texture2, transform,
+            contrast, saturation, tint);
+    }
+
+    /** A positive integer at {@code index} of a size array, at most the largest texture side. */
+    private static int cameraSize(JsonArray values, int index) throws BundleValidationException {
+        int v = uintIndex(values.get(index), "camera size");
+        if (v == 0 || v > BundleLimits.MAX_ORIGINAL_TEXTURE_AXIS) fail(BundleErrorCode.LIMIT_EXCEEDED, "camera size exceeds limit");
+        return v;
+    }
+
+    /** An array of {@code count} finite numbers. */
+    private static float[] vector(JsonObject o, String key, int count) throws BundleValidationException {
+        JsonArray values = array(o, key);
+        if (values.size() != count) fail(BundleErrorCode.INVALID_SCHEMA, key + " must have " + count + " values");
+        float[] out = new float[count];
+        for (int i = 0; i < count; i++) out[i] = (float) finiteNumber(values.get(i), key);
+        return out;
     }
 
     /** {@code phong} of a material record (format.md section 6); its fields are in canonical order, optional ones only when set. */

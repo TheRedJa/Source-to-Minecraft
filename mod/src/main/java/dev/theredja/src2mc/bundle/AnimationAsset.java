@@ -19,6 +19,8 @@ import java.util.Locale;
 public final class AnimationAsset {
     public static final int STUDIO_LOOPING = 0x0001, STUDIO_SNAP = 0x0002, STUDIO_DELTA = 0x0004, STUDIO_REALTIME = 0x0100;
     private static final byte[] MAGIC = {'S', '2', 'A', 'N', 'I', 'M', 0, 0};
+    public static final int VERSION = 2;
+    private static final int MAX_ATTACHMENTS = 256;
     private static final int MAX_BONES = 256, MAX_SEQUENCES = 4096, MAX_FRAMES = 65536, MAX_NODES = 255, MAX_NAME = 1024;
 
     private final int[] parents;
@@ -28,12 +30,28 @@ public final class AnimationAsset {
     private final int nodes;
     private final byte[] transitions;
     private final List<Sequence> sequences;
+    private final List<Attachment> attachments;
 
     private AnimationAsset(int[] parents, float[] restPositions, float[] restRotations, float[] binds, byte[] counts, byte[] bones,
-                           float[] weights, int nodes, byte[] transitions, List<Sequence> sequences) {
+                           float[] weights, int nodes, byte[] transitions, List<Sequence> sequences, List<Attachment> attachments) {
         this.parents = parents; this.restPositions = restPositions; this.restRotations = restRotations; this.binds = binds;
         this.counts = counts; this.bones = bones; this.weights = weights; this.nodes = nodes; this.transitions = transitions;
         this.sequences = List.copyOf(sequences);
+        this.attachments = List.copyOf(attachments);
+    }
+
+    /**
+     * {@code mstudioattachment_t}, the model's and its includes' merged by name: a frame on {@code bone}; {@code local} is the
+     * attachment's transform in the bone's space, row-major 3x4, in block units.
+     */
+    public record Attachment(String name, int flags, int bone, float[] local) {}
+
+    public List<Attachment> attachments() { return attachments; }
+
+    /** The attachment of that name, ignoring case, or -1. */
+    public int attachment(String name) {
+        for (int i = 0; i < attachments.size(); i++) if (attachments.get(i).name().equalsIgnoreCase(name)) return i;
+        return -1;
     }
 
     /**
@@ -68,7 +86,8 @@ public final class AnimationAsset {
         public int nodeFlags() { return nodeFlags; }
         /** {@code Studio_CPS}: cycles per second at playback rate 1. */
         public float cyclesPerSecond() { return cyclesPerSecond; }
-        public float boneWeight(int bone) { return boneWeights[bone]; }
+        /** 0 for every bone of a sequence the bundle has no frames of. */
+        public float boneWeight(int bone) { return boneWeights.length == 0 ? 0 : boneWeights[bone]; }
         public int frames() { return frames; }
     }
 
@@ -216,7 +235,7 @@ public final class AnimationAsset {
         byte[] magic = new byte[8];
         in.get(magic);
         if (!Arrays.equals(magic, MAGIC)) fail("animation magic");
-        if (in.getInt() != 1) throw new BundleValidationException(BundleErrorCode.UNSUPPORTED_VERSION, "unsupported animation version");
+        if (in.getInt() != VERSION) throw new BundleValidationException(BundleErrorCode.UNSUPPORTED_VERSION, "unsupported animation version");
         int boneCount = in.getInt(), vertexCount = in.getInt(), sequenceCount = in.getInt(), nodes = in.getInt();
         if (boneCount < 1 || boneCount > MAX_BONES) fail("animation bone count");
         if (vertexCount != meshVertices) fail("animation vertex count differs from its mesh");
@@ -256,10 +275,10 @@ public final class AnimationAsset {
             int entry = in.getInt(), exit = in.getInt(), nodeFlags = in.getInt();
             float cps = finite(in.getFloat());
             if (entry < 0 || exit < 0 || entry > nodes || exit > nodes) fail("sequence transition node out of range");
-            float[] boneWeights = new float[boneCount];
-            for (int bone = 0; bone < boneCount; bone++) boneWeights[bone] = finite(in.getFloat());
             int frames = in.getInt();
             if (frames < 0 || frames > MAX_FRAMES) fail("sequence frame count");
+            float[] boneWeights = new float[frames == 0 ? 0 : boneCount];
+            for (int bone = 0; bone < boneWeights.length; bone++) boneWeights[bone] = finite(in.getFloat());
             float[][] positions = new float[frames == 0 ? 0 : boneCount][], rotations = new float[frames == 0 ? 0 : boneCount][];
             for (int bone = 0; frames > 0 && bone < boneCount; bone++) {
                 int positionTrack = in.get(), rotationTrack = in.get();
@@ -274,8 +293,20 @@ public final class AnimationAsset {
             sequences.add(new Sequence(label, activity, activityWeight, flags, fadeIn, fadeOut, entry, exit, nodeFlags, cps, boneWeights,
                 frames, positions, rotations));
         }
+        int attachmentCount = in.getInt();
+        if (attachmentCount < 0 || attachmentCount > MAX_ATTACHMENTS) fail("animation attachment count");
+        List<Attachment> attachments = new ArrayList<>(attachmentCount);
+        for (int a = 0; a < attachmentCount; a++) {
+            String name = name(in);
+            int flags = in.getInt(), bone = in.getInt();
+            if (bone < 0 || bone >= boneCount) fail("attachment bone out of range");
+            float[] local = new float[12];
+            for (int i = 0; i < 12; i++) local[i] = finite(in.getFloat());
+            attachments.add(new Attachment(name, flags, bone, local));
+        }
         if (in.hasRemaining()) fail("trailing animation bytes");
-        return new AnimationAsset(parents, restPositions, restRotations, binds, counts, bones, weights, nodes, transitions, sequences);
+        return new AnimationAsset(parents, restPositions, restRotations, binds, counts, bones, weights, nodes, transitions, sequences,
+            attachments);
     }
 
     private static void readRotation(ByteBuffer in, float[] out, int at) throws BundleValidationException {

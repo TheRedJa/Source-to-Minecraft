@@ -52,7 +52,7 @@ import org.joml.Quaternionf;
  * surfaces sample theirs; a moving mover is lit again as it gets somewhere new, a few times a
  * second at most. The vertices keep their mover-local normals, so the draw turns vanilla's two
  * shading lights back by the mover's rotation instead: the same shading as turning every normal.
- * {@code /src2mc_movers} switches both, for comparison, to the old one light per mover and
+ * {@code /src2mcc draw movers} switches both, for comparison, to the old one light per mover and
  * unturned shading.
  */
 @EventBusSubscriber(modid = Src2mc.MOD_ID, value = Dist.CLIENT)
@@ -155,24 +155,16 @@ public final class MoverRenderer {
             + ", shading " + (turnShading ? "turned" : "unturned") + (enabled ? "" : " (drawing off)");
     }
 
-    @SubscribeEvent
-    public static void registerCommand(net.neoforged.neoforge.client.event.RegisterClientCommandsEvent event) {
-        event.getDispatcher().register(net.minecraft.commands.Commands.literal("src2mc_movers")
-            .then(net.minecraft.commands.Commands.literal("status").executes(context -> reply(context.getSource(), status())))
-            .then(net.minecraft.commands.Commands.literal("draw")
-                .then(net.minecraft.commands.Commands.literal("on").executes(context -> { enabled = true; return reply(context.getSource(), status()); }))
-                .then(net.minecraft.commands.Commands.literal("off").executes(context -> { enabled = false; return reply(context.getSource(), status()); })))
-            .then(net.minecraft.commands.Commands.literal("light")
-                .then(net.minecraft.commands.Commands.literal("vertex").executes(context -> { perVertexLight = true; relightAll(); return reply(context.getSource(), status()); }))
-                .then(net.minecraft.commands.Commands.literal("single").executes(context -> { perVertexLight = false; relightAll(); return reply(context.getSource(), status()); })))
-            .then(net.minecraft.commands.Commands.literal("shading")
-                .then(net.minecraft.commands.Commands.literal("turned").executes(context -> { turnShading = true; return reply(context.getSource(), status()); }))
-                .then(net.minecraft.commands.Commands.literal("unturned").executes(context -> { turnShading = false; return reply(context.getSource(), status()); }))));
-    }
+    public static void setPerVertexLight(boolean value) { perVertexLight = value; relightAll(); }
 
-    private static int reply(net.minecraft.commands.CommandSourceStack source, String text) {
-        source.sendSuccess(() -> net.minecraft.network.chat.Component.literal(text), false);
-        return 1;
+    public static void setTurnShading(boolean value) { turnShading = value; }
+
+    /** One line for {@code /src2mcc status}. */
+    public static String summaryLine() {
+        return "movers " + (enabled ? "on" : "off") + ": " + MoverRegistry.instances(true).size() + " known, " + BUILT.size() + " built, "
+            + drawnLast + " drawn; " + relights + " relit ("
+            + String.format(java.util.Locale.ROOT, "%.2f ms each", workerRelights == 0 ? 0 : workerNanos / 1e6 / workerRelights)
+            + String.format(java.util.Locale.ROOT, "), upload %.2f ms last, %.2f ms max", uploadNanosLast / 1e6, uploadNanosMax / 1e6);
     }
 
     private static void relightAll() { for (Built built : BUILT.values()) built.litFrame = Long.MIN_VALUE; }
@@ -601,6 +593,7 @@ public final class MoverRenderer {
         VertexBuffer.unbind();
         if (turnShading) RenderSystem.setShaderLights(LIGHT_0, netherLighting ? NETHER_LIGHT_1 : LIGHT_1);
         if (!shadowPass && !translucent) drawnLast = drawn;
+        if (dev.theredja.src2mc.client.view.SecondaryView.active() && !translucent) dev.theredja.src2mc.client.view.SecondaryView.Counts.moverBuffers += (int) drawn;
     }
 
     /** The world box around a mover's buffers at a pose. */

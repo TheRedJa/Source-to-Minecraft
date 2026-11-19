@@ -144,20 +144,8 @@ public final class ScreenOverlay {
     @SubscribeEvent
     static void onLogout(ClientPlayerNetworkEvent.LoggingOut event) { clear(); }
 
-    /** {@code /src2mc_screen status|clear}: what is on screen now, and a way to take it all off. */
-    @SubscribeEvent
-    static void registerCommand(net.neoforged.neoforge.client.event.RegisterClientCommandsEvent event) {
-        event.getDispatcher().register(net.minecraft.commands.Commands.literal("src2mc_screen")
-            .then(net.minecraft.commands.Commands.literal("status").executes(context -> reply(context.getSource(), status())))
-            .then(net.minecraft.commands.Commands.literal("clear").executes(context -> { clear(); return reply(context.getSource(), status()); })));
-    }
-
-    private static int reply(net.minecraft.commands.CommandSourceStack source, String text) {
-        source.sendSuccess(() -> Component.literal(text), false);
-        return 1;
-    }
-
-    static String status() {
+    /** What is on screen now ({@code /src2mcc status screen}). */
+    public static String status() {
         int texts = 0;
         for (Message message : MESSAGES) if (message != null) texts++;
         texts += HUD_TEXTS.size();

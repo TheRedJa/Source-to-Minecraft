@@ -99,7 +99,7 @@ final class LogicTitlesTest {
         Map<String, byte[]> payloads = new TreeMap<>();
         payloads.put("campaign.json", ("{\"format\":\"src2mc-campaign-metadata\",\"version\":1,\"campaign_id\":\"hl2\","
             + "\"maps\":[{\"map_id\":\"d1_01\",\"metadata\":\"maps/d1_01.json\"}]}\n").getBytes(StandardCharsets.UTF_8));
-        payloads.put("maps/d1_01.json", ("{\"format\":\"src2mc-map\",\"version\":2,\"map_id\":\"d1_01\",\"source_name\":\"d1_01\","
+        payloads.put("maps/d1_01.json", ("{\"format\":\"src2mc-map\",\"version\":3,\"map_id\":\"d1_01\",\"source_name\":\"d1_01\","
             + "\"units_per_block\":32.0,\"cell_min\":[0,0,0],\"cell_max\":[0,0,0],\"anchor_cell\":[0,0,0],"
             + "\"surfaces\":\"maps/d1_01/surfaces.s2faces\",\"materials\":[],\"models\":[],"
             + "\"props\":\"maps/d1_01/props.s2props\",\"logic\":\"maps/d1_01/logic.json\","

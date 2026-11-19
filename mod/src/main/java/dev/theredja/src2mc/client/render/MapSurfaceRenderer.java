@@ -1,7 +1,5 @@
 package dev.theredja.src2mc.client.render;
 
-import static net.minecraft.commands.Commands.literal;
-
 import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.blaze3d.vertex.VertexBuffer;
 import dev.theredja.src2mc.Src2mc;
@@ -38,7 +36,6 @@ import net.neoforged.bus.api.EventPriority;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.common.EventBusSubscriber;
 import net.neoforged.neoforge.client.event.RenderLevelStageEvent;
-import net.neoforged.neoforge.client.event.RegisterClientCommandsEvent;
 import org.joml.Matrix4f;
 
 /** Mod-owned static section/page renderer; independent of Sodium terrain internals. */
@@ -80,11 +77,11 @@ public final class MapSurfaceRenderer {
     /** Regions in range that were not built after the last render pass's dispatch (building or waiting). */
     private static int pendingRegionsLast;
     private static long relightsQueued;
-    /** Build pipeline counters, read back through {@code /src2mc_render_status}. */
+    /** Build pipeline counters, read back through {@code /src2mcc status render}. */
     private static int waitingLast, uploadsLast;
     private static long dispatchNanosLast, uploadNanosLast, worstUploadNanos, buildsDiscarded, buildsFailed;
     /** Region rebuilds caused by surface blocks appearing or vanishing, and the hidden-fragment
-     * count of the most recent build; read back through {@code /src2mc_render_status}. */
+     * count of the most recent build; read back through {@code /src2mcc status render}. */
     private static long surfaceRebuildsQueued;
     private static int lastHiddenFragments;
     private static long shadowPassCallsSinceMainPass;
@@ -174,7 +171,7 @@ public final class MapSurfaceRenderer {
     private record InFlight(BuildInput input, int version, java.util.concurrent.CompletableFuture<BuildResult> result,
                             long startedNanos, boolean lightTimedOut, int unloadedChunks) {}
 
-    /** What a region's last finished build saw, for {@code /src2mc_region_probe}. */
+    /** What a region's last finished build saw, for {@code /src2mcc debug region}. */
     private record BuildInfo(long finishedNanos, int version, int drawnFragments, int hiddenFragments,
                              boolean lightTimedOut, int unloadedChunks, int meshes) {}
     private static final Map<RegionKey, BuildInfo> BUILD_INFO = new HashMap<>();
@@ -240,61 +237,7 @@ public final class MapSurfaceRenderer {
         return PAGES;
     }
 
-    @SubscribeEvent
-    public static void registerCommand(RegisterClientCommandsEvent event) {
-        event.getDispatcher().register(literal("src2mc_debug_face").executes(context -> inspectFace(context.getSource())));
-        event.getDispatcher().register(literal("src2mc_render_status").executes(context -> renderStatus(context.getSource())));
-        event.getDispatcher().register(literal("src2mc_region_probe").executes(context -> probeRegion(context.getSource())));
-        event.getDispatcher().register(literal("src2mc_rebuild_meshes").executes(context -> rebuildMeshes(context.getSource())));
-        event.getDispatcher().register(literal("src2mc_iris_entity_id")
-            .then(literal("neutral").executes(context -> setNeutralEntityId(context.getSource(), true)))
-            .then(literal("captured").executes(context -> setNeutralEntityId(context.getSource(), false))));
-        event.getDispatcher().register(literal("src2mc_relight")
-            .then(literal("on").executes(context -> setRelight(context.getSource(), true)))
-            .then(literal("off").executes(context -> setRelight(context.getSource(), false))));
-        var stageCommand = literal("src2mc_render_stage");
-        for (RenderLevelStageEvent.Stage stage : List.of(
-            RenderLevelStageEvent.Stage.AFTER_SOLID_BLOCKS,
-            RenderLevelStageEvent.Stage.AFTER_CUTOUT_BLOCKS,
-            RenderLevelStageEvent.Stage.AFTER_ENTITIES,
-            RenderLevelStageEvent.Stage.AFTER_BLOCK_ENTITIES,
-            RenderLevelStageEvent.Stage.AFTER_TRANSLUCENT_BLOCKS)) {
-            stageCommand.then(literal(stage.toString()).executes(context -> setOpaqueStage(context.getSource(), stage)));
-        }
-        event.getDispatcher().register(stageCommand);
-        event.getDispatcher().register(literal("src2mc_shadow_distance")
-            .then(net.minecraft.commands.Commands.argument("blocks", com.mojang.brigadier.arguments.DoubleArgumentType.doubleArg(0))
-                .executes(context -> setShadowDistance(context.getSource(),
-                    com.mojang.brigadier.arguments.DoubleArgumentType.getDouble(context, "blocks")))));
-        event.getDispatcher().register(literal("src2mc_light_probe").executes(context -> probeLight(context.getSource())));
-        event.getDispatcher().register(literal("src2mc_light_occlusion")
-            .then(literal("on").executes(context -> setLightOcclusion(context.getSource(), true)))
-            .then(literal("off").executes(context -> setLightOcclusion(context.getSource(), false))));
-        event.getDispatcher().register(literal("src2mc_smooth_light")
-            .then(literal("on").executes(context -> setSmoothLighting(context.getSource(), true)))
-            .then(literal("off").executes(context -> setSmoothLighting(context.getSource(), false))));
-        event.getDispatcher().register(literal("src2mc_translucent_depth")
-            .then(literal("on").executes(context -> setTranslucentDepthWrite(context.getSource(), true)))
-            .then(literal("off").executes(context -> setTranslucentDepthWrite(context.getSource(), false))));
-        event.getDispatcher().register(literal("src2mc_mipmaps")
-            .then(literal("on").executes(context -> setAtlasMipmaps(context.getSource(), true)))
-            .then(literal("off").executes(context -> setAtlasMipmaps(context.getSource(), false))));
-        event.getDispatcher().register(literal("src2mc_indexed")
-            .then(literal("on").executes(context -> setIndexedMeshes(context.getSource(), true)))
-            .then(literal("off").executes(context -> setIndexedMeshes(context.getSource(), false))));
-        event.getDispatcher().register(literal("src2mc_draw_order")
-            .then(literal("sorted").executes(context -> setSortedDraws(context.getSource(), true)))
-            .then(literal("unsorted").executes(context -> setSortedDraws(context.getSource(), false))));
-        event.getDispatcher().register(literal("src2mc_cull")
-            .then(literal("pvs").then(literal("on").executes(context -> setPvsCulling(context.getSource(), true)))
-                .then(literal("off").executes(context -> setPvsCulling(context.getSource(), false))))
-            .then(literal("frustum").then(literal("on").executes(context -> setFrustumCulling(context.getSource(), true)))
-                .then(literal("off").executes(context -> setFrustumCulling(context.getSource(), false))))
-            .then(literal("shadow").then(literal("on").executes(context -> setShadowCulling(context.getSource(), true)))
-                .then(literal("off").executes(context -> setShadowCulling(context.getSource(), false)))));
-    }
-
-    private static int setShadowDistance(net.minecraft.commands.CommandSourceStack source, double blocks) {
+    public static int setShadowDistance(net.minecraft.commands.CommandSourceStack source, double blocks) {
         shadowDistance = blocks;
         source.sendSuccess(() -> Component.literal("src2mc shadow caster distance = "
             + (blocks <= 0 ? "unlimited" : blocks + " blocks")), false);
@@ -302,7 +245,7 @@ public final class MapSurfaceRenderer {
     }
 
     /** Drops every built mesh, since the light is baked into them at build time. */
-    private static int setLightOcclusion(net.minecraft.commands.CommandSourceStack source, boolean value) {
+    public static int setLightOcclusion(net.minecraft.commands.CommandSourceStack source, boolean value) {
         lightOcclusion = value;
         dropMeshes();
         PropRenderer.invalidateAllLight();
@@ -312,7 +255,7 @@ public final class MapSurfaceRenderer {
     }
 
     /** Drops every built mesh, since the light is baked into them at build time. */
-    private static int setSmoothLighting(net.minecraft.commands.CommandSourceStack source, boolean value) {
+    public static int setSmoothLighting(net.minecraft.commands.CommandSourceStack source, boolean value) {
         smoothLighting = value;
         dropMeshes();
         PropRenderer.invalidateAllLight();
@@ -320,21 +263,9 @@ public final class MapSurfaceRenderer {
         return 1;
     }
 
-    private static int setPvsCulling(net.minecraft.commands.CommandSourceStack source, boolean value) {
+    public static int setPvsCulling(net.minecraft.commands.CommandSourceStack source, boolean value) {
         pvsCulling = value;
         source.sendSuccess(() -> Component.literal("src2mc PVS culling " + (value ? "on" : "off")), false);
-        return 1;
-    }
-
-    private static int setTranslucentDepthWrite(net.minecraft.commands.CommandSourceStack source, boolean value) {
-        translucentDepthWrite = value;
-        source.sendSuccess(() -> Component.literal("src2mc translucent depth write " + (value ? "on" : "off")), false);
-        return 1;
-    }
-
-    private static int setAtlasMipmaps(net.minecraft.commands.CommandSourceStack source, boolean value) {
-        atlasMipmaps = value;
-        source.sendSuccess(() -> Component.literal("src2mc atlas mipmaps " + (value ? "on" : "off (vanilla entity sampling)")), false);
         return 1;
     }
 
@@ -379,41 +310,20 @@ public final class MapSurfaceRenderer {
         applyAtlasFilter(blend);
     }
 
-    /** Rebuilds everything, since the layout is chosen when a mesh is uploaded. */
-    private static int setIndexedMeshes(net.minecraft.commands.CommandSourceStack source, boolean value) {
-        indexedMeshes = value;
-        PackedVertices.soupVertices = 0; PackedVertices.uploadedVertices = 0;
-        rebuildMeshes(source);
-        source.sendSuccess(() -> Component.literal("src2mc indexed meshes " + (value ? "on" : "off")), false);
-        return 1;
-    }
-
-    private static int setSortedDraws(net.minecraft.commands.CommandSourceStack source, boolean value) {
-        sortedDraws = value;
-        source.sendSuccess(() -> Component.literal("src2mc opaque draw order " + (value ? "sorted (state groups, nearest first)" : "unsorted")), false);
-        return 1;
-    }
-
-    private static int setFrustumCulling(net.minecraft.commands.CommandSourceStack source, boolean value) {
+    public static int setFrustumCulling(net.minecraft.commands.CommandSourceStack source, boolean value) {
         frustumCulling = value;
         source.sendSuccess(() -> Component.literal("src2mc frustum culling " + (value ? "on" : "off")), false);
         return 1;
     }
 
-    private static int setShadowCulling(net.minecraft.commands.CommandSourceStack source, boolean value) {
+    public static int setShadowCulling(net.minecraft.commands.CommandSourceStack source, boolean value) {
         shadowCulling = value;
         source.sendSuccess(() -> Component.literal("src2mc shadow-pass frustum culling " + (value ? "on" : "off")
             + (IrisCompat.shadowFrustum() == null && value ? " (no Iris shadow frustum yet; draws everything until one exists)" : "")), false);
         return 1;
     }
 
-    private static int setOpaqueStage(net.minecraft.commands.CommandSourceStack source, RenderLevelStageEvent.Stage stage) {
-        opaqueStage = stage;
-        source.sendSuccess(() -> Component.literal("src2mc opaque draw stage = " + stage), false);
-        return 1;
-    }
-
-    private static int setRelight(net.minecraft.commands.CommandSourceStack source, boolean value) {
+    public static int setRelight(net.minecraft.commands.CommandSourceStack source, boolean value) {
         LightWatcher.setEnabled(value);
         relightsQueued = 0;
         worstUploadNanos = 0;
@@ -459,19 +369,21 @@ public final class MapSurfaceRenderer {
         return 1;
     }
 
-    /** Rebuilds everything, since the ids are written into the vertices at build time. */
-    private static int setNeutralEntityId(net.minecraft.commands.CommandSourceStack source, boolean value) {
-        neutralEntityId = value;
-        rebuildMeshes(source);
-        source.sendSuccess(() -> Component.literal("src2mc iris entity id "
-            + (value ? "zeroed while building" : "left as captured")
-            + (IrisCompat.canSetCapturedIds() ? "" : " (Iris exposes no hook here; setting has no effect)")), false);
-        return 1;
+    /** One line for {@code /src2mcc status}: what the map surfaces drew last frame and what is resident. */
+    public static String summaryLine() {
+        AtlasPageResidency.Stats stats = PAGES.stats();
+        DrawStats.Frame surfaces = lastStats;
+        return "surfaces: " + (surfaces == null ? "no frame yet" : surfaces.draws() + " draws, " + String.format(java.util.Locale.ROOT, "%.2f", surfaces.triangles() / 1e6) + " M tris, "
+                + String.format(java.util.Locale.ROOT, "%.2f ms CPU", surfaces.cpuMs()))
+            + "; " + MESHES.size() + " meshes in " + BUILT_REGIONS.size() + " regions, " + IN_FLIGHT.size() + " building"
+            + ", atlas " + stats.residentPages() + "/" + stats.trackedPages() + " pages (" + formatBytes(stats.residentVramBytes()) + ")"
+            + (stillLoading ? ", loading" : "");
     }
 
-    private static int renderStatus(net.minecraft.commands.CommandSourceStack source) {
+    /** The full render status text ({@code /src2mcc status render}). */
+    public static String statusText() {
         AtlasPageResidency.Stats stats = PAGES.stats();
-        source.sendSuccess(() -> Component.literal("src2mc render: smooth-light " + (smoothLighting ? "on" : "off")
+        return ("src2mc render: smooth-light " + (smoothLighting ? "on" : "off")
             + ", light-occlusion " + (lightOcclusion ? "on (last build: " + occlusionBlockedLast + "/" + occlusionTestedLast
                 + " neighbour cells out of sight)" : "off")
             + ", regions=" + BUILT_REGIONS.size()
@@ -499,8 +411,7 @@ public final class MapSurfaceRenderer {
             + ", worker time=" + formatMillis(MeshBuildPool.WORKER_NANOS.get()) + " over " + MeshBuildPool.JOBS.get() + " job(s)"
             + ", sections copied=" + WorldSnapshot.SHARED.copied + " reused=" + WorldSnapshot.SHARED.reused
             + ", last frame: dispatch " + formatMillis(dispatchNanosLast) + ", " + uploadsLast + " upload(s) " + formatMillis(uploadNanosLast)
-            + ", worst upload frame=" + formatMillis(worstUploadNanos)), false);
-        return 1;
+            + ", worst upload frame=" + formatMillis(worstUploadNanos));
     }
 
     /**
@@ -509,7 +420,7 @@ public final class MapSurfaceRenderer {
      * last build saw, and how many owned fragments the live world would hide now. A region that
      * draws nothing while the live count says it should is a build that saw the wrong world.
      */
-    private static int probeRegion(net.minecraft.commands.CommandSourceStack source) {
+    public static int probeRegion(net.minecraft.commands.CommandSourceStack source) {
         Minecraft minecraft = Minecraft.getInstance();
         if (minecraft.level == null || level == null) { source.sendFailure(Component.literal("No client level")); return 0; }
         var camera = minecraft.gameRenderer.getMainCamera().getPosition();
@@ -573,7 +484,7 @@ public final class MapSurfaceRenderer {
      * geometry, and writes how every one of its vertices was lit to config/src2mc/light-probe.txt:
      * each smooth-light corner cell, why it was used or dropped, and what it held.
      */
-    private static int probeLight(net.minecraft.commands.CommandSourceStack source) {
+    public static int probeLight(net.minecraft.commands.CommandSourceStack source) {
         Minecraft minecraft = Minecraft.getInstance();
         if (minecraft.level == null) { source.sendFailure(Component.literal("No client level")); return 0; }
         var camera = minecraft.gameRenderer.getMainCamera();
@@ -654,7 +565,7 @@ public final class MapSurfaceRenderer {
         return 1;
     }
 
-    private static int inspectFace(net.minecraft.commands.CommandSourceStack source) {
+    public static int inspectFace(net.minecraft.commands.CommandSourceStack source) {
         Minecraft minecraft = Minecraft.getInstance();
         if (minecraft.level == null || minecraft.hitResult == null
             || minecraft.hitResult.getType() != HitResult.Type.BLOCK) {
@@ -841,6 +752,7 @@ public final class MapSurfaceRenderer {
         // Cameras drawn this frame besides the player's (point_camera, script_intro) keep their regions built too.
         List<net.minecraft.world.phys.Vec3> views = dev.theredja.src2mc.client.view.SecondaryView.interestPoints();
         List<BuildCandidate> candidates = new ArrayList<>();
+        int viewRegions = 0, viewRegionsBuilt = 0;
         for (MapPlacement placement : placements) {
             var located = generation.findLocatedMap(placement.campaignId(), placement.mapId()).orElse(null);
             if (located == null || located.map().atlas() == null) continue;
@@ -857,10 +769,16 @@ public final class MapSurfaceRenderer {
                 }
                 if (!main && !secondary) continue;
                 RegionKey regionKey = entry.key;
+                if (secondary) viewRegions++;
                 if (BUILT_REGIONS.containsKey(regionKey)) {
                     BUILT_REGIONS.put(regionKey, frame);
+                    if (secondary) viewRegionsBuilt++;
                 } else if (!IN_FLIGHT.containsKey(regionKey)) {
-                    candidates.add(new BuildCandidate(located.bundle(), map, entry, distanceSquared(entry.bounds, camera)));
+                    // Builds go nearest first, to the player or to a camera: a camera far from the player (a monitor's studio)
+                    // would otherwise wait behind every region of the player's own range.
+                    double wait = distanceSquared(entry.bounds, camera);
+                    for (var view : views) wait = Math.min(wait, distanceSquared(entry.bounds, view));
+                    candidates.add(new BuildCandidate(located.bundle(), map, entry, wait));
                 }
                 Map<PageClass, Mesh> meshes = REGION_MESHES.get(regionKey);
                 // A camera's view has no PVS of its own here: the frustum culls it.
@@ -870,6 +788,8 @@ public final class MapSurfaceRenderer {
                 if (meshes != null) for (Mesh mesh : meshes.values()) mesh.lastVisibleFrame = frame;
             }
         }
+        dev.theredja.src2mc.client.view.SecondaryView.Counts.regionsWanted = viewRegions;
+        dev.theredja.src2mc.client.view.SecondaryView.Counts.regionsBuilt = viewRegionsBuilt;
         completeBuilds();
         recheckHiddenOwners();
         dispatchBuilds(minecraft, candidates, distance);
@@ -1005,6 +925,7 @@ public final class MapSurfaceRenderer {
                 if (casterFrustum != null && !casterFrustum.isVisible(mesh.bounds)) { shadowRejectedFrustum++; continue; }
             } else {
                 if ((secondaryView ? mesh.lastSecondaryFrame : mesh.lastVisibleFrame) != frame) continue;
+                if (secondaryView && !translucent) dev.theredja.src2mc.client.view.SecondaryView.Counts.surfaceFlagged++;
                 if (secondaryView ? !event.getFrustum().isVisible(mesh.bounds)
                     : frustumCulling && !event.getFrustum().isVisible(mesh.bounds)) { if (!secondaryView) STATS.frustumRejected++; continue; }
             }
@@ -1067,6 +988,7 @@ public final class MapSurfaceRenderer {
         }
         VertexBuffer.unbind();
         if (secondaryView) {
+            if (!translucent) dev.theredja.src2mc.client.view.SecondaryView.Counts.surfaceDrawn += drawItems.size();
             return;
         } else if (shadowPass) {
             STATS.shadowTriangles += triangles;
@@ -1207,7 +1129,7 @@ public final class MapSurfaceRenderer {
     }
 
     /** The visibility test smooth light uses around {@code placement}'s own surfaces, or null when
-     * {@code /src2mc_light_occlusion} is off. Shared with props, which stand among the same walls. */
+     * {@code /src2mcc light occlusion} is off. Shared with props, which stand among the same walls. */
     static SurfaceOcclusion occlusionFor(MapPlacement placement, BundleMap map, SurfaceOcclusion.Presence presence) {
         if (!lightOcclusion || map == null) return null;
         BlockPos t = placement.translation();

@@ -1,7 +1,5 @@
 package dev.theredja.src2mc.client.logic;
 
-import static net.minecraft.commands.Commands.argument;
-import static net.minecraft.commands.Commands.literal;
 
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.blaze3d.vertex.VertexConsumer;
@@ -26,7 +24,6 @@ import net.minecraft.world.phys.Vec3;
 import net.neoforged.api.distmarker.Dist;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.common.EventBusSubscriber;
-import net.neoforged.neoforge.client.event.RegisterClientCommandsEvent;
 import net.neoforged.neoforge.client.event.RenderLevelStageEvent;
 
 /**
@@ -34,7 +31,7 @@ import net.neoforged.neoforge.client.event.RenderLevelStageEvent;
  * the map has them: each brush as the wireframe of its exact shape, coloured by what it is, and
  * labelled with class, name and entity index when close.
  *
- * <p>{@code /src2mc_logic_show triggers|usable|all|off [filter]}: triggers are the volumes
+ * <p>{@code /src2mcc logic show triggers|usable|all|off [filter]}: triggers are the volumes
  * players touch (orange; level changes red), usable are buttons and doors (green), all adds
  * every other brush entity (grey). A filter keeps only entities whose name or class contains it.
  */
@@ -55,18 +52,14 @@ public final class LogicOverlay {
 
     private LogicOverlay() {}
 
-    @SubscribeEvent
-    static void registerCommand(RegisterClientCommandsEvent event) {
-        var root = literal("src2mc_logic_show");
-        for (Mode each : Mode.values()) {
-            String name = each.name().toLowerCase(Locale.ROOT);
-            root.then(literal(name)
-                .executes(context -> set(context.getSource(), each, ""))
-                .then(argument("filter", com.mojang.brigadier.arguments.StringArgumentType.word())
-                    .executes(context -> set(context.getSource(), each,
-                        com.mojang.brigadier.arguments.StringArgumentType.getString(context, "filter")))));
-        }
-        event.getDispatcher().register(root);
+    /** The overlay modes' names, for {@code /src2mcc logic show}. */
+    public static java.util.List<String> modeNames() {
+        return java.util.Arrays.stream(Mode.values()).map(each -> each.name().toLowerCase(Locale.ROOT)).toList();
+    }
+
+    /** {@code /src2mcc logic show <mode> [filter]}; {@code mode} is one of {@link #modeNames()}. */
+    public static int show(net.minecraft.commands.CommandSourceStack source, String mode, String filter) {
+        return set(source, Mode.valueOf(mode.toUpperCase(Locale.ROOT)), filter);
     }
 
     private static int set(net.minecraft.commands.CommandSourceStack source, Mode next, String text) {

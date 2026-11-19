@@ -12,11 +12,12 @@ use anyhow::{Result, ensure};
 use std::collections::BTreeSet;
 
 pub const MAGIC: [u8; 8] = *b"S2ANIM\0\0";
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 pub const MAX_BONES: usize = 256;
 pub const MAX_SEQUENCES: usize = 4096;
 pub const MAX_FRAMES: usize = 65536;
 pub const MAX_NAME_BYTES: usize = 1024;
+pub const MAX_ATTACHMENTS: usize = 256;
 
 const UNITS: f64 = crate::output::mod_export::UNITS_PER_BLOCK;
 
@@ -155,18 +156,20 @@ pub fn encode(
             sequence.bone_weights.len() == bones.len(),
             "sequence bone weight count mismatch"
         );
-        for weight in &sequence.bone_weights {
-            out.extend(finite(*weight)?.to_le_bytes());
-        }
-        let frames: &[Vec<BonePose>] = if keep.contains(&index) {
-            &sequence.frames
+        let frames: Vec<std::borrow::Cow<'_, [BonePose]>> = if keep.contains(&index) {
+            (0..animation.frame_count(index))
+                .map(|f| animation.frame(index, f))
+                .collect()
         } else {
-            &[]
+            Vec::new()
         };
         ensure!(frames.len() <= MAX_FRAMES, "sequence has too many frames");
         out.extend(u32::try_from(frames.len())?.to_le_bytes());
         if frames.is_empty() {
             continue;
+        }
+        for weight in &sequence.bone_weights {
+            out.extend(finite(*weight)?.to_le_bytes());
         }
         for bone in 0..bones.len() {
             let positions: Vec<[f32; 3]> = frames.iter().map(|f| position(f[bone].0)).collect();
@@ -195,6 +198,23 @@ pub fn encode(
                 for v in q {
                     out.extend(v.to_le_bytes());
                 }
+            }
+        }
+    }
+    let attachments: Vec<_> = animation
+        .attachments
+        .iter()
+        .filter(|a| a.bone < bones.len())
+        .take(MAX_ATTACHMENTS)
+        .collect();
+    out.extend(u32::try_from(attachments.len())?.to_le_bytes());
+    for attachment in attachments {
+        put_name(&mut out, &attachment.name)?;
+        out.extend(attachment.flags.to_le_bytes());
+        out.extend(u32::try_from(attachment.bone)?.to_le_bytes());
+        for row in transform(&crate::source::anim::widen(&attachment.local)) {
+            for v in row {
+                out.extend(finite(v)?.to_le_bytes());
             }
         }
     }
@@ -238,7 +258,7 @@ mod tests {
             *at += 4;
             v
         };
-        assert_eq!(u32_(&mut at), 1);
+        assert_eq!(u32_(&mut at), 2);
         let (bones, vertices, sequences, nodes) = (
             u32_(&mut at) as usize,
             u32_(&mut at) as usize,
@@ -290,8 +310,9 @@ mod tests {
                 let length = u16::from_le_bytes(bytes[at..at + 2].try_into().unwrap()) as usize;
                 at += 2 + length;
             }
-            at += 4 * 8 + 4 * bones;
+            at += 4 * 8;
             let frames = u32_(&mut at) as usize;
+            at += if frames == 0 { 0 } else { 4 * bones };
             let mut locals = vec![];
             for _ in 0..if frames == 0 { 0 } else { bones } {
                 let (pt, rt) = (bytes[at], bytes[at + 1]);
@@ -305,6 +326,11 @@ mod tests {
             if s == sequence {
                 pose = Some(locals);
             }
+        }
+        let attachments = u32_(&mut at) as usize;
+        for _ in 0..attachments {
+            let length = u16::from_le_bytes(bytes[at..at + 2].try_into().unwrap()) as usize;
+            at += 2 + length + 8 + 48;
         }
         assert_eq!(at, bytes.len());
         let pose = pose.unwrap();
@@ -376,7 +402,7 @@ mod tests {
                 let source = crate::source::anim::pose_model(
                     &model,
                     &animation,
-                    &animation.sequences[sequence].frames[0],
+                    &animation.frame(sequence, 0),
                 );
                 // Source's posed corners, mapped to block space, are each some mesh vertex posed.
                 let mut worst = 0.0f64;
@@ -445,6 +471,7 @@ mod tests {
                     ]
                 })
                 .collect(),
+            origin: None,
         };
         let animation = Animation {
             bones: vec![bone(-1), bone(0)],
@@ -452,6 +479,8 @@ mod tests {
             nodes: 0,
             transitions: vec![],
             unsupported: vec![],
+            groups: vec![],
+            attachments: vec![],
         };
         let identity = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
         let bindings = vec![[(1, 1.0), (0, 0.0), (0, 0.0)]; 4];
@@ -459,8 +488,9 @@ mod tests {
         let all = encode(&animation, identity, &bindings, &BTreeSet::from([0, 1])).unwrap();
         // Bone 0 still: 2 flag bytes, one position, one rotation; bone 1
         // moves in position only.
+        // Kept, a sequence adds its two bone weights too.
         let per_bone = |frames: usize| 2 + 12 + 8 + 2 + 12 * frames + 8;
-        assert_eq!(all.len() - kept.len(), per_bone(5));
+        assert_eq!(all.len() - kept.len(), per_bone(5) + 2 * 4);
         assert_eq!(&kept[..8], &MAGIC);
         let bad = [(2, 1.0), (0, 0.0), (0, 0.0)];
         assert!(encode(&animation, identity, &[bad], &BTreeSet::new()).is_err());

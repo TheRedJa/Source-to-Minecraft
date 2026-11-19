@@ -414,7 +414,7 @@ public final class DecalRenderer {
         }
     }
 
-    /** For {@code /src2mc_particles} status. */
+    /** For {@code /src2mcc status particles}. */
     public static String status() {
         int vertices = 0;
         for (Batch batch : BATCHES) vertices += batch.vertexCount;
@@ -422,10 +422,10 @@ public final class DecalRenderer {
             + " triangles), shot " + shot + ", no surface " + missed;
     }
 
-    /** For {@code /src2mc_particles decals on|off}: off hides them, and shoots none. */
+    /** For {@code /src2mcc draw decals on|off}: off hides them, and shoots none. */
     public static void setEnabled(boolean value) { enabled = value; }
 
-    /** For {@code /src2mc_particles decals clear}. */
+    /** For {@code /src2mcc draw decals clear}. */
     public static void clearAll() {
         clear();
     }

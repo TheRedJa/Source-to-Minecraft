@@ -7,7 +7,7 @@ package dev.theredja.src2mc.bundle;
  */
 public record BundleMaterial(String sourceMaterial, RenderClass renderClass, TextureReference texture, boolean doubleSided,
                              String surfaceProp, float reflectR, float reflectG, float reflectB, Bump bump, Envmap envmap,
-                             boolean blend, String blendModulate, Detail detail, float[] selfillum, Phong phong) {
+                             boolean blend, String blendModulate, Detail detail, float[] selfillum, Phong phong, Camera camera) {
     public enum RenderClass { SOLID, CUTOUT, TRANSLUCENT, FALLBACK }
 
     /**
@@ -47,6 +47,55 @@ public record BundleMaterial(String sourceMaterial, RenderClass renderClass, Tex
     /** {@code $rimlight}: scaled by {@code lerp(1, phong layer alpha, mask)}. */
     public record Rim(float exponent, float boost, float mask) {}
 
+    /** The shader a camera material is drawn with. */
+    public enum CameraShader { UNLIT_GENERIC, UNLIT_TWO_TEXTURE, MONITOR_SCREEN }
+
+    /**
+     * A {@code $basetexture _rt_Camera} material (format.md section 6): its faces show the shared camera target.
+     * Texture coordinates are the surface table's texels divided by {@code sizeS, sizeT}. {@code color} and
+     * {@code color2} are {@code $color} and {@code $color2}; {@code sines} by channel, null where a channel has
+     * none. {@code texture2} is the content ID of a {@link DetailImages#images()} entry, null for none (white);
+     * {@code transform} null is the identity. {@code contrast}, {@code saturation} and {@code tint} are
+     * MonitorScreen's (0, 1, white for the others).
+     */
+    public record Camera(CameraShader shader, int sizeS, int sizeT, boolean additive, float[] color, float[] color2,
+                         Sine[] sines, String texture2, Texture2Transform transform, float contrast, float saturation, float[] tint) {
+        public Camera {
+            color = color.clone(); color2 = color2.clone(); sines = sines.clone(); tint = tint.clone();
+            if (sines.length != 3) throw new IllegalArgumentException("one sine slot per channel");
+        }
+        @Override public float[] color() { return color.clone(); }
+        @Override public float[] color2() { return color2.clone(); }
+        @Override public Sine[] sines() { return sines.clone(); }
+        @Override public float[] tint() { return tint.clone(); }
+
+        /**
+         * {@code $color * $color2} at time {@code t} seconds, each channel its sine's value if it has one
+         * ({@code CSineProxy::OnBind}, game/client/mathproxy.cpp:399-416).
+         */
+        public float[] modulation(double t) {
+            float[] out = new float[3];
+            for (int i = 0; i < 3; i++) {
+                Sine sine = sines[i];
+                float value = sine == null ? color[i] : sine.value(t);
+                out[i] = value * color2[i];
+            }
+            return out;
+        }
+    }
+
+    /** {@code (max - min) * (sin(2 pi (t - offset) / period) * 0.5 + 0.5) + min}. */
+    public record Sine(float period, float min, float max, float offset) {
+        public float value(double t) {
+            double period = this.period == 0 ? 1 : this.period;
+            float unit = (float) (Math.sin(2.0 * Math.PI * (t - offset) / period) * 0.5 + 0.5);
+            return (max - min) * unit + min;
+        }
+    }
+
+    /** {@code $texture2}'s coordinates: {@code uv * scale + offset + velocity * t}. */
+    public record Texture2Transform(float scale, float offsetS, float offsetT, float velocityS, float velocityT) {}
+
     /** Whether the material needs a row of surface settings in the baked shader. */
     public boolean surfaceEffects() {
         return envmap != null || blend || detail != null || selfillum != null || phong != null;
@@ -59,7 +108,7 @@ public record BundleMaterial(String sourceMaterial, RenderClass renderClass, Tex
     public BundleMaterial(String sourceMaterial, RenderClass renderClass, TextureReference texture, boolean doubleSided,
                           String surfaceProp, float reflectR, float reflectG, float reflectB) {
         this(sourceMaterial, renderClass, texture, doubleSided, surfaceProp, reflectR, reflectG, reflectB, Bump.NONE, null,
-            false, null, null, null, null);
+            false, null, null, null, null, null);
     }
 
     /** Without the average colour: mid grey. */

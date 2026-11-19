@@ -134,6 +134,9 @@ fn entities_of(lump: &[Vec<(String, String)>]) -> Vec<Entity> {
                     _ => {}
                 }
             }
+            if crate::bsp::npcs::is_actor(&entity.classname) {
+                entity.model = crate::bsp::npcs::has_model(&entity.classname, entity.model);
+            }
             entity
         })
         .collect()
@@ -203,7 +206,9 @@ fn roles_from(lump: &[Vec<(String, String)>], entities: &[Entity]) -> BTreeMap<u
         }
         let dynamic = DYNAMIC_PROP_CLASSES.contains(&entity.classname.as_str());
         let start_hidden = entity.start_disabled && dynamic;
-        let animates = dynamic && (entity.animates || animated.contains(&index));
+        // An actor always animates: it idles (`ACT_IDLE`) from the start.
+        let animates = crate::bsp::npcs::is_actor(&entity.classname)
+            || dynamic && (entity.animates || animated.contains(&index));
         if changed.contains(&index) || start_hidden || animates {
             roles.insert(
                 index,

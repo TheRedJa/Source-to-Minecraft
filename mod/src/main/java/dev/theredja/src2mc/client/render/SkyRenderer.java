@@ -1,6 +1,5 @@
 package dev.theredja.src2mc.client.render;
 
-import static net.minecraft.commands.Commands.literal;
 
 import com.mojang.blaze3d.platform.NativeImage;
 import com.mojang.blaze3d.platform.TextureUtil;
@@ -42,7 +41,6 @@ import net.neoforged.api.distmarker.Dist;
 import net.neoforged.bus.api.EventPriority;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.common.EventBusSubscriber;
-import net.neoforged.neoforge.client.event.RegisterClientCommandsEvent;
 import net.neoforged.neoforge.client.event.RegisterShadersEvent;
 import net.neoforged.neoforge.client.event.RenderLevelStageEvent;
 import org.joml.Matrix4f;
@@ -591,35 +589,13 @@ public final class SkyRenderer {
         }
     }
 
-    @SubscribeEvent
-    public static void registerCommands(RegisterClientCommandsEvent event) {
-        event.getDispatcher().register(literal("src2mc_sky")
-            .then(literal("on").executes(context -> setEnabled(context.getSource(), true)))
-            .then(literal("off").executes(context -> setEnabled(context.getSource(), false)))
-            .then(literal("status").executes(context -> status(context.getSource())))
-            .then(literal("room")
-                .then(literal("on").executes(context -> setRoom(context.getSource(), true)))
-                .then(literal("off").executes(context -> setRoom(context.getSource(), false))))
-            .then(literal("exposure").then(net.minecraft.commands.Commands.argument("scale",
-                    com.mojang.brigadier.arguments.FloatArgumentType.floatArg(0.01f, 64f))
-                .executes(context -> setExposure(context.getSource(),
-                    com.mojang.brigadier.arguments.FloatArgumentType.getFloat(context, "scale"))))));
-    }
-
-    private static int setRoom(CommandSourceStack source, boolean value) {
+    public static int setRoom(CommandSourceStack source, boolean value) {
         roomEnabled = value;
         source.sendSuccess(() -> Component.literal("src2mc 3D skybox " + (value ? "on" : "off")), false);
         return 1;
     }
 
-    private static int setExposure(CommandSourceStack source, float value) {
-        // One tone map scale for everything, as Source has.
-        BakedLighting.setExposure(value);
-        source.sendSuccess(() -> Component.literal("src2mc exposure " + value + " (3D skybox and baked light)"), false);
-        return 1;
-    }
-
-    private static int setEnabled(CommandSourceStack source, boolean value) {
+    public static int setEnabled(CommandSourceStack source, boolean value) {
         enabled = value;
         source.sendSuccess(() -> Component.literal("src2mc sky " + (value ? "on" : "off")), false);
         return 1;
@@ -630,7 +606,14 @@ public final class SkyRenderer {
         return ms < 0 ? "-" : String.format(java.util.Locale.ROOT, "%.2f", ms);
     }
 
-    private static int status(CommandSourceStack source) {
+    /** One line for {@code /src2mcc status}; leaves the cost counters alone. */
+    public static String summaryLine() {
+        return "sky " + (enabled ? "on" : "off") + (shader == null ? " (shader not loaded)" : "") + ": " + drawnMaps + " maps, " + drawnTriangles
+            + " tris drawn; 3D skybox " + (roomEnabled ? "on" : "off") + ", " + drawnRooms + " drawn";
+    }
+
+    /** The full sky status ({@code /src2mcc status sky}); restarts the per-frame cost average. */
+    public static String statusText() {
         List<String> lines = new ArrayList<>();
         lines.add("src2mc sky " + (enabled ? "on" : "off") + (shader == null ? ", shader not loaded" : "")
             + ": " + drawnMaps + " maps, " + drawnTriangles + " triangles drawn last frame");
@@ -656,8 +639,6 @@ public final class SkyRenderer {
             lines.add(entry.getKey().mapId() + ": " + faces.sky.faces().size() + " faces, " + faces.triangles + " triangles"
                 + (missing > 0 ? ", " + missing + " sides missing (black)" : ""));
         }
-        String text = String.join("\n", lines);
-        source.sendSuccess(() -> Component.literal(text), false);
-        return 1;
+        return String.join("\n", lines);
     }
 }

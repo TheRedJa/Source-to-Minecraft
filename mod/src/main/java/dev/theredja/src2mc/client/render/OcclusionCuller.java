@@ -138,8 +138,8 @@ final class OcclusionCuller<K> implements AutoCloseable {
         return true;
     }
 
-    boolean toggleEnabled() {
-        enabled = !enabled;
+    boolean setEnabled(boolean value) {
+        enabled = value;
         if (!enabled) for (State state : states.values()) state.occluded = false;
         return enabled;
     }

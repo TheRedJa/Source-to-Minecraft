@@ -67,6 +67,69 @@ pub struct MaterialAssets {
     /// `$phong` of a `VertexLitGeneric` material that Source draws with its
     /// phong shader; see [`Phong`].
     pub phong: Option<Phong>,
+    /// A material that shows the `point_camera` image (`$basetexture
+    /// _rt_Camera`); see [`Camera`].
+    pub camera: Option<Camera>,
+}
+
+/// A material whose `$basetexture` is `_rt_Camera`, the one render target
+/// every `point_camera` draws into (baseclientrendertargets.cpp:37-46,
+/// viewrender.cpp:3256-3282), drawn by one of the three shaders the monitor
+/// materials use. Proxies are reduced to what reaches the picture: `Sine` on
+/// `$color`, and `TextureScroll` or `LinearRamp` + `TextureTransform`
+/// (translate only) on `$texture2transform`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Camera {
+    pub shader: CameraShader,
+    /// `$texture2`, relative to `materials/`; never for `UnlitGeneric`.
+    pub texture2: Option<String>,
+    /// `$additive`.
+    pub additive: bool,
+    /// `$color`, white by default; a channel with a sine is overwritten by it.
+    pub color: [f32; 3],
+    /// `$color2` (or `srgb?$color2`, which holds on a DX9 system that blends
+    /// in sRGB), white by default.
+    pub color2: [f32; 3],
+    /// The `Sine` proxy that writes each `$color` channel last, if any.
+    pub sines: [Option<Sine>; 3],
+    /// `$texture2transform` as its proxy sets it; `None` is the identity.
+    pub transform: Option<Texture2Transform>,
+    /// `MonitorScreen`'s `$contrast` (0), `$saturation` (1) and `$tint` (white)
+    /// (MonitorScreen_dx9.cpp SHADER_INIT_PARAMS).
+    pub contrast: f32,
+    pub saturation: f32,
+    pub tint: [f32; 3],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CameraShader {
+    UnlitGeneric,
+    UnlitTwoTexture,
+    MonitorScreen,
+}
+
+/// `CSineProxy` (game/client/mathproxy.cpp:382-416): `(max - min) * (sin(2 pi
+/// (t - offset) / period) * 0.5 + 0.5) + min`, a period of 0 read as 1.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Sine {
+    pub period: f32,
+    pub min: f32,
+    pub max: f32,
+    pub offset: f32,
+}
+
+/// `$texture2transform` over time `t`: texture coordinates `uv` become
+/// `scale * uv + offset + velocity * t`. `TextureScroll`
+/// (texturescrollmaterialproxy.cpp:70-110) sets `scale` and a velocity of
+/// `rate * (cos angle, sin angle)`, its offset wrapped into 0..1 (no change for
+/// a repeating texture); `TextureTransform` (matrixproxy.cpp:75-112) with only
+/// a translation takes it from its translate variable, each component a
+/// `LinearRamp` (`rate * t + initialValue`, mathproxy.cpp:611-619) or fixed.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Texture2Transform {
+    pub scale: f32,
+    pub offset: [f32; 2],
+    pub velocity: [f32; 2],
 }
 
 /// A `VertexLitGeneric` material's phong specular and rim light, as
@@ -277,6 +340,9 @@ pub struct Vmt {
     /// Keys lowercased; values as written. Keys inside `replace`/`insert`
     /// blocks override the ones they patch, so later wins.
     pub keys: HashMap<String, String>,
+    /// The top-level `Proxies` block: each proxy's lowercased name and its
+    /// keys (lowercased, values as written), in the order they run.
+    pub proxies: Vec<(String, Vec<(String, String)>)>,
 }
 
 impl Vmt {
@@ -342,6 +408,8 @@ pub fn parse(text: &str) -> Vmt {
                 let (keys, after) = block_keys(&tokens, i + 1);
                 if name == "replace" || name == "insert" {
                     patches.push(keys);
+                } else if name == "proxies" {
+                    vmt.proxies = proxy_blocks(&tokens, i + 1);
                 } else if name == hdr_block {
                     hdr = Some(keys);
                 } else if dx9_blocks.contains(&name) {
@@ -365,6 +433,206 @@ pub fn parse(text: &str) -> Vmt {
         vmt.keys.extend(keys);
     }
     vmt
+}
+
+/// The proxies inside the `Proxies` block opening at `open`: each one's
+/// lowercased name and scalar keys, in order.
+fn proxy_blocks(tokens: &[String], open: usize) -> Vec<(String, Vec<(String, String)>)> {
+    let mut out = Vec::new();
+    let mut i = open + 1;
+    while i < tokens.len() {
+        let token = &tokens[i];
+        if token == "}" {
+            break;
+        }
+        if token == "{" {
+            i = skip_block(tokens, i);
+            continue;
+        }
+        match tokens.get(i + 1) {
+            Some(next) if next == "{" => {
+                let (keys, after) = block_keys(tokens, i + 1);
+                out.push((token.to_ascii_lowercase(), keys));
+                i = after;
+            }
+            Some(_) => i += 2,
+            None => break,
+        }
+    }
+    out
+}
+
+/// A material variable a proxy names, `$name` or `$name[k]`: the lowercased
+/// name and the component, `None` for the whole variable.
+fn proxy_var(value: &str) -> (String, Option<usize>) {
+    let value = value.trim().trim_matches('"').trim().to_ascii_lowercase();
+    match value.split_once('[') {
+        Some((name, rest)) => (
+            name.trim().to_string(),
+            rest.trim_end_matches(']').trim().parse::<usize>().ok(),
+        ),
+        None => (value, None),
+    }
+}
+
+/// `CFloatInput::Init`: a number, or a material variable's (fixed) value;
+/// `default` when the key is absent or unreadable.
+fn float_input(vmt: &Vmt, keys: &[(String, String)], key: &str, default: f32) -> f32 {
+    let Some((_, value)) = keys.iter().rev().find(|(k, _)| k == key) else {
+        return default;
+    };
+    let value = value.trim().trim_matches('"').trim();
+    if value.starts_with('$') {
+        return vmt.get(&value.to_ascii_lowercase()).and_then(scalar).unwrap_or(default);
+    }
+    scalar(value).unwrap_or(default)
+}
+
+/// A proxy key's raw value, the last one written.
+fn proxy_key<'k>(keys: &'k [(String, String)], key: &str) -> Option<&'k str> {
+    keys.iter().rev().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+}
+
+/// The camera picture a `_rt_Camera` material draws, or `None` for any other
+/// material or a shader other than the three the monitor materials use.
+fn camera_of(vmt: &Vmt) -> Option<Camera> {
+    let base = vmt.get("$basetexture")?.trim().trim_matches('"').trim();
+    if !base.eq_ignore_ascii_case("_rt_camera") {
+        return None;
+    }
+    let shader = match vmt.shader.as_str() {
+        "unlitgeneric" => CameraShader::UnlitGeneric,
+        "unlittwotexture" => CameraShader::UnlitTwoTexture,
+        "monitorscreen" => CameraShader::MonitorScreen,
+        _ => return None,
+    };
+    let texture2 = (shader != CameraShader::UnlitGeneric)
+        .then(|| vmt.get("$texture2"))
+        .flatten()
+        .map(|v| v.trim().trim_matches('"').replace('\\', "/"))
+        .filter(|v| !v.is_empty());
+    let mut sines: [Option<Sine>; 3] = [None; 3];
+    // LinearRamp results by variable and component, for TextureTransform.
+    let mut ramps: Vec<(String, Option<usize>, f32, f32)> = Vec::new();
+    let mut transform = None;
+    for (name, keys) in &vmt.proxies {
+        match name.as_str() {
+            "sine" => {
+                let Some(result) = proxy_key(keys, "resultvar") else { continue };
+                let (var, component) = proxy_var(result);
+                if var != "$color" {
+                    continue;
+                }
+                let period = float_input(vmt, keys, "sineperiod", 1.0);
+                let sine = Sine {
+                    // CSineProxy::OnBind: "if (flSinePeriod == 0) flSinePeriod = 1;"
+                    period: if period == 0.0 { 1.0 } else { period },
+                    min: float_input(vmt, keys, "sinemin", 0.0),
+                    max: float_input(vmt, keys, "sinemax", 1.0),
+                    offset: float_input(vmt, keys, "timeoffset", 0.0),
+                };
+                match component {
+                    Some(k) if k < 3 => sines[k] = Some(sine),
+                    Some(_) => {}
+                    // CResultProxy::SetFloatResult: no component sets them all.
+                    None => sines = [Some(sine); 3],
+                }
+            }
+            "linearramp" => {
+                let Some(result) = proxy_key(keys, "resultvar") else { continue };
+                let (var, component) = proxy_var(result);
+                ramps.push((
+                    var,
+                    component,
+                    float_input(vmt, keys, "rate", 1.0),
+                    float_input(vmt, keys, "initialvalue", 0.0),
+                ));
+            }
+            "texturescroll" => {
+                let Some(var) = proxy_key(keys, "texturescrollvar") else { continue };
+                if proxy_var(var).0 != "$texture2transform" {
+                    continue;
+                }
+                let rate = float_input(vmt, keys, "texturescrollrate", 1.0);
+                let angle = float_input(vmt, keys, "texturescrollangle", 0.0);
+                // `curtime * cos( angle * ( M_PI / 180.0f ) ) * rate`, in double.
+                let radians = f64::from(angle) * (std::f64::consts::PI / 180.0);
+                transform = Some(Texture2Transform {
+                    scale: float_input(vmt, keys, "texturescale", 1.0),
+                    offset: [0.0, 0.0],
+                    velocity: [
+                        (radians.cos() * f64::from(rate)) as f32,
+                        (radians.sin() * f64::from(rate)) as f32,
+                    ],
+                });
+            }
+            "texturetransform" => {
+                let Some(result) = proxy_key(keys, "resultvar") else { continue };
+                if proxy_var(result).0 != "$texture2transform" {
+                    continue;
+                }
+                // Only a translation is carried; a scale or rotation variable
+                // leaves the transform as it was.
+                if proxy_key(keys, "scalevar").is_some() || proxy_key(keys, "rotatevar").is_some() {
+                    continue;
+                }
+                let mut offset = [0.0f32; 2];
+                let mut velocity = [0.0f32; 2];
+                if let Some(translate) = proxy_key(keys, "translatevar") {
+                    let (var, _) = proxy_var(translate);
+                    let fixed = vmt
+                        .get(&var)
+                        .map(|v| {
+                            let v = v.trim().trim_matches('"').trim();
+                            let n: Vec<f32> = v
+                                .trim_start_matches('[')
+                                .trim_end_matches(']')
+                                .split_whitespace()
+                                .filter_map(|n| n.parse::<f32>().ok())
+                                .filter(|n| n.is_finite())
+                                .collect();
+                            match n.as_slice() {
+                                [x, y, ..] => [*x, *y],
+                                [x] => [*x, *x],
+                                _ => [0.0, 0.0],
+                            }
+                        })
+                        .unwrap_or([0.0, 0.0]);
+                    for axis in 0..2 {
+                        let ramp = ramps.iter().rev().find(|(name, component, _, _)| {
+                            *name == var && (*component == Some(axis) || component.is_none())
+                        });
+                        match ramp {
+                            Some(&(_, _, rate, initial)) => {
+                                offset[axis] = initial;
+                                velocity[axis] = rate;
+                            }
+                            None => offset[axis] = fixed[axis],
+                        }
+                    }
+                }
+                transform = Some(Texture2Transform { scale: 1.0, offset, velocity });
+            }
+            _ => {}
+        }
+    }
+    let monitor = shader == CameraShader::MonitorScreen;
+    Some(Camera {
+        shader,
+        texture2,
+        additive: vmt.flag("$additive"),
+        color: vmt.get("$color").and_then(vector3).unwrap_or([1.0; 3]),
+        color2: vmt
+            .get("$color2")
+            .or_else(|| vmt.get("srgb?$color2"))
+            .and_then(vector3)
+            .unwrap_or([1.0; 3]),
+        sines,
+        transform: transform.filter(|_| shader != CameraShader::UnlitGeneric),
+        contrast: if monitor { vmt.get("$contrast").and_then(scalar).unwrap_or(0.0) } else { 0.0 },
+        saturation: if monitor { vmt.get("$saturation").and_then(scalar).unwrap_or(1.0) } else { 1.0 },
+        tint: if monitor { vmt.get("$tint").and_then(vector3).unwrap_or([1.0; 3]) } else { [1.0; 3] },
+    })
 }
 
 /// The index after the block opening at `open`.
@@ -670,6 +938,7 @@ impl<'a> Materials<'a> {
             envmap,
             ssbump: bump_map.is_some() && lightmapped && vmt.flag("$ssbump"),
             phong,
+            camera: camera_of(&vmt),
             bump_map,
             base_texture,
             alpha_test: vmt.flag("$alphatest"),
@@ -1002,5 +1271,109 @@ mod tests {
         };
         let materials = Materials::new(&vfs, None);
         assert!(materials.assets("nothing/at/all", None).is_none());
+    }
+
+    #[test]
+    fn a_camera_material_carries_its_shader_and_proxies() {
+        // dev/dev_combinemonitor_b, as Half-Life 2 ships it, plus a static $color.
+        let vmt = parse(
+            r#""Unlittwotexture"
+            {
+                "$basetexture" "_rt_Camera"
+                "$additive" "1"
+                "$color" "[1 0.5 1]"
+                "srgb?$color2" "[2.5 2.5 2.5]"
+                "$texture2" "dev/dev_combinescanline"
+                "Proxies"
+                {
+                    "Sine" { "resultVar" "$color[0]" "sineperiod" 1 "sinemin" .2 "sinemax" .3 }
+                    "Sine" { "resultVar" "$color[1]" "sineperiod" 0 "sinemin" .3 "sinemax" .4 }
+                    "TextureScroll" { "texturescrollvar" "$texture2transform" "texturescrollrate" .06 "texturescrollangle" -90 }
+                }
+            }"#,
+        );
+        assert!(vmt.get("sine").is_none(), "proxy keys stay out of the material's");
+        let camera = camera_of(&vmt).expect("a camera material");
+        assert_eq!(camera.shader, CameraShader::UnlitTwoTexture);
+        assert_eq!(camera.texture2.as_deref(), Some("dev/dev_combinescanline"));
+        assert!(camera.additive);
+        assert_eq!(camera.color, [1.0, 0.5, 1.0]);
+        assert_eq!(camera.color2, [2.5; 3]);
+        assert_eq!(
+            camera.sines[0],
+            Some(Sine { period: 1.0, min: 0.2, max: 0.3, offset: 0.0 })
+        );
+        // A period of 0 is read as 1, as CSineProxy::OnBind does.
+        assert_eq!(camera.sines[1].map(|s| s.period), Some(1.0));
+        assert!(camera.sines[2].is_none());
+        let transform = camera.transform.expect("scrolls");
+        assert_eq!(transform.scale, 1.0);
+        assert!(transform.velocity[0].abs() < 1e-8);
+        assert!((transform.velocity[1] + 0.06).abs() < 1e-7);
+    }
+
+    #[test]
+    fn a_ramped_texture_transform_scrolls_by_the_ramp() {
+        // dev/dev_tvmonitor1a's interlace chain: LinearRamp into $tex2offset[1],
+        // TextureTransform translating $texture2transform by it.
+        let vmt = parse(
+            r#""UnlitTwoTexture"
+            {
+                "$basetexture" "_rt_Camera"
+                "$texture2" "dev/dev_scanline"
+                "$tex2offset" "[0.25 0]"
+                "Proxies"
+                {
+                    "Sine" { "resultVar" "$color" "sineperiod" 2 "sinemin" .9 "sinemax" 1 }
+                    "LinearRamp" { "resultVar" "$tex2offset[1]" "rate" -.91 }
+                    "TextureTransform" { "translateVar" "$tex2offset" "resultVar" "$texture2transform" }
+                }
+            }"#,
+        );
+        let camera = camera_of(&vmt).expect("a camera material");
+        assert!(!camera.additive);
+        // A whole-vector result writes every channel.
+        assert!(camera.sines.iter().all(|s| s.is_some_and(|s| s.period == 2.0)));
+        let transform = camera.transform.expect("scrolls");
+        assert_eq!(transform.offset, [0.25, 0.0]);
+        assert_eq!(transform.velocity, [0.0, -0.91]);
+    }
+
+    #[test]
+    fn only_render_target_materials_are_camera_materials() {
+        assert!(camera_of(&parse(r#""UnlitGeneric" { "$basetexture" "dev/dev_monitor" }"#)).is_none());
+        let plain = camera_of(&parse(r#""UnlitGeneric" { "$basetexture" "_RT_CAMERA" "$texture2" "x" }"#))
+            .expect("matched ignoring case");
+        assert_eq!(plain.shader, CameraShader::UnlitGeneric);
+        assert!(plain.texture2.is_none(), "UnlitGeneric has no second texture");
+        let monitor = camera_of(&parse(
+            r#""MonitorScreen" { "$basetexture" "_rt_Camera" "$saturation" "0" "$tint" "[.8 .9 1]" }"#,
+        ))
+        .unwrap();
+        assert_eq!(monitor.shader, CameraShader::MonitorScreen);
+        assert_eq!((monitor.contrast, monitor.saturation, monitor.tint), (0.0, 0.0, [0.8, 0.9, 1.0]));
+        assert!(camera_of(&parse(r#""LightmappedGeneric" { "$basetexture" "_rt_Camera" }"#)).is_none());
+    }
+
+    #[test]
+    fn resolves_real_half_life_2_monitor_materials() {
+        let Some((vfs, _)) = real_materials() else {
+            return;
+        };
+        let materials = Materials::new(&vfs, None);
+        let combine = materials.assets("dev/dev_combinemonitor_3", None).unwrap();
+        let camera = combine.camera.expect("dev_combinemonitor_3 shows the camera");
+        assert_eq!(camera.shader, CameraShader::UnlitTwoTexture);
+        assert_eq!(camera.texture2.as_deref(), Some("dev/dev_combinescanline"));
+        assert!(camera.additive);
+        assert_eq!(camera.color2, [2.5; 3]);
+        assert!(camera.sines.iter().all(|s| s.is_some_and(|s| s.min == 0.4 && s.max == 0.41)));
+        let tv = materials.assets("dev/dev_tvmonitor2a", None).unwrap().camera.unwrap();
+        assert_eq!(tv.shader, CameraShader::MonitorScreen);
+        assert_eq!(tv.texture2.as_deref(), Some("Effects/security_noise2"));
+        assert_eq!(tv.tint, [0.8, 0.9, 1.0]);
+        let plain = materials.assets("dev/dev_tvmonitornonoise", None).unwrap().camera.unwrap();
+        assert_eq!(plain.shader, CameraShader::UnlitGeneric);
+        assert!(materials.assets("concrete/concretewall001a", None).unwrap().camera.is_none());
     }
 }

@@ -19,16 +19,16 @@ import net.minecraft.nbt.CompoundTag;
  * at a map time and the rate, and each client advances it on its own, as Source's client
  * interpolates the cycle between updates.
  */
-final class DynamicProp extends LogicEntity {
+class DynamicProp extends LogicEntity {
     private static final double THINK_INTERVAL = 0.1, MAX_ANIMTIME_INTERVAL = 0.2;
 
     /** The model's animation, or null for a model without one. */
-    private final AnimationAsset animation;
+    final AnimationAsset animation;
     private int sequence, goalSequence = -1, transitionDirection, parity, pose = -1;
     private float cycle, playbackRate;
     private double animTime, prevAnimTime;
     private boolean sequenceLoops, sequenceFinished;
-    private String defaultAnim;
+    String defaultAnim;
     private boolean randomAnimator;
     private double nextRandAnim, minRandAnimTime, maxRandAnimTime;
     /** What the clients were last told: the cycle at a map time, and the rate it advances at from there. */
@@ -76,7 +76,7 @@ final class DynamicProp extends LogicEntity {
     }
 
     /** {@code PropSetAnim}: a sequence by name or activity; a model without one goes to sequence 0. */
-    private void setAnimation(String name) {
+    void setAnimation(String name) {
         int found = lookupSequence(name);
         if (found >= 0) {
             setSequence(found);

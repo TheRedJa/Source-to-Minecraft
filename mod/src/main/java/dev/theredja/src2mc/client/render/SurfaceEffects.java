@@ -39,13 +39,13 @@ public final class SurfaceEffects {
     /** UV2's second short is signed; a row is written negated, which sky light never is. */
     private static final int MAX_MATERIAL = -Short.MIN_VALUE - 1;
 
-    /** {@code /src2mc_look reflections off}: no draw reflects; meshes keep their rows. */
+    /** {@code /src2mcc look reflections off}: no draw reflects; meshes keep their rows. */
     public static volatile boolean enabled = true;
-    /** {@code /src2mc_look detail|blend|selfillum off}: switch one effect off, read per draw. */
+    /** {@code /src2mcc look detail|blend|selfillum off}: switch one effect off, read per draw. */
     public static volatile boolean detailOn = true, blendOn = true, selfillumOn = true;
-    /** {@code /src2mc_look lightonly|dither on}: grey albedo, and dithered output on every path. */
+    /** {@code /src2mcc debug lightonly and /src2mcc look dither on}: grey albedo, and dithered output on every path. */
     public static volatile boolean lightOnly = false, ditherAll = false;
-    /** {@code /src2mc_look srgb on}: the exact sRGB curve for texture decode and output encode, as Source's hardware sRGB does; off is pow 2.2. */
+    /** {@code /src2mcc look srgb on}: the exact sRGB curve for texture decode and output encode, as Source's hardware sRGB does; off is pow 2.2. */
     public static volatile boolean srgbCurve = true;
 
     private record Textures(int cubes, int settings, int details, int warps) {}

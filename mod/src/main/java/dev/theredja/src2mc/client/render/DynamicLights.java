@@ -51,7 +51,7 @@ public final class DynamicLights {
     private static Vec3 appliedCamera;
     private static ShaderInstance appliedShader;
 
-    /** Counters for {@code /src2mc_look status}. */
+    /** Counters for {@code /src2mcc status look}. */
     public static int lightsLastFrame() { return entries.size(); }
 
     /** Builds this frame's lights from the received view states; call before anything of the frame draws. */

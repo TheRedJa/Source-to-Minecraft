@@ -66,6 +66,7 @@ fn fixture_map(map_id: &str, source_model: &str, mesh_bytes: Vec<u8>) -> MapExpo
         detail: None,
         selfillum: None,
         phong: None,
+        camera: None,
     };
     let content_id = bundle::content_id(&mesh_bytes);
     MapExport {
@@ -343,6 +344,7 @@ fn identical_mesh_bytes_keep_distinct_material_bindings() {
         detail: None,
         selfillum: None,
         phong: None,
+        camera: None,
     });
     map.models.push(ModelAsset {
         source_model: "models/b.mdl".into(),
@@ -649,4 +651,81 @@ fn movers_are_written_into_the_bundle() {
         .unwrap();
     assert_eq!(&faces[..8], &surface::MAGIC);
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// Half-Life 2's d1_trainstation_01: every face of every func_monitor brush
+/// with a `_rt_Camera` material gets a camera reference; the Breencast
+/// jumbotrons' is UnlitTwoTexture, additive, over the scanline texture.
+#[test]
+fn half_life_2_monitor_brushes_get_camera_materials() {
+    let path = std::path::Path::new(
+        "/mnt/games/SteamLibrary/steamapps/common/Half-Life 2/hl2/maps/d1_trainstation_01.bsp",
+    );
+    if !path.exists() {
+        return;
+    }
+    let map = crate::bsp::Map::load(path).unwrap();
+    let vfs = crate::source::vfs::Vfs::for_map(&map.path, &[]);
+    let resolver = crate::source::vmt::Materials::new(&vfs, Some(&map.bsp.pack));
+    let mut decoder = crate::source::vtf::Textures::new(&vfs, 2048);
+    let images = crate::source::vtf::Textures::new(&vfs, 2048);
+    let mut scanline_png = None;
+    let extracted = materials::assign_materials(
+        &map,
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+        &BTreeSet::new(),
+        &[],
+        &resolver,
+        &mut decoder,
+        atlas::TextureQuality::Default,
+        &mut |request| {
+            let image = images.resized(&request.texture, request.output, request.alpha_test)?;
+            let bytes = crate::source::vtf::to_png(&image).ok()?;
+            if request.texture == "dev/dev_combinescanline" {
+                assert_eq!(request.output, [512, 512]);
+                scanline_png = Some(bytes.clone());
+            }
+            Some((bytes, image))
+        },
+    );
+    let mut monitor_faces = 0;
+    let mut camera_names = BTreeSet::new();
+    for entity in map.bsp.entities.iter() {
+        let keys: Vec<(String, String)> = entity.properties().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let value = |key: &str| keys.iter().find(|(k, _)| k.eq_ignore_ascii_case(key)).map(|(_, v)| v.as_str());
+        if value("classname") != Some("func_monitor") {
+            continue;
+        }
+        let model: usize = value("model").unwrap().trim_start_matches('*').parse().unwrap();
+        let model = &map.bsp.models[model];
+        for face in &map.bsp.faces[model.first_face as usize..(model.first_face + model.face_count) as usize] {
+            let Some(index) = usize::try_from(face.texture_info).ok().and_then(|info| map.material_index(info)) else {
+                continue;
+            };
+            let material = &extracted.materials[index];
+            let Some(camera) = &material.camera else { continue };
+            monitor_faces += 1;
+            camera_names.insert(material.source_material.clone());
+            assert!(material.texture.is_none());
+            assert_eq!(camera.size, [256, 256]);
+            assert_eq!(camera.shader, metadata::CameraShader::UnlitTwoTexture);
+            let texture2 = camera.texture2.as_ref().expect("its scanline texture");
+            assert!(extracted.details.contains_key(texture2), "texture2 is written as a detail");
+            if material.source_material.starts_with("dev/dev_combinemonitor") {
+                assert!(camera.additive);
+                assert_eq!(Some(bundle::content_id(scanline_png.as_ref().unwrap())), Some(texture2.clone()));
+                let transform = camera.transform.as_ref().expect("the scanlines scroll");
+                assert!((transform.velocity[1] + 0.06).abs() < 1e-6);
+            }
+        }
+    }
+    assert!(monitor_faces > 0, "the monitors show the camera");
+    assert!(camera_names.contains("dev/dev_combinemonitor_3"), "{camera_names:?}");
+    assert!(camera_names.contains("dev/dev_tvmonitor1a"), "{camera_names:?}");
+    // The tv monitor is opaque, its scanlines rolling at -0.91 a second.
+    let tv = extracted.materials.iter().find(|m| m.source_material == "dev/dev_tvmonitor1a").unwrap();
+    let camera = tv.camera.as_ref().unwrap();
+    assert!(!camera.additive);
+    assert_eq!(camera.transform.as_ref().unwrap().velocity, [0.0, f64::from(-0.91f32)]);
 }

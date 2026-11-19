@@ -1,6 +1,5 @@
 package dev.theredja.src2mc.client.render;
 
-import static net.minecraft.commands.Commands.literal;
 
 import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.blaze3d.vertex.VertexBuffer;
@@ -40,7 +39,6 @@ import net.neoforged.bus.api.EventPriority;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.common.EventBusSubscriber;
 import net.neoforged.neoforge.client.event.RenderLevelStageEvent;
-import net.neoforged.neoforge.client.event.RegisterClientCommandsEvent;
 import org.joml.Matrix4f;
 
 /**
@@ -104,29 +102,30 @@ public final class PropRenderer {
 
     private PropRenderer() {}
 
-    @SubscribeEvent
-    public static void registerCommand(RegisterClientCommandsEvent event) {
-        event.getDispatcher().register(literal("src2mc_prop_status").executes(context -> {
-            for (Component line : statusLines()) context.getSource().sendSuccess(() -> line, false);
-            return 1;
-        }));
-        event.getDispatcher().register(literal("src2mc_prop_toggle").executes(context -> {
-            renderingEnabled = !renderingEnabled;
-            context.getSource().sendSuccess(() -> Component.literal("src2mc prop rendering "
-                + (renderingEnabled ? "enabled" : "disabled — built geometry is kept warm; run again to re-enable")), false);
-            return 1;
-        }));
-        event.getDispatcher().register(literal("src2mc_prop_occlusion_toggle").executes(context -> {
-            boolean enabled = OCCLUSION.toggleEnabled();
-            context.getSource().sendSuccess(() -> Component.literal("src2mc prop occlusion "
-                + (enabled ? "enabled" : "disabled — props remain rendered, PVS and frustum culling remain active")), false);
-            return 1;
-        }));
-        event.getDispatcher().register(literal("src2mc_prop_overlay_toggle").executes(context -> {
-            boolean enabled = PropStatusOverlay.toggle();
-            context.getSource().sendSuccess(() -> Component.literal("src2mc prop status overlay " + (enabled ? "enabled" : "disabled")), false);
-            return 1;
-        }));
+    /** Draws props or not; built geometry is kept warm while off. */
+    public static String setDrawing(boolean value) {
+        renderingEnabled = value;
+        return "src2mc prop rendering " + (value ? "on" : "off (built geometry is kept warm)");
+    }
+
+    public static String setOcclusion(boolean value) {
+        OCCLUSION.setEnabled(value);
+        return "src2mc prop GPU occlusion " + (value ? "on" : "off (props remain rendered, PVS and frustum culling remain active)");
+    }
+
+    public static String setOverlay(boolean value) {
+        PropStatusOverlay.setEnabled(value);
+        return "src2mc prop status overlay " + (value ? "on" : "off");
+    }
+
+    /** One line for {@code /src2mcc status}: what the prop renderer drew last frame. */
+    public static String summaryLine() {
+        PropRenderPerf.Frame last = PERF.snapshot().frame();
+        OcclusionCuller.Stats occlusion = OCCLUSION.stats();
+        return "props " + (renderingEnabled ? "on" : "off") + ": " + BUILT_PROPS.size() + " built in " + AGGREGATES.size() + " batches, "
+            + last.drawCalls() + " draws, " + formatMillions(last.triangles()) + " tris, " + formatMs(last.renderMs())
+            + "; occlusion " + (occlusion.enabled() ? "on, " + occlusion.last().rejectedDraws() + " rejected" : "off")
+            + "; meshes " + RUNTIME_MESHES.stats().ready() + " ready, " + RUNTIME_MESHES.stats().pending() + " loading";
     }
 
     /**
@@ -140,7 +139,7 @@ public final class PropRenderer {
             + (int) RUNTIME_MESHES.stats().pending() + AnimatedPropRenderer.pendingLoads();
     }
 
-    static List<Component> statusLines() {
+    public static List<Component> statusLines() {
         long active = ROOT_STATUS.values().stream().filter(status -> status == RootStatus.ACTIVE).count();
         long unloaded = ROOT_STATUS.values().stream().filter(status -> status == RootStatus.UNLOADED).count();
         long missing = ROOT_STATUS.values().stream().filter(status -> status == RootStatus.MISSING).count();
@@ -824,6 +823,7 @@ public final class PropRenderer {
             if (suppressDepthWrite) RenderSystem.depthMask(true);
         }
         VertexBuffer.unbind();
+        if (secondaryView && !translucent) dev.theredja.src2mc.client.view.SecondaryView.Counts.aggregates += drawCalls;
         PERF.add(PropRenderPerf.M_VISIBLE_AGGREGATES, drawCalls);
         PERF.add(PropRenderPerf.M_DRAW_CALLS, drawCalls);
         if (translucent) PERF.add(PropRenderPerf.M_DRAW_CALLS_TRANSLUCENT, drawCalls);
@@ -873,7 +873,7 @@ public final class PropRenderer {
     /**
      * Drops every built batch and every known root so they are rebuilt from the same generation
      * against the light that exists now. Paired with the surface renderer's own drop; see
-     * {@code /src2mc_rebuild_meshes}.
+     * {@code /src2mcc debug rebuild}.
      *
      * @return how many batches were dropped.
      */

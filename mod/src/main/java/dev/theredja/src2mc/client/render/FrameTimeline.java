@@ -1,6 +1,5 @@
 package dev.theredja.src2mc.client.render;
 
-import static net.minecraft.commands.Commands.literal;
 
 import dev.theredja.src2mc.Src2mc;
 import java.util.ArrayList;
@@ -13,7 +12,6 @@ import net.neoforged.api.distmarker.Dist;
 import net.neoforged.bus.api.EventPriority;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.common.EventBusSubscriber;
-import net.neoforged.neoforge.client.event.RegisterClientCommandsEvent;
 import net.neoforged.neoforge.client.event.RenderFrameEvent;
 import net.neoforged.neoforge.client.event.RenderLevelStageEvent;
 import org.lwjgl.opengl.GL15C;
@@ -26,7 +24,7 @@ import org.lwjgl.opengl.GL33C;
  * shader pack drew in between -- the shadow pass before the first main stage, the pack's deferred
  * passes before translucent terrain, its composite passes before {@code AFTER_LEVEL}, the GUI after.
  * Timestamps do not nest-conflict with {@link GpuTimer}'s elapsed-time queries. Off until
- * {@code /src2mc_gpu_frame on}; results are read a few frames late and never waited for.
+ * {@code /src2mcc debug gpu on}; results are read a few frames late and never waited for.
  */
 @EventBusSubscriber(modid = Src2mc.MOD_ID, value = Dist.CLIENT)
 public final class FrameTimeline {
@@ -111,15 +109,12 @@ public final class FrameTimeline {
         frame.pending = false;
     }
 
-    @SubscribeEvent
-    public static void registerCommands(RegisterClientCommandsEvent event) {
-        event.getDispatcher().register(literal("src2mc_gpu_frame")
-            .then(literal("on").executes(context -> setEnabled(context.getSource(), true)))
-            .then(literal("off").executes(context -> setEnabled(context.getSource(), false)))
-            .executes(context -> report(context.getSource())));
-    }
+    public static boolean enabled() { return enabled; }
 
-    private static int setEnabled(CommandSourceStack source, boolean value) {
+    /** Average GPU frame milliseconds since the last report or switch-on, or -1 with no frame read yet; does not reset. */
+    public static double averageFrameMs() { return frames == 0 ? -1 : totalNanos / 1e6 / frames; }
+
+    public static int setEnabled(CommandSourceStack source, boolean value) {
         enabled = value;
         SPANS.clear();
         frames = totalNanos = 0;
@@ -129,7 +124,7 @@ public final class FrameTimeline {
     }
 
     /** Average GPU milliseconds per span since the last report, then starts over. */
-    private static int report(CommandSourceStack source) {
+    public static int report(CommandSourceStack source) {
         StringBuilder text = new StringBuilder("src2mc GPU frame timeline (" + (enabled ? "on" : "off") + "), " + frames
             + " frames, GPU frame " + ms(totalNanos) + " ms avg:");
         for (var span : SPANS.entrySet()) text.append("\n  ").append(ms(span.getValue())).append("  ").append(span.getKey());

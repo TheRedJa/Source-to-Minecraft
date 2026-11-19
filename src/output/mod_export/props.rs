@@ -3,9 +3,10 @@
 use super::*;
 use crate::source::extract::ModProp;
 
-/// A model as a prop wears it: path, skin, tint, and form (0 as loaded, 1 a
-/// still dynamic prop's sequence 0, 2 an animated prop's reference pose).
-pub(super) type ModelUse = (String, i32, [u8; 3], u8);
+/// A model as a prop wears it: path, skin, tint, form (0 as loaded, 1 a
+/// still dynamic prop's sequence 0, 2 an animated prop's reference pose),
+/// and the weapon an NPC holds in it, empty for none.
+pub(super) type ModelUse = (String, i32, [u8; 3], u8, String);
 
 pub(super) fn model_use(item: &crate::source::extract::ModProp, skin: i32) -> ModelUse {
     let form = if item.animation.is_some() {
@@ -15,7 +16,13 @@ pub(super) fn model_use(item: &crate::source::extract::ModProp, skin: i32) -> Mo
     } else {
         0
     };
-    (item.prop.model.clone(), skin, item.prop.color, form)
+    (
+        item.prop.model.clone(),
+        skin,
+        item.prop.color,
+        form,
+        item.weapon.clone().unwrap_or_default(),
+    )
 }
 
 /// One model reference's mesh, material slots and animation.
@@ -297,7 +304,7 @@ pub(super) fn apart_collision(
             let model = crate::source::anim::pose_model(
                 &item.model,
                 &animated.animation,
-                animated.animation.settled(sequence),
+                &animated.animation.settled(sequence),
             );
             if let Some(volume) = prop_volume_of(config, transform, item, &model) {
                 poses.push((sequence, separate_prop_collision(collision, grid, volume)));
@@ -538,6 +545,7 @@ fn fallback_material(name: String) -> metadata::MaterialReference {
         detail: None,
         selfillum: None,
         phong: None,
+        camera: None,
     }
 }
 

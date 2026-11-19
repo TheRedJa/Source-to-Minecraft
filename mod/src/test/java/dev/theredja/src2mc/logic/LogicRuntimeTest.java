@@ -522,24 +522,25 @@ final class LogicRuntimeTest {
     /** An {@code .s2anim} of one bone and four sequences: idle, open (one second), spin (looping, half a second), press (half a second). */
     private static byte[] animationBytes() {
         java.nio.ByteBuffer out = java.nio.ByteBuffer.allocate(4096).order(java.nio.ByteOrder.LITTLE_ENDIAN);
-        out.put(new byte[] {'S', '2', 'A', 'N', 'I', 'M', 0, 0}).putInt(1).putInt(1).putInt(0).putInt(4).putInt(0);
+        out.put(new byte[] {'S', '2', 'A', 'N', 'I', 'M', 0, 0}).putInt(2).putInt(1).putInt(0).putInt(4).putInt(0);
         out.putInt(-1).putFloat(0).putFloat(0).putFloat(0).putShort((short) 0).putShort((short) 0).putShort((short) 0).putShort((short) 32767);
         float[] identity = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
         for (float v : identity) out.putFloat(v);
-        Object[][] sequences = {{"idle", "", 0, 0f, 1}, {"open", "", 0, 1f, 2}, {"spin", "", 1, 2f, 2}, {"press", "ACT_PRESS", 0, 2f, 1}};
+        Object[][] sequences = {{"idle", "", 0, 0f, 1}, {"open", "ACT_IDLE", 0, 1f, 2}, {"spin", "", 1, 2f, 2}, {"press", "ACT_PRESS", 0, 2f, 1}};
         for (Object[] sequence : sequences) {
             for (int name = 0; name < 2; name++) {
                 byte[] bytes = ((String) sequence[name]).getBytes(java.nio.charset.StandardCharsets.UTF_8);
                 out.putShort((short) bytes.length).put(bytes);
             }
             out.putInt(1).putInt((Integer) sequence[2]).putFloat(0.2f).putFloat(0.2f).putInt(0).putInt(0).putInt(0).putFloat((Float) sequence[3]);
-            out.putFloat(1).putInt((Integer) sequence[4]);
+            out.putInt((Integer) sequence[4]).putFloat(1);
             int frames = (Integer) sequence[4];
             out.put((byte) 0).put((byte) (frames > 1 ? 1 : 0));
             out.putFloat(0).putFloat(0).putFloat(0);
             for (int frame = 0; frame < (frames > 1 ? frames : 1); frame++)
                 out.putShort((short) 0).putShort(frame == 0 ? 0 : (short) 23170).putShort((short) 0).putShort(frame == 0 ? (short) 32767 : (short) 23170);
         }
+        out.putInt(0);
         return java.util.Arrays.copyOf(out.array(), out.position());
     }
 
@@ -559,6 +560,30 @@ final class LogicRuntimeTest {
         MapLogic logic = new MapLogic(PLACEMENT, map);
         logic.spawn(MapLogic.LoadType.NEW_GAME);
         return logic;
+    }
+
+    /**
+     * An NPC idles from spawn: SelectWeightedSequence(ACT_IDLE), and another idle when one that does not loop has played out.
+     * It takes no CDynamicProp input.
+     */
+    @Test void anNpcIdlesFromSpawnAndPicksAnotherIdleWhenOneEnds() throws Exception {
+        MapLogic logic = runAnimated(entity("npc_citizen", "targetname", "cit"));
+        LogicEntity npc = logic.entity(1);
+        assertTrue(npc instanceof Npc);
+        var spawned = npc.propState();
+        assertEquals(1, spawned.sequence(), "the only ACT_IDLE sequence");
+        seconds(logic, 1.3);
+        var later = npc.propState();
+        assertEquals(1, later.sequence());
+        assertTrue(later.parity() != spawned.parity(), "the idle that ended was started again");
+        npc.input("SetAnimation", "spin", null, null);
+        assertEquals(1, npc.propState().sequence(), "not a dynamic prop's input");
+    }
+
+    /** A template NPC (SF_NPC_TEMPLATE) is never spawned: it waits for its npc_template_maker. */
+    @Test void aTemplateNpcIsNotThere() throws Exception {
+        MapLogic logic = runAnimated(entity("npc_cscanner", "targetname", "scanner", "spawnflags", "67584"));
+        assertTrue(logic.entity(1).removed);
     }
 
     /**

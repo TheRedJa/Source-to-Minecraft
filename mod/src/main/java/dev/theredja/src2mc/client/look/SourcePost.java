@@ -47,7 +47,7 @@ public final class SourcePost {
     /** N_LUMINANCE_RANGES_NEW: sixteen ranges and the pixel-count bucket. */
     private static final int BUCKETS = 17;
 
-    // ---- Toggles and counters for /src2mc_look.
+    // ---- Toggles and counters for /src2mcc look.
 
     static boolean enabled = true, bloomOn = true, exposureOn = true, correctionOn = true, vignetteOn = true, grainOn = true;
     /** Film grain scale override for A/B; -1 uses the map's own. */
@@ -87,7 +87,7 @@ public final class SourcePost {
     /** The scale the map is drawn at this frame. */
     public static float scale() { return current; }
 
-    /** One line on the tone map and bloom, for {@code /src2mc_look status}. */
+    /** One line on the tone map and bloom, for {@code /src2mcc status look}. */
     static String status() {
         StringBuilder histogram = new StringBuilder();
         int total = 0;

@@ -614,7 +614,7 @@ pub fn from_conversion(
     crate::timing::mark("export: prop roots and diagnostics");
     let models: Vec<ModelAsset> = model_by_path
         .into_iter()
-        .map(|((source_model, _, color, _), built)| ModelAsset {
+        .map(|((source_model, _, color, _, _), built)| ModelAsset {
             source_model,
             bytes: built.bytes,
             materials: built.slots,

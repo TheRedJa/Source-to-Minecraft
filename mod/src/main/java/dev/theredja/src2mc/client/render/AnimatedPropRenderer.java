@@ -57,7 +57,7 @@ import org.joml.Vector3f;
  * bones pull, are skinned on the CPU, as the studio renderer skins them, each time the pose
  * changes, and uploaded again. Vertices keep model-space normals; the draw turns vanilla's two
  * shading lights back by each buffer's rotation instead, as {@link MoverRenderer} does.
- * {@code /src2mc_anim} shows counts and switches drawing off for comparison.
+ * {@code /src2mcc draw anim} shows counts and switches drawing off for comparison.
  */
 @EventBusSubscriber(modid = Src2mc.MOD_ID, value = Dist.CLIENT)
 public final class AnimatedPropRenderer {
@@ -179,7 +179,7 @@ public final class AnimatedPropRenderer {
     private static final Vector3f NETHER_LIGHT_1 = new Vector3f(-0.2F, -1.0F, 0.7F).normalize();
     private static long frame, generationSequence = -1;
     private static boolean enabled = true;
-    private static long drawnLast, builds, reskins, reskinNanosLast, posesLast, lights, lightNanosMax, buildNanosMax;
+    private static long drawnLast, builds, reskins, reskinNanosLast, reskinNanosMax, posesLast, lights, lightNanosMax, buildNanosMax;
 
     /** Whether a logic prop is drawn here rather than by {@link LogicPropRenderer} or its mover. */
     static boolean animated(BundleMap map, LogicPropTable.Prop prop, PropStates.State state) {
@@ -190,23 +190,18 @@ public final class AnimatedPropRenderer {
         return "src2mc animated props: " + BUILT.size() + " built, " + posesLast + " posed and " + drawnLast + " buffers drawn last frame; "
             + builds + String.format(java.util.Locale.ROOT, " builds (%.2f ms max), ", buildNanosMax / 1e6) + lights
             + String.format(java.util.Locale.ROOT, " lit (%.2f ms max), ", lightNanosMax / 1e6)
-            + reskins + String.format(java.util.Locale.ROOT, " skinned uploads (%.2f ms last), ", reskinNanosLast / 1e6)
+            + reskins + String.format(java.util.Locale.ROOT, " skinned uploads (%.2f ms last, %.2f ms max), ", reskinNanosLast / 1e6, reskinNanosMax / 1e6)
             + mountsLast + " mounted"
             + (enabled ? "" : " (drawing off)");
     }
 
-    @SubscribeEvent
-    public static void registerCommand(net.neoforged.neoforge.client.event.RegisterClientCommandsEvent event) {
-        event.getDispatcher().register(net.minecraft.commands.Commands.literal("src2mc_anim")
-            .then(net.minecraft.commands.Commands.literal("status").executes(context -> reply(context.getSource(), status())))
-            .then(net.minecraft.commands.Commands.literal("draw")
-                .then(net.minecraft.commands.Commands.literal("on").executes(context -> { enabled = true; return reply(context.getSource(), status()); }))
-                .then(net.minecraft.commands.Commands.literal("off").executes(context -> { enabled = false; return reply(context.getSource(), status()); }))));
-    }
+    public static void setEnabled(boolean value) { enabled = value; }
 
-    private static int reply(net.minecraft.commands.CommandSourceStack source, String text) {
-        source.sendSuccess(() -> net.minecraft.network.chat.Component.literal(text), false);
-        return 1;
+    /** One line for {@code /src2mcc status}. */
+    public static String summaryLine() {
+        return "animated props " + (enabled ? "on" : "off") + ": " + BUILT.size() + " built, " + posesLast + " posed, " + drawnLast + " buffers drawn; "
+            + String.format(java.util.Locale.ROOT, "reskin %.2f ms last, %.2f ms max; builds %.2f ms max, lighting %.2f ms max",
+                reskinNanosLast / 1e6, reskinNanosMax / 1e6, buildNanosMax / 1e6, lightNanosMax / 1e6);
     }
 
     @SubscribeEvent
@@ -684,6 +679,7 @@ public final class AnimatedPropRenderer {
             built.buffers.put(entry.getKey(), part.vertices.upload(MapSurfaceRenderer.neutralEntityId(), false).buffer());
         }
         reskinNanosLast = System.nanoTime() - started;
+        reskinNanosMax = Math.max(reskinNanosMax, reskinNanosLast);
     }
 
     /**
@@ -974,6 +970,7 @@ public final class AnimatedPropRenderer {
         VertexBuffer.unbind();
         RenderSystem.setShaderLights(LIGHT_0, netherLighting ? NETHER_LIGHT_1 : LIGHT_1);
         if (!shadowPass && !translucent) drawnLast = drawn;
+        if (dev.theredja.src2mc.client.view.SecondaryView.active() && !translucent) dev.theredja.src2mc.client.view.SecondaryView.Counts.animatedBuffers += (int) drawn;
     }
 
     /** A row-major 3x4 skinning transform as a 4x4 matrix. */

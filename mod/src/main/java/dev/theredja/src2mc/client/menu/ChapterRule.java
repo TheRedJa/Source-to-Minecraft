@@ -5,7 +5,7 @@ package dev.theredja.src2mc.client.menu;
  * Which chapters the chapters screen shows, and the number of unlocked chapters per campaign that decides it.
  * INFRA keeps that number in the server cvar {@code sv_unlockedchapters} (default 1); here it is a client value
  * kept with the rest of the campaign's progress ({@link CampaignProgress}) in {@code config/src2mc/menu.properties}, raised when the player arrives in a map of a later chapter ({@link MenuActions#recordArrival}) and
- * settable with {@code /src2mc_menu chapters <n>}.
+ * settable with {@code /src2mcc menu chapters <n>}.
  */
 public final class ChapterRule {
     private ChapterRule() {}

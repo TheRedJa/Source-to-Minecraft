@@ -15,7 +15,7 @@ class AnimationAssetTest {
      */
     private static byte[] twoBones(int vertexBone) {
         ByteBuffer out = ByteBuffer.allocate(1024).order(ByteOrder.LITTLE_ENDIAN);
-        out.put(new byte[] {'S', '2', 'A', 'N', 'I', 'M', 0, 0}).putInt(1).putInt(2).putInt(1).putInt(1).putInt(0);
+        out.put(new byte[] {'S', '2', 'A', 'N', 'I', 'M', 0, 0}).putInt(2).putInt(2).putInt(1).putInt(1).putInt(0);
         // Bone 0 at the origin; bone 1 a block up; binds undo their rest places.
         out.putInt(-1).putFloat(0).putFloat(0).putFloat(0).putShort((short) 0).putShort((short) 0).putShort((short) 0).putShort((short) 32767);
         for (float v : new float[] {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0}) out.putFloat(v);
@@ -24,19 +24,25 @@ class AnimationAssetTest {
         out.put((byte) 1).put((byte) vertexBone).put((byte) 0).put((byte) 0).putFloat(1).putFloat(0).putFloat(0);
         byte[] name = "turn".getBytes(java.nio.charset.StandardCharsets.UTF_8);
         out.putShort((short) name.length).put(name).putShort((short) 0);
-        out.putInt(1).putInt(0).putFloat(0.2f).putFloat(0.2f).putInt(0).putInt(0).putInt(0).putFloat(1).putFloat(1).putFloat(1).putInt(2);
+        out.putInt(1).putInt(0).putFloat(0.2f).putFloat(0.2f).putInt(0).putInt(0).putInt(0).putFloat(1).putInt(2).putFloat(1).putFloat(1);
         // Bone 0: still position, turning rotation; bone 1: still at a block up.
         out.put((byte) 0).put((byte) 1).putFloat(0).putFloat(0).putFloat(0);
         out.putShort((short) 0).putShort((short) 0).putShort((short) 0).putShort((short) 32767);
         out.putShort((short) 0).putShort((short) 23170).putShort((short) 0).putShort((short) 23170);
         out.put((byte) 0).put((byte) 0).putFloat(0).putFloat(1).putFloat(0);
         out.putShort((short) 0).putShort((short) 0).putShort((short) 0).putShort((short) 32767);
+        // One attachment on bone 1, a block further up.
+        byte[] hand = "hand".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        out.putInt(1).putShort((short) hand.length).put(hand).putInt(0).putInt(1);
+        for (float v : new float[] {1, 0, 0, 0, 0, 1, 0, 1, 0, 0, 1, 0}) out.putFloat(v);
         return Arrays.copyOf(out.array(), out.position());
     }
 
     @Test void bonesComposeThroughTheirParentsAndFramesBlend() throws Exception {
         AnimationAsset asset = AnimationAsset.decode(twoBones(1), 1);
         assertEquals(0, asset.label("TURN"));
+        assertEquals(0, asset.attachment("HAND"));
+        assertEquals(1, asset.attachments().get(0).bone());
         float[] positions = new float[6], rotations = new float[8], skin = new float[24];
         asset.localPose(0, 0, positions, rotations);
         asset.skinning(positions, rotations, skin);

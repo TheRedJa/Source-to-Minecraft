@@ -138,7 +138,12 @@ pub fn extract(map: &crate::bsp::Map) -> Vec<Prop> {
 /// model, and enumerating classnames would only miss the mod-specific ones
 /// Entropy: Zero adds. Brush entities name their model as `*12` and are
 /// handled elsewhere, so they fall out here for want of a `.mdl`.
-pub fn extract_entities(bsp: &vbsp::Bsp) -> Vec<Prop> {
+///
+/// An actor (an NPC, [`crate::bsp::npcs`]) wears the model its class chooses,
+/// often not its key, and is not solid as its model: Source collides it as
+/// its hull.
+pub fn extract_entities(bsp: &vbsp::Bsp, map_name: &str) -> Vec<Prop> {
+    let mut actors = crate::bsp::npcs::Actors::new(map_name);
     bsp.entities
         .iter()
         .enumerate()
@@ -152,8 +157,12 @@ pub fn extract_entities(bsp: &vbsp::Bsp) -> Vec<Prop> {
             let mut solid = SOLID_VPHYSICS;
             let mut skin = 0;
             let mut color = [255; 3];
+            let mut spawnflags = 0i64;
+            let mut citizentype = 0i64;
             for (key, value) in raw.properties() {
                 match key {
+                    "spawnflags" => spawnflags = crate::bsp::logic_props::atoi_text(value),
+                    "citizentype" => citizentype = crate::bsp::logic_props::atoi_text(value),
                     "model" => model = Some(value.to_string()),
                     "classname" => classname = value.to_string(),
                     "origin" => origin = triple(value),
@@ -169,6 +178,10 @@ pub fn extract_entities(bsp: &vbsp::Bsp) -> Vec<Prop> {
                 }
             }
 
+            if crate::bsp::npcs::is_actor(&classname) {
+                model = Some(actors.model(&classname, model.as_deref(), spawnflags, citizentype)?);
+                solid = SOLID_NONE;
+            }
             let model = model?.replace('\\', "/").to_ascii_lowercase();
             if !model.ends_with(".mdl") {
                 return None;

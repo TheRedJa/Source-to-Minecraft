@@ -221,6 +221,88 @@ final class BundleValidatorTest {
         }
     }
 
+    /**
+     * {@code camera} (a {@code _rt_Camera} material) is read into the material, its {@code texture2} decoded as a
+     * detail image; malformed records and a version 2 map are rejected.
+     */
+    @Test
+    void readsCameraMaterialsAndRejectsMalformedOnes() throws Exception {
+        byte[] surfaces = surfaces(fragment((2 << 8) | (3 << 4) | 4, OWNED, 0, 0, 0, 7, 1, 0, 0, 0, 4096, 0, 0, 4096, 2048, 0));
+        java.awt.image.BufferedImage image = new java.awt.image.BufferedImage(4, 2, java.awt.image.BufferedImage.TYPE_INT_ARGB);
+        image.setRGB(1, 1, 0xFF336699);
+        var png = new java.io.ByteArrayOutputStream();
+        javax.imageio.ImageIO.write(image, "png", png);
+        byte[] pngBytes = png.toByteArray();
+        String id = sha256(pngBytes);
+        String twoTexture = "\"shader\":\"unlit_two_texture\",\"size\":[256,256],\"additive\":true,\"color\":[1.0,1.0,1.0],"
+            + "\"color2\":[2.5,2.5,2.5],\"sines\":[{\"channel\":0,\"period\":0.1,\"min\":0.4,\"max\":0.41,\"offset\":0.0}],"
+            + "\"texture2\":\"" + id + "\",\"transform\":{\"scale\":1.0,\"offset\":[0.0,0.25],\"velocity\":[0.0,-0.06]}";
+        String monitor = "\"shader\":\"monitor_screen\",\"size\":[256,128],\"color\":[1.0,1.0,1.0],\"color2\":[1.0,1.0,1.0],"
+            + "\"contrast\":0.0,\"saturation\":0.0,\"tint\":[0.8,0.9,1.0]";
+        Map<String, String> cases = new java.util.LinkedHashMap<>();
+        cases.put("ok", twoTexture);
+        cases.put("monitor", monitor);
+        cases.put("monitor-without-tint", monitor.replace(",\"tint\":[0.8,0.9,1.0]", ""));
+        cases.put("tint-on-two-texture", twoTexture + ",\"contrast\":0.0,\"saturation\":1.0,\"tint\":[1.0,1.0,1.0]");
+        cases.put("false-additive", twoTexture.replace("\"additive\":true", "\"additive\":false"));
+        cases.put("zero-period", twoTexture.replace("\"period\":0.1", "\"period\":0.0"));
+        cases.put("channel-3", twoTexture.replace("\"channel\":0", "\"channel\":3"));
+        cases.put("unsorted-sines", twoTexture.replace("\"sines\":[", "\"sines\":[{\"channel\":2,\"period\":1.0,\"min\":0.0,\"max\":1.0,\"offset\":0.0},"));
+        cases.put("generic-with-texture2", twoTexture.replace("unlit_two_texture", "unlit_generic"));
+        cases.put("unordered", twoTexture.replace("\"color\":[1.0,1.0,1.0],\"color2\":[2.5,2.5,2.5]", "\"color2\":[2.5,2.5,2.5],\"color\":[1.0,1.0,1.0]"));
+        cases.put("bad-shader", twoTexture.replace("unlit_two_texture", "lightmapped_generic"));
+        cases.put("zero-size", twoTexture.replace("[256,256]", "[0,256]"));
+        for (Map.Entry<String, String> entry : cases.entrySet()) {
+            Map<String, byte[]> payloads = fragmentPayloads(surfaces);
+            payloads.put("maps/d1_01.json", new String(payloads.get("maps/d1_01.json"), StandardCharsets.UTF_8)
+                .replace("\"reflectivity\":[0.5,0.5,0.5]}", "\"reflectivity\":[0.5,0.5,0.5],\"camera\":{" + entry.getValue() + "}}")
+                .getBytes(StandardCharsets.UTF_8));
+            if (entry.getValue().contains(id)) payloads.put("details/" + id + ".png", pngBytes);
+            Path bundle = directory.resolve("camera-" + entry.getKey() + ".src2mc");
+            writeBundle(bundle, 1, "hl2", payloads);
+            if (entry.getKey().equals("ok")) {
+                BundleMap map = new BundleValidator().validate(bundle).maps().getFirst();
+                BundleMaterial.Camera camera = map.materials().getFirst().camera();
+                assertEquals(BundleMaterial.CameraShader.UNLIT_TWO_TEXTURE, camera.shader());
+                assertEquals(256, camera.sizeS());
+                org.junit.jupiter.api.Assertions.assertTrue(camera.additive());
+                assertEquals(id, camera.texture2());
+                assertEquals(-0.06F, camera.transform().velocityT());
+                assertEquals(0.25F, camera.transform().offsetT());
+                org.junit.jupiter.api.Assertions.assertNull(camera.sines()[1]);
+                // Sine at t = 0 is its middle; channel 0 times color2.
+                assertEquals((0.4F + 0.005F) * 2.5F, camera.modulation(0)[0], 1e-6F);
+                assertEquals(2.5F, camera.modulation(0)[1], 1e-6F);
+                assertEquals(4, map.details().images().get(id).width());
+            } else if (entry.getKey().equals("monitor")) {
+                BundleMaterial.Camera camera = new BundleValidator().validate(bundle).maps().getFirst().materials().getFirst().camera();
+                assertEquals(BundleMaterial.CameraShader.MONITOR_SCREEN, camera.shader());
+                assertEquals(128, camera.sizeT());
+                assertEquals(0.9F, camera.tint()[1]);
+                org.junit.jupiter.api.Assertions.assertNull(camera.texture2());
+            } else if (entry.getKey().equals("zero-size")) {
+                assertCode(BundleErrorCode.LIMIT_EXCEEDED, bundle);
+            } else {
+                assertCode(BundleErrorCode.INVALID_SCHEMA, bundle);
+            }
+        }
+        // The camera's second texture must be in the bundle.
+        Map<String, byte[]> missing = fragmentPayloads(surfaces);
+        missing.put("maps/d1_01.json", new String(missing.get("maps/d1_01.json"), StandardCharsets.UTF_8)
+            .replace("\"reflectivity\":[0.5,0.5,0.5]}", "\"reflectivity\":[0.5,0.5,0.5],\"camera\":{" + twoTexture + "}}")
+            .getBytes(StandardCharsets.UTF_8));
+        Path missingBundle = directory.resolve("camera-missing-texture2.src2mc");
+        writeBundle(missingBundle, 1, "hl2", missing);
+        assertThrows(BundleValidationException.class, () -> new BundleValidator().validate(missingBundle));
+        // A version 2 map could not carry it and is rejected.
+        Map<String, byte[]> old = fragmentPayloads(surfaces);
+        old.put("maps/d1_01.json", new String(old.get("maps/d1_01.json"), StandardCharsets.UTF_8)
+            .replace("\"version\":3", "\"version\":2").getBytes(StandardCharsets.UTF_8));
+        Path oldBundle = directory.resolve("camera-map-v2.src2mc");
+        writeBundle(oldBundle, 1, "hl2", old);
+        assertCode(BundleErrorCode.UNSUPPORTED_VERSION, oldBundle);
+    }
+
     @Test
     void rejectsMalformedSurfaceFragments() throws Exception {
         int[] triangle = {0, 0, 0, 4096, 0, 0, 4096, 4096, 0};
@@ -405,7 +487,7 @@ final class BundleValidatorTest {
         Map<String, byte[]> payloads = new TreeMap<>();
         payloads.put("campaign.json", ("{\"format\":\"src2mc-campaign-metadata\",\"version\":1,\"campaign_id\":\"hl2\","
             + "\"maps\":[{\"map_id\":\"d1_01\",\"metadata\":\"maps/d1_01.json\"}]}\n").getBytes(StandardCharsets.UTF_8));
-        payloads.put("maps/d1_01.json", ("{\"format\":\"src2mc-map\",\"version\":2,\"map_id\":\"d1_01\",\"source_name\":\"d1_01\","
+        payloads.put("maps/d1_01.json", ("{\"format\":\"src2mc-map\",\"version\":3,\"map_id\":\"d1_01\",\"source_name\":\"d1_01\","
             + "\"units_per_block\":32.0,\"cell_min\":[0,0,0],\"cell_max\":[0,0,0],\"anchor_cell\":[0,0,0],"
             + "\"surfaces\":\"maps/d1_01/surfaces.s2faces\",\"materials\":[],\"models\":[],"
             + "\"props\":\"maps/d1_01/props.s2props\",\"diagnostics\":\"maps/d1_01/diagnostics.json\"}\n").getBytes(StandardCharsets.UTF_8));

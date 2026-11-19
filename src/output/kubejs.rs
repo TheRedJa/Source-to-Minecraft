@@ -705,6 +705,7 @@ mod tests {
             detail: None,
             selfillum: None,
             phong: None,
+            camera: None,
             base_texture: "x/y".into(),
             alpha_test,
             translucent,

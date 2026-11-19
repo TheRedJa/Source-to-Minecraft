@@ -51,15 +51,15 @@ public final class PropLights {
     /** Selections handed to the worker per frame, over all moving props. */
     private static final int SUBMITS_PER_FRAME = 8;
 
-    /** {@code /src2mc_look phong|rimlight|proplights off}: read per draw by the shader. */
+    /** {@code /src2mcc light phong|rimlight|proplights off}: read per draw by the shader. */
     public static volatile boolean phongOn = true, rimOn = true, propLightsOn = true;
-    /** {@code /src2mc_look lightatten vertex|pixel}: phong light attenuation per vertex (Source) or per pixel. */
+    /** {@code /src2mcc light atten vertex|pixel}: phong light attenuation per vertex (Source) or per pixel. */
     public static volatile boolean lightAttenVertex = true;
-    /** {@code /src2mc_look phongdebug}: 0 off, 1 diffuse, 2 spec + rim, 3 local-light diffuse only. */
+    /** {@code /src2mcc debug phong}: 0 off, 1 diffuse, 2 spec + rim, 3 local-light diffuse only. */
     public static volatile int phongDebug = 0;
-    /** {@code /src2mc_look sun on|off}: the skylight counts in prop lighting; see {@link #setSunOn}. */
+    /** {@code /src2mcc light sun on|off}: the skylight counts in prop lighting; see {@link #setSunOn}. */
     private static volatile boolean sunOn = true;
-    /** {@code /src2mc_look lightvis on|off}: lights behind walls are culled by the sun visibility file's lists; see {@link #setLightVisOn}. */
+    /** {@code /src2mcc light lightvis on|off}: lights behind walls are culled by the sun visibility file's lists; see {@link #setLightVisOn}. */
     private static volatile boolean lightVisOn = true;
     /** Bumped when the sun or lightvis switch flips, so moving props select again. */
     private static volatile int generation;
@@ -229,7 +229,7 @@ public final class PropLights {
     }
 
     /**
-     * {@code /src2mc_look sun on|off}: whether the skylight lights props at all. The static light
+     * {@code /src2mcc light sun on|off}: whether the skylight lights props at all. The static light
      * sets are selected again in place (props built with a cube taken from one keep it until they
      * rebuild), and moving props select again.
      */
@@ -239,7 +239,7 @@ public final class PropLights {
     }
 
     /**
-     * {@code /src2mc_look lightvis on|off}: whether lights the visibility lists hide from a prop
+     * {@code /src2mcc light lightvis on|off}: whether lights the visibility lists hide from a prop
      * (behind a wall) are left out of its light set and cube. Refreshes like {@link #setSunOn}.
      */
     public static void setLightVisOn(boolean on) {

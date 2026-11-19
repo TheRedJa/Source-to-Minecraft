@@ -308,7 +308,7 @@ pub fn write_campaign(
         let metadata_path = format!("maps/{}.json", map.map_id);
         let meta = metadata::MapMetadata {
             format: "src2mc-map",
-            version: 2,
+            version: 3,
             map_id: map.map_id.clone(),
             source_name: map.source_name,
             units_per_block: UNITS_PER_BLOCK,
